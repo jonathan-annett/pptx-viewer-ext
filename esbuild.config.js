@@ -14,42 +14,60 @@ const { execSync } = require('node:child_process');
 
 const watch = process.argv.includes('--watch');
 
-// Plugin: after every (re)build, write dist/build-info.json with a fresh
-// timestamp + git SHA. The extension reads it at activation and logs both,
-// so the user can confirm at a glance that a push has been picked up and
-// that the browser isn't serving a cached older bundle.
+// The source contains this literal string; the plugin's onEnd hook rewrites
+// it in the output bundle with a fresh JSON payload after every (re)build.
+const PLACEHOLDER = '__PPTX_BUILD_INFO_PLACEHOLDER__';
+
+function currentBuildInfo() {
+  let sha = 'unknown';
+  try {
+    sha = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    // leave as 'unknown'
+  }
+  return { buildTime: new Date().toISOString(), gitSha: sha };
+}
+
+// Plugin: post-process the emitted bundle to swap the placeholder string for
+// the current build's metadata.
 //
-// Notes:
-// - onEnd runs on every successful build, including watch-mode rebuilds,
-//   so the timestamp stays accurate across incremental rebuilds. Using
-//   define/banner instead would freeze the value at context creation.
-// - git rev-parse is best-effort; if it fails (e.g. detached state, no git)
-//   we record "unknown" rather than blowing up the build.
+// Why post-process instead of esbuild's `define`: esbuild caches `define`
+// values at context creation. Mutating them in onStart has no effect on
+// watch-mode rebuilds — the substitution is frozen at watcher start. Reading
+// the output file and rewriting in onEnd dodges this entirely. The rewrite
+// targets dist/, which isn't watched, so there's no feedback loop.
+//
+// The placeholder is a unique constant; we replace only the first occurrence
+// so source-map line counts aren't disturbed.
 const buildInfoPlugin = {
   name: 'build-info',
   setup(build) {
     build.onEnd((result) => {
       if (result.errors.length > 0) return;
-      let sha = 'unknown';
-      try {
-        sha = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
-          .toString()
-          .trim();
-      } catch {
-        // leave as 'unknown'
-      }
-      const info = { buildTime: new Date().toISOString(), gitSha: sha };
-      const out = path.join(__dirname, 'dist', 'build-info.json');
-      fs.mkdirSync(path.dirname(out), { recursive: true });
-      fs.writeFileSync(out, JSON.stringify(info));
+      const outfile = build.initialOptions.outfile;
+      if (!outfile || !fs.existsSync(outfile)) return;
+      const original = fs.readFileSync(outfile, 'utf8');
+      const payload = JSON.stringify(currentBuildInfo());
+      // The placeholder appears inside a string literal in extension.ts, so
+      // replacing it with the JSON text yields a still-valid string literal.
+      const updated = original.replace(PLACEHOLDER, escapeForJsString(payload));
+      if (updated !== original) fs.writeFileSync(outfile, updated);
     });
   },
 };
 
+// JSON-encoded text can contain " and \ characters that need re-escaping
+// for the JS string literal context they're being substituted into.
+function escapeForJsString(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 const buildOptions = {
   entryPoints: ['src/extension.ts'],
   bundle: true,
-  outfile: 'dist/extension.js',
+  outfile: path.join(__dirname, 'dist', 'extension.js'),
   platform: 'browser',
   target: 'es2022',
   format: 'cjs',
