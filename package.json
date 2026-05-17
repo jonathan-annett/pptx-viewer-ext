@@ -2,7 +2,7 @@
   "name": "pptx-viewer",
   "displayName": "Pptx Info",
   "description": "Read-only pptx metadata and validation viewer for vscode.dev",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -28,6 +28,8 @@
   },
   "scripts": {
     "bundle": "node esbuild.config.js",
+    "compile-web": "node esbuild.config.js",
+    "watch-web": "node esbuild.config.js --watch",
     "watch": "node esbuild.config.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
