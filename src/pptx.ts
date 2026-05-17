@@ -383,7 +383,7 @@ function extractThumbnail(entries: Record<string, Uint8Array>): Thumbnail | unde
   return undefined;
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   // Chunked to keep String.fromCharCode argument list bounded — large
   // thumbnails would otherwise blow the call-stack limit on .apply.
   let binary = '';

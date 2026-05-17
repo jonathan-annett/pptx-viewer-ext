@@ -124,9 +124,20 @@ function formatMedia(media: MediaEntry[]): string {
 }
 
 // Webview-side download flow:
-//   click  → postMessage({type:'download'}) to extension
-//   extension reads bytes from disk and posts {type:'bytes', payload: Uint8Array}
-//   webview wraps in a Blob, clicks a hidden <a download>, browser handles save dialog
+//   click   → postMessage({type:'download'}) to extension
+//   extension reads bytes, base64-encodes, posts {type:'bytes', base64, byteLength}
+//   webview decodes base64 → Uint8Array → Blob → <a download> click
+//   browser handles save dialog
+//
+// Why base64 instead of sending the Uint8Array directly: VS Code's web webview
+// postMessage path doesn't reliably preserve typed arrays — they can arrive on
+// the other side as a plain {0:byte,1:byte,...} object, which makes
+// `new Blob([payload])` produce "[object Object]" garbage. Base64 string is
+// JSON-clean and survives any serialization layer.
+//
+// Every step posts a 'download-log' message back to the extension so the
+// progress shows up in the Pptx Info output channel — easier than asking the
+// user to open DevTools.
 //
 // The script is inlined as a string (not a separate file) so the bundle stays
 // single-file — there's no asset-URL plumbing in this extension. The nonce in
@@ -139,27 +150,62 @@ function downloadScript(fileName: string): string {
   const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   const btn = document.getElementById('download-btn');
   const status = document.getElementById('download-status');
+
+  function dlog(msg){
+    try { vscode.postMessage({type:'download-log', message: msg}); } catch (_) {}
+  }
+  window.addEventListener('error', function(ev){
+    dlog('window error: ' + (ev.message || ev.error || 'unknown'));
+  });
+
   btn.addEventListener('click', function(){
     btn.disabled = true;
     status.textContent = 'Preparing…';
+    dlog('click → requesting bytes');
     vscode.postMessage({type:'download'});
   });
+
+  function base64ToBytes(b64){
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
   window.addEventListener('message', function(e){
     const m = e.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'bytes' && m.payload) {
-      const blob = new Blob([m.payload], {type: PPTX_MIME});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
-      status.textContent = '';
-      btn.disabled = false;
+    if (m.type === 'bytes') {
+      try {
+        if (typeof m.base64 !== 'string') {
+          dlog('bytes message missing base64 string (typeof=' + (typeof m.base64) + ')');
+          status.textContent = 'Download failed: malformed payload';
+          btn.disabled = false;
+          return;
+        }
+        dlog('received base64 (' + m.base64.length + ' chars, expecting ' + m.byteLength + ' bytes)');
+        const bytes = base64ToBytes(m.base64);
+        dlog('decoded ' + bytes.byteLength + ' bytes');
+        const blob = new Blob([bytes], {type: PPTX_MIME});
+        dlog('created blob, size=' + blob.size + ' type=' + blob.type);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+        dlog('anchor.click() dispatched');
+        status.textContent = '';
+        btn.disabled = false;
+      } catch (err) {
+        dlog('download exception: ' + (err && err.message ? err.message : String(err)));
+        status.textContent = 'Download failed: ' + (err && err.message ? err.message : 'see Pptx Info');
+        btn.disabled = false;
+      }
     } else if (m.type === 'download-error') {
+      dlog('extension error: ' + (m.message || 'unknown'));
       status.textContent = 'Download failed: ' + (m.message || 'unknown');
       btn.disabled = false;
     }

@@ -5,7 +5,7 @@
 //   resolveCustomEditor -> read bytes via vscode.workspace.fs, parse, render HTML
 
 import * as vscode from 'vscode';
-import { parsePptx } from './pptx';
+import { parsePptx, bytesToBase64 } from './pptx';
 import { renderHtml, renderError } from './webview';
 import { log } from './log';
 
@@ -47,17 +47,35 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
 
-    // Handle download requests from the webview. We re-read the bytes on demand
-    // rather than holding them in memory after parse — pptx files can be large,
-    // and most viewer opens never click download.
+    // Handle messages from the webview. We re-read the bytes on demand rather
+    // than holding them in memory after parse — pptx files can be large, and
+    // most viewer opens never click download.
+    //
+    // Bytes are sent as a base64 string rather than a Uint8Array because
+    // VS Code's web webview postMessage path doesn't reliably preserve typed
+    // arrays — they can arrive as a plain {0:byte,1:byte,...} object, which
+    // makes `new Blob([payload])` produce garbage. Base64 is JSON-clean and
+    // the ~33% size overhead is acceptable for a click-driven download.
+    //
+    // The 'download-log' channel surfaces webview-side diagnostic events in
+    // the Pptx Info output so we can debug without needing DevTools.
     webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
       if (!msg || typeof msg !== 'object') return;
-      const m = msg as { type?: unknown };
+      const m = msg as { type?: unknown; message?: unknown };
+      if (m.type === 'download-log') {
+        if (typeof m.message === 'string') log(`download[webview]: ${m.message}`);
+        return;
+      }
       if (m.type !== 'download') return;
       try {
         const fresh = await vscode.workspace.fs.readFile(document.uri);
-        log(`download: ${fileName} (${fresh.byteLength} bytes)`);
-        webviewPanel.webview.postMessage({ type: 'bytes', payload: fresh });
+        const base64 = bytesToBase64(fresh);
+        log(`download: ${fileName} (${fresh.byteLength} bytes → ${base64.length} b64 chars)`);
+        webviewPanel.webview.postMessage({
+          type: 'bytes',
+          base64,
+          byteLength: fresh.byteLength,
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         log(`download ERROR ${fileName}: ${message}`);
