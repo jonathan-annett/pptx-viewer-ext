@@ -60,9 +60,13 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         result.flags.showType.ok,
         result.flags.showMediaControls.ok,
       ].filter((ok) => !ok).length;
+      const thumbDesc = result.thumbnail
+        ? `${result.thumbnail.mime} ${result.thumbnail.dataUrl.length} chars`
+        : 'none';
       log(
         `parsed: ${fileName} — ${result.size} bytes, ${result.slideCount} slides ` +
-          `(${result.hiddenSlideCount} hidden), ${warnCount} warning(s)` +
+          `(${result.hiddenSlideCount} hidden), ${warnCount} warning(s), ` +
+          `thumbnail: ${thumbDesc}` +
           (result.parseError ? `, parseError: ${result.parseError}` : ''),
       );
       webviewPanel.webview.html = renderHtml(result);
