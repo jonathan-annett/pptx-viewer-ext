@@ -123,28 +123,21 @@ function formatMedia(media: MediaEntry[]): string {
   return media.map((m) => `${m.mime} × ${m.count}`).join(', ');
 }
 
-// Webview-side download flow:
-//   on load   → extension posts {type:'preload', base64, byteLength}; we stash it
-//   on click  → decode base64 → Blob → <a download>.click(), all SYNCHRONOUSLY
+// Save button flow:
+//   click → postMessage({type:'save-as'}) to extension
+//   extension shows VS Code's save dialog, writes bytes to chosen URI
+//   extension posts {type:'save-as-result', status:'ok'|'cancelled'|'error', ...}
+//   webview updates the status text
 //
-// Why synchronous: browsers require a live user-activation token for the
-// programmatic anchor click that triggers a file save. If we did an async
-// round-trip (postMessage → readFile → postMessage → click), activation would
-// have expired by the time click fires, and the download is silently dropped
-// with no exception. Pre-loading the bytes lets the click handler run end-to-
-// end without yielding, keeping activation alive through to a.click().
-//
-// Base64 over Uint8Array: VS Code's web webview postMessage path doesn't
-// reliably preserve typed arrays — they can arrive as a plain object with
-// numeric keys. Base64 string is JSON-clean and survives any serialization.
-//
-// 'download-log' surfaces webview-side progress in the Pptx Info output
-// channel so we can debug without DevTools.
-function downloadScript(fileName: string): string {
+// We don't do a browser-native blob download from inside the webview —
+// vscode.dev's web-webview iframe silently drops anchor-driven downloads
+// (sandbox/cross-origin policy), even with a live user-activation token.
+// Routing through the extension host bypasses the iframe restriction
+// entirely; the save dialog is VS Code's, and on vscode.dev with a folder
+// mounted via the File System Access API it writes to actual local disk.
+function downloadScript(_fileName: string): string {
   return `(function(){
   const vscode = acquireVsCodeApi();
-  const fileName = ${JSON.stringify(fileName)};
-  const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   const btn = document.getElementById('download-btn');
   const status = document.getElementById('download-status');
 
@@ -155,60 +148,27 @@ function downloadScript(fileName: string): string {
     dlog('window error: ' + (ev.message || ev.error || 'unknown'));
   });
 
-  let preloadedB64 = null;
-  let preloadedLen = 0;
-
-  // Button starts disabled until bytes arrive — clicking before preload would
-  // either need a slow path or a confusing "not ready" state.
-  btn.disabled = true;
-  status.textContent = 'Loading…';
-
-  function base64ToBytes(b64){
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    status.textContent = 'Saving…';
+    dlog('click → save-as');
+    vscode.postMessage({type: 'save-as'});
+  });
 
   window.addEventListener('message', function(e){
     const m = e.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'preload' && typeof m.base64 === 'string') {
-      preloadedB64 = m.base64;
-      preloadedLen = m.byteLength || 0;
-      btn.disabled = false;
+    if (m.type !== 'save-as-result') return;
+    btn.disabled = false;
+    if (m.status === 'ok') {
+      status.textContent = 'Saved.';
+      dlog('saved to ' + (m.target || '(unknown)'));
+    } else if (m.status === 'cancelled') {
       status.textContent = '';
-      dlog('preload received (' + m.base64.length + ' b64 chars, ' + preloadedLen + ' bytes)');
-    }
-  });
-
-  btn.addEventListener('click', function(){
-    if (!preloadedB64) {
-      status.textContent = 'Still loading…';
-      dlog('click but no preload yet');
-      return;
-    }
-    try {
-      // Everything in this handler is synchronous so the user-activation
-      // token is still live when a.click() fires. Don't introduce awaits
-      // or setTimeouts before the click.
-      dlog('click → decoding ' + preloadedLen + ' bytes');
-      const bytes = base64ToBytes(preloadedB64);
-      const blob = new Blob([bytes], {type: PPTX_MIME});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Revoke the object URL on a later tick so the browser has a chance to
-      // start the download. (Revoking immediately can race the download.)
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
-      dlog('anchor.click() dispatched, blob size=' + blob.size);
-    } catch (err) {
-      dlog('download exception: ' + (err && err.message ? err.message : String(err)));
-      status.textContent = 'Download failed: ' + (err && err.message ? err.message : 'see Pptx Info');
+      dlog('save cancelled');
+    } else {
+      status.textContent = 'Save failed: ' + (m.message || 'unknown');
+      dlog('save error: ' + (m.message || 'unknown'));
     }
   });
 })();`;

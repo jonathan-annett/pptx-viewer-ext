@@ -5,7 +5,7 @@
 //   resolveCustomEditor -> read bytes via vscode.workspace.fs, parse, render HTML
 
 import * as vscode from 'vscode';
-import { parsePptx, bytesToBase64 } from './pptx';
+import { parsePptx } from './pptx';
 import { renderHtml, renderError } from './webview';
 import { log } from './log';
 
@@ -47,21 +47,45 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
 
-    // The webview only sends us diagnostic log lines now — the download flow
-    // itself runs entirely inside the webview using bytes we pre-load below.
-    //
-    // Why pre-load: browsers gate "save file" anchor clicks on a fresh user-
-    // activation token. The earlier on-demand design ran an async round-trip
-    // (click → postMessage → workspace.fs.readFile → postMessage → blob → click)
-    // and by the time anchor.click() fired, activation had expired and the
-    // browser silently refused the download. We avoid the round-trip by
-    // shipping the bytes to the webview right after render and letting the
-    // click handler do its work synchronously — activation is still live.
-    webviewPanel.webview.onDidReceiveMessage((msg: unknown) => {
+    // Save flow runs through VS Code APIs rather than a browser-native blob
+    // download. The earlier blob + <a download> approach (even with
+    // synchronous click + pre-loaded bytes to preserve user activation) was
+    // silently dropped by the web-webview's sandbox/cross-origin policy on
+    // vscode.dev — anchor.click() returned without exception but no file was
+    // saved. showSaveDialog runs in the extension host, outside any iframe
+    // sandbox, and writeFile uses whatever filesystem provider is registered
+    // (on vscode.dev with an FSA-mounted folder, that's actual local disk).
+    webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
       if (!msg || typeof msg !== 'object') return;
       const m = msg as { type?: unknown; message?: unknown };
       if (m.type === 'download-log' && typeof m.message === 'string') {
         log(`download[webview]: ${m.message}`);
+        return;
+      }
+      if (m.type !== 'save-as') return;
+      try {
+        const target = await vscode.window.showSaveDialog({
+          defaultUri: document.uri,
+          saveLabel: 'Save',
+          filters: { 'PowerPoint': ['pptx'] },
+        });
+        if (!target) {
+          log(`save: ${fileName} cancelled`);
+          webviewPanel.webview.postMessage({ type: 'save-as-result', status: 'cancelled' });
+          return;
+        }
+        const fresh = await vscode.workspace.fs.readFile(document.uri);
+        await vscode.workspace.fs.writeFile(target, fresh);
+        log(`save: ${fileName} → ${target.toString()} (${fresh.byteLength} bytes)`);
+        webviewPanel.webview.postMessage({
+          type: 'save-as-result',
+          status: 'ok',
+          target: target.toString(),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`save ERROR ${fileName}: ${message}`);
+        webviewPanel.webview.postMessage({ type: 'save-as-result', status: 'error', message });
       }
     });
 
@@ -90,19 +114,6 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           (result.parseError ? `, parseError: ${result.parseError}` : ''),
       );
       webviewPanel.webview.html = renderHtml(result, makeNonce());
-
-      // Ship the bytes to the webview so the Download button can build a Blob
-      // synchronously inside the user-activation window. We reuse the bytes
-      // already in memory from the parse step — no second readFile. The base64
-      // encoding is a one-time cost amortised across however many times the
-      // user clicks Download in this panel session.
-      const base64 = bytesToBase64(bytes);
-      log(`download preload: ${fileName} (${bytes.byteLength} bytes → ${base64.length} b64 chars)`);
-      webviewPanel.webview.postMessage({
-        type: 'preload',
-        base64,
-        byteLength: bytes.byteLength,
-      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`ERROR opening ${fileName}: ${message}`);
