@@ -178,6 +178,32 @@ async function testSelfClosingShowPr() {
   console.log('  ok: self-closing showPr');
 }
 
+// ---- Test 5b: Default-by-extension media in Content_Types — count per actual zip part.
+// PowerPoint writes one <Default Extension="mp4" ContentType="video/mp4"/> for any
+// number of mp4 parts. The earlier parser counted ContentType="..." occurrences,
+// reporting "video/mp4 × 1" regardless of part count. Two real mp4 parts → 2.
+async function testDefaultExtensionMedia() {
+  const bytes = makePptx({
+    '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="mp4" ContentType="video/mp4"/>
+      <Default Extension="png" ContentType="image/png"/>
+    </Types>`,
+    'docProps/core.xml': core('A', 'B'),
+    'ppt/presentation.xml': presentation(),
+    'ppt/slides/slide1.xml': slide(),
+    'ppt/media/media1.mp4': new Uint8Array([0, 0, 0, 1]),
+    'ppt/media/media2.mp4': new Uint8Array([0, 0, 0, 2]),
+    'ppt/media/image1.png': new Uint8Array([0, 0, 0, 3]), // image, must not count
+  });
+  const r = await parsePptx(bytes, info);
+  assert.deepEqual(
+    r.embeddedMedia.map((m) => `${m.mime}:${m.count}`),
+    ['video/mp4:2'],
+    'two mp4 parts with one Default entry → video/mp4 × 2',
+  );
+  console.log('  ok: default-extension media counts zip parts');
+}
+
 // ---- Test 6: Internal media rel should NOT trigger linked-media warn ----
 async function testInternalMediaIsFine() {
   const bytes = makePptx({
@@ -259,11 +285,13 @@ async function testRealSamples() {
     file: string;
     showType: 'presenter' | 'browse' | 'kiosk';
     mediaCtrlsOk: boolean;
+    embeddedMedia?: string[]; // ["video/mp4:2", ...] — checked only when provided
   }> = [
     { file: 'Has media controls.pptx', showType: 'presenter', mediaCtrlsOk: false },
     { file: 'No media controls.pptx',  showType: 'presenter', mediaCtrlsOk: true  },
     { file: 'Is kiosk.pptx',           showType: 'kiosk',     mediaCtrlsOk: false },
     { file: 'Is windowed.pptx',        showType: 'browse',    mediaCtrlsOk: false },
+    { file: 'has media.pptx',          showType: 'presenter', mediaCtrlsOk: false, embeddedMedia: ['video/mp4:2'] },
   ];
   for (const c of cases) {
     const path = join(samplesDir, c.file);
@@ -287,7 +315,15 @@ async function testRealSamples() {
       r.flags.showMediaControls.ok, c.mediaCtrlsOk,
       `${c.file}: showMediaControls.ok expected ${c.mediaCtrlsOk}, got ${r.flags.showMediaControls.ok} (detail: ${r.flags.showMediaControls.detail})`,
     );
-    console.log(`  ok: ${c.file} (showType=${c.showType}, mediaCtrlsOk=${c.mediaCtrlsOk})`);
+    if (c.embeddedMedia) {
+      assert.deepEqual(
+        r.embeddedMedia.map((m) => `${m.mime}:${m.count}`),
+        c.embeddedMedia,
+        `${c.file}: embeddedMedia expected ${JSON.stringify(c.embeddedMedia)}, got ${JSON.stringify(r.embeddedMedia)}`,
+      );
+    }
+    const mediaTag = c.embeddedMedia ? `, media=[${c.embeddedMedia.join(',')}]` : '';
+    console.log(`  ok: ${c.file} (showType=${c.showType}, mediaCtrlsOk=${c.mediaCtrlsOk}${mediaTag})`);
   }
 }
 
@@ -298,6 +334,7 @@ async function testRealSamples() {
   await testMessy();
   await testBrowse();
   await testSelfClosingShowPr();
+  await testDefaultExtensionMedia();
   await testInternalMediaIsFine();
   await testGarbage();
   await testThumbnail();

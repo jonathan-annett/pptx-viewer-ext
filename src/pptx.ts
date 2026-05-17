@@ -87,7 +87,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const author = extractElementText(core, 'dc:creator') ?? UNKNOWN;
   const lastModifiedBy = extractElementText(core, 'cp:lastModifiedBy') ?? UNKNOWN;
 
-  const embeddedMedia = parseEmbeddedMedia(contentTypes);
+  const embeddedMedia = parseEmbeddedMedia(contentTypes, entries);
   const thumbnail = extractThumbnail(entries);
 
   const linkedMediaFound = anyLinkedMedia(entries);
@@ -198,15 +198,69 @@ function decodeXmlEntities(s: string): string {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
-function parseEmbeddedMedia(contentTypesXml: string): MediaEntry[] {
+// Count embedded audio/video parts.
+//
+// OOXML's [Content_Types].xml has two forms:
+//   <Default Extension="mp4" ContentType="video/mp4"/>     — one tag, applies
+//                                                            to every .mp4 part
+//                                                            in the zip
+//   <Override PartName="/ppt/media/clip1.mp4" ContentType="video/mp4"/>
+//                                                          — one tag per part
+//
+// PowerPoint uses Default-by-extension for binary media (the per-extension
+// declaration is shorter than one Override per part). Counting raw
+// ContentType="..." occurrences therefore under-counts Default-form files
+// dramatically: two .mp4 parts share a single Default entry and got reported
+// as "video/mp4 × 1". We resolve Default entries against the actual zip
+// listing (parts under ppt/media/) so the count reflects reality.
+function parseEmbeddedMedia(contentTypesXml: string, entries: Record<string, Uint8Array>): MediaEntry[] {
   if (!contentTypesXml) return [];
   const counts = new Map<string, number>();
-  // ContentType attribute can appear before or after PartName; match either.
-  const re = /ContentType="((?:audio|video)\/[^"]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(contentTypesXml))) {
-    counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+
+  // Pass 1 — collect PartNames covered by an <Override>. The OOXML spec says
+  // Override takes precedence over Default for a given PartName; we exclude
+  // those parts from the Default count so we don't double-count.
+  const overriddenParts = new Set<string>();
+  const overrideRe = /<Override\b([^>]*?)\/?>/g;
+  let om: RegExpExecArray | null;
+  while ((om = overrideRe.exec(contentTypesXml))) {
+    const pn = /\bPartName="([^"]+)"/.exec(om[1])?.[1];
+    if (pn) overriddenParts.add(pn);
   }
+
+  // Bucket zip parts under ppt/media/ by lowercase extension. (Media parts
+  // live there in real-world pptx; restricting here avoids counting non-media
+  // parts that happen to share an extension.) Skip parts covered by Override.
+  const partsByExt = new Map<string, number>();
+  for (const name of Object.keys(entries)) {
+    const em = /^ppt\/media\/[^/]+\.([a-z0-9]+)$/i.exec(name);
+    if (!em) continue;
+    if (overriddenParts.has('/' + name)) continue;
+    const ext = em[1].toLowerCase();
+    partsByExt.set(ext, (partsByExt.get(ext) ?? 0) + 1);
+  }
+
+  // Pass 2 — Default entries. Add `partsByExt[ext]` to that mime's count.
+  const defaultRe = /<Default\b([^>]*?)\/?>/g;
+  let dm: RegExpExecArray | null;
+  while ((dm = defaultRe.exec(contentTypesXml))) {
+    const attrs = dm[1];
+    const ext = /\bExtension="([^"]+)"/.exec(attrs)?.[1]?.toLowerCase();
+    const mime = /\bContentType="((?:audio|video)\/[^"]+)"/.exec(attrs)?.[1];
+    if (!ext || !mime) continue;
+    const n = partsByExt.get(ext) ?? 0;
+    if (n > 0) counts.set(mime, (counts.get(mime) ?? 0) + n);
+  }
+
+  // Pass 3 — Override entries. Each audio/video Override is exactly one part.
+  const overrideMimeRe = /<Override\b([^>]*?)\/?>/g;
+  let oom: RegExpExecArray | null;
+  while ((oom = overrideMimeRe.exec(contentTypesXml))) {
+    const mime = /\bContentType="((?:audio|video)\/[^"]+)"/.exec(oom[1])?.[1];
+    if (!mime) continue;
+    counts.set(mime, (counts.get(mime) ?? 0) + 1);
+  }
+
   return Array.from(counts.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([mime, count]) => ({ mime, count }));
