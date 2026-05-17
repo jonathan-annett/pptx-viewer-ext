@@ -47,39 +47,21 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
 
-    // Handle messages from the webview. We re-read the bytes on demand rather
-    // than holding them in memory after parse — pptx files can be large, and
-    // most viewer opens never click download.
+    // The webview only sends us diagnostic log lines now — the download flow
+    // itself runs entirely inside the webview using bytes we pre-load below.
     //
-    // Bytes are sent as a base64 string rather than a Uint8Array because
-    // VS Code's web webview postMessage path doesn't reliably preserve typed
-    // arrays — they can arrive as a plain {0:byte,1:byte,...} object, which
-    // makes `new Blob([payload])` produce garbage. Base64 is JSON-clean and
-    // the ~33% size overhead is acceptable for a click-driven download.
-    //
-    // The 'download-log' channel surfaces webview-side diagnostic events in
-    // the Pptx Info output so we can debug without needing DevTools.
-    webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
+    // Why pre-load: browsers gate "save file" anchor clicks on a fresh user-
+    // activation token. The earlier on-demand design ran an async round-trip
+    // (click → postMessage → workspace.fs.readFile → postMessage → blob → click)
+    // and by the time anchor.click() fired, activation had expired and the
+    // browser silently refused the download. We avoid the round-trip by
+    // shipping the bytes to the webview right after render and letting the
+    // click handler do its work synchronously — activation is still live.
+    webviewPanel.webview.onDidReceiveMessage((msg: unknown) => {
       if (!msg || typeof msg !== 'object') return;
       const m = msg as { type?: unknown; message?: unknown };
-      if (m.type === 'download-log') {
-        if (typeof m.message === 'string') log(`download[webview]: ${m.message}`);
-        return;
-      }
-      if (m.type !== 'download') return;
-      try {
-        const fresh = await vscode.workspace.fs.readFile(document.uri);
-        const base64 = bytesToBase64(fresh);
-        log(`download: ${fileName} (${fresh.byteLength} bytes → ${base64.length} b64 chars)`);
-        webviewPanel.webview.postMessage({
-          type: 'bytes',
-          base64,
-          byteLength: fresh.byteLength,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        log(`download ERROR ${fileName}: ${message}`);
-        webviewPanel.webview.postMessage({ type: 'download-error', message });
+      if (m.type === 'download-log' && typeof m.message === 'string') {
+        log(`download[webview]: ${m.message}`);
       }
     });
 
@@ -108,6 +90,19 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           (result.parseError ? `, parseError: ${result.parseError}` : ''),
       );
       webviewPanel.webview.html = renderHtml(result, makeNonce());
+
+      // Ship the bytes to the webview so the Download button can build a Blob
+      // synchronously inside the user-activation window. We reuse the bytes
+      // already in memory from the parse step — no second readFile. The base64
+      // encoding is a one-time cost amortised across however many times the
+      // user clicks Download in this panel session.
+      const base64 = bytesToBase64(bytes);
+      log(`download preload: ${fileName} (${bytes.byteLength} bytes → ${base64.length} b64 chars)`);
+      webviewPanel.webview.postMessage({
+        type: 'preload',
+        base64,
+        byteLength: bytes.byteLength,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`ERROR opening ${fileName}: ${message}`);

@@ -124,25 +124,22 @@ function formatMedia(media: MediaEntry[]): string {
 }
 
 // Webview-side download flow:
-//   click   → postMessage({type:'download'}) to extension
-//   extension reads bytes, base64-encodes, posts {type:'bytes', base64, byteLength}
-//   webview decodes base64 → Uint8Array → Blob → <a download> click
-//   browser handles save dialog
+//   on load   → extension posts {type:'preload', base64, byteLength}; we stash it
+//   on click  → decode base64 → Blob → <a download>.click(), all SYNCHRONOUSLY
 //
-// Why base64 instead of sending the Uint8Array directly: VS Code's web webview
-// postMessage path doesn't reliably preserve typed arrays — they can arrive on
-// the other side as a plain {0:byte,1:byte,...} object, which makes
-// `new Blob([payload])` produce "[object Object]" garbage. Base64 string is
-// JSON-clean and survives any serialization layer.
+// Why synchronous: browsers require a live user-activation token for the
+// programmatic anchor click that triggers a file save. If we did an async
+// round-trip (postMessage → readFile → postMessage → click), activation would
+// have expired by the time click fires, and the download is silently dropped
+// with no exception. Pre-loading the bytes lets the click handler run end-to-
+// end without yielding, keeping activation alive through to a.click().
 //
-// Every step posts a 'download-log' message back to the extension so the
-// progress shows up in the Pptx Info output channel — easier than asking the
-// user to open DevTools.
+// Base64 over Uint8Array: VS Code's web webview postMessage path doesn't
+// reliably preserve typed arrays — they can arrive as a plain object with
+// numeric keys. Base64 string is JSON-clean and survives any serialization.
 //
-// The script is inlined as a string (not a separate file) so the bundle stays
-// single-file — there's no asset-URL plumbing in this extension. The nonce in
-// CSP gates execution; the file name is embedded as a JSON literal so quoting
-// and unicode survive the round trip.
+// 'download-log' surfaces webview-side progress in the Pptx Info output
+// channel so we can debug without DevTools.
 function downloadScript(fileName: string): string {
   return `(function(){
   const vscode = acquireVsCodeApi();
@@ -158,12 +155,13 @@ function downloadScript(fileName: string): string {
     dlog('window error: ' + (ev.message || ev.error || 'unknown'));
   });
 
-  btn.addEventListener('click', function(){
-    btn.disabled = true;
-    status.textContent = 'Preparing…';
-    dlog('click → requesting bytes');
-    vscode.postMessage({type:'download'});
-  });
+  let preloadedB64 = null;
+  let preloadedLen = 0;
+
+  // Button starts disabled until bytes arrive — clicking before preload would
+  // either need a slow path or a confusing "not ready" state.
+  btn.disabled = true;
+  status.textContent = 'Loading…';
 
   function base64ToBytes(b64){
     const bin = atob(b64);
@@ -175,39 +173,42 @@ function downloadScript(fileName: string): string {
   window.addEventListener('message', function(e){
     const m = e.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'bytes') {
-      try {
-        if (typeof m.base64 !== 'string') {
-          dlog('bytes message missing base64 string (typeof=' + (typeof m.base64) + ')');
-          status.textContent = 'Download failed: malformed payload';
-          btn.disabled = false;
-          return;
-        }
-        dlog('received base64 (' + m.base64.length + ' chars, expecting ' + m.byteLength + ' bytes)');
-        const bytes = base64ToBytes(m.base64);
-        dlog('decoded ' + bytes.byteLength + ' bytes');
-        const blob = new Blob([bytes], {type: PPTX_MIME});
-        dlog('created blob, size=' + blob.size + ' type=' + blob.type);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
-        dlog('anchor.click() dispatched');
-        status.textContent = '';
-        btn.disabled = false;
-      } catch (err) {
-        dlog('download exception: ' + (err && err.message ? err.message : String(err)));
-        status.textContent = 'Download failed: ' + (err && err.message ? err.message : 'see Pptx Info');
-        btn.disabled = false;
-      }
-    } else if (m.type === 'download-error') {
-      dlog('extension error: ' + (m.message || 'unknown'));
-      status.textContent = 'Download failed: ' + (m.message || 'unknown');
+    if (m.type === 'preload' && typeof m.base64 === 'string') {
+      preloadedB64 = m.base64;
+      preloadedLen = m.byteLength || 0;
       btn.disabled = false;
+      status.textContent = '';
+      dlog('preload received (' + m.base64.length + ' b64 chars, ' + preloadedLen + ' bytes)');
+    }
+  });
+
+  btn.addEventListener('click', function(){
+    if (!preloadedB64) {
+      status.textContent = 'Still loading…';
+      dlog('click but no preload yet');
+      return;
+    }
+    try {
+      // Everything in this handler is synchronous so the user-activation
+      // token is still live when a.click() fires. Don't introduce awaits
+      // or setTimeouts before the click.
+      dlog('click → decoding ' + preloadedLen + ' bytes');
+      const bytes = base64ToBytes(preloadedB64);
+      const blob = new Blob([bytes], {type: PPTX_MIME});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke the object URL on a later tick so the browser has a chance to
+      // start the download. (Revoking immediately can race the download.)
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+      dlog('anchor.click() dispatched, blob size=' + blob.size);
+    } catch (err) {
+      dlog('download exception: ' + (err && err.message ? err.message : String(err)));
+      status.textContent = 'Download failed: ' + (err && err.message ? err.message : 'see Pptx Info');
     }
   });
 })();`;
