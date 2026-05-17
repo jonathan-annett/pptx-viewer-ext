@@ -1,183 +1,166 @@
-# Handover — pptx-viewer-ext
+# Handover — pptx-viewer-ext (VPS → phone-dev, 2026-05-17)
 
-You're picking up a VS Code web extension that was bootstrapped on Termux/Android
-and is being moved to a Linux VPS for final testing and (eventually) publishing.
+You're a Claude instance running on the user's phone (Termux/Android). The
+previous handover (Linux → VPS, the contents of this file before this commit)
+is complete: the extension is now running on a Linux VPS, reachable over
+public HTTPS, and the dev loop is set up to pull source changes from this
+repo automatically. This file replaces the old handover with the current
+state of play and how *you* can ship extension changes from the phone.
 
-The README documents the *what* and *how to build*. This file documents the
-*where we are*, *what hasn't been verified yet*, and *what to drop now that
-you're on a real Linux box*.
+If you need the Linux→VPS handover for historical context, it's in
+`git log -p -- HANDOVER.md` before commit `c229dfc`.
 
 ## Repo
 
 - GitHub: `jonathan-annett/pptx-viewer-ext` (public)
-- Branch: `main`, clean working tree as of commit `c4cf703`
-- Latest release: `v0.0.3` with `.vsix` attached
+- Branch: `main`. Latest commit `c229dfc` ("Add reverse-proxy support and pm2
+  dev workflow").
+- Latest release tag: `v0.0.3` with `.vsix` attached — unchanged since the
+  previous handover.
 
-Get started:
+What changed since the last handover (all on `main`):
 
-```bash
-git clone https://github.com/jonathan-annett/pptx-viewer-ext.git
-cd pptx-viewer-ext
-npm install --ignore-scripts   # see "Termux-isms" below — --ignore-scripts is
-                               # only needed if you're STILL on Android. On a
-                               # real Linux box, plain `npm install` is fine.
-```
+| Commit | What it added |
+|---|---|
+| `c229dfc` | `scripts/fix-koa-proxy.cjs`, wiring in `package.json`, `ecosystem.config.cjs` |
+
+That's it from a code perspective. The five `src/*.ts` files are unchanged.
+**No behaviour or parser changes.** Everything else from this session lives
+in `/etc/` on the VPS and isn't in the repo (see Infrastructure below).
 
 ## Current state
 
-**Code:** complete. `src/` is five small files (`extension.ts`, `provider.ts`,
-`pptx.ts`, `webview.ts`, `log.ts`). Parser is targeted regex over unzipped
-pptx parts, not a full XML parser — deliberate, see README "Known limitations".
+**Live URL**: <https://vscode.sophtwhere.com>
 
-**Tests:** `npm run test:parse` runs 7 parser smoke tests via `tsx`. All
-passing as of last commit.
+The VS Code Web shell loads and is reachable over public HTTPS. A real
+`.pptx` file opens the **Pptx Info** custom editor; the webview iframe is
+served from a per-instance UUID subdomain under `*.vscode.sophtwhere.com`
+(VS Code Web's standard isolation pattern). DNS, certs, and reverse-proxy
+all work end-to-end.
 
-**Build:** `npm run compile-web` → `dist/extension.js` (esbuild, CJS, browser
-target). `npm run package` → `pptx-viewer-<version>.vsix` via `vsce`.
+**Verification status**: The user has confirmed the **editor shell loads**
+in a browser. They have **not yet formally signed off** that a real `.pptx`
+renders correctly inside the webview after the wildcard-cert fix landed.
+Treat the README's "What it shows" / HANDOVER's old "First priority" list
+as **still partially open** — when the user is ready, they should:
 
-**Publishing pipeline that exists but isn't fully exercised:**
-- GitHub Releases — `0.0.3.vsix` is uploaded manually via `gh release`.
-- `npm run publish:web` — `scripts/publish-web.cjs` atomically commits
-  `package.json`, `dist/*`, and the current `.vsix` to
-  `jonathan-annett.github.io/vscode-ext-dev/pptx-viewer-ext/` via the git
-  data API (no clone needed). This was originally intended for sideloading
-  into vscode.dev, but **that path doesn't work** — see "Dead ends".
+1. Open a real `.pptx` via the file explorer in the live URL.
+2. Confirm the Pptx Info editor takes over (not "binary file").
+3. Confirm metadata fields and the three validation flags fire correctly.
+4. Confirm `[pptx-viewer]`-prefixed logs appear in *View → Output → Pptx Info*
+   and in the browser DevTools console.
 
-## What hasn't been verified yet (the real reason for the move)
+If anything looks off, that's the next thing for you to investigate.
 
-Nobody has visually confirmed the extension actually renders correctly in a
-browser. The test-web server starts cleanly on Termux
-(`http://localhost:3001/` returns 200) but the user hasn't been able to load
-that URL in a browser on the phone in a way that's pleasant to evaluate.
+## How to deploy extension changes from the phone
 
-**First priority on the VPS:** open a real `.pptx` in the dev server and
-confirm:
+The dev environment on the VPS is structured so source-only changes flow
+through automatically. The loop:
 
-1. The Pptx Info editor takes over (not the "binary file" treatment).
-2. Metadata fields populate (file name, size, mtime, SHA-256, slide count,
-   hidden count, author, last-modified-by, embedded media counts).
-3. The three validation flags fire correctly (see README "What it shows").
-4. Activation and per-file events appear in the Output panel
-   (*View → Output → Pptx Info*) and DevTools console (lines prefixed
-   `[pptx-viewer]`).
-5. Nothing visually broken — the webview uses VS Code CSS variables, should
-   look native in light/dark themes.
+1. **You (on the phone)**: edit `src/*.ts`, commit, **push to origin**.
+2. **User**: SSH to the VPS, run `git pull` inside `/home/jonathan/pptx-viewer-ext`.
+3. **VPS** (automatic): `pptx-watch` (esbuild `--watch` running under pm2)
+   sees the file change via inotify and rebuilds `dist/extension.js` in ~20ms.
+4. **User**: hard-reload the browser tab on `vscode.sophtwhere.com`. New code
+   runs.
 
-The user's intended testing loop on the VPS:
+That's the 90% path. Three exceptions require an extra step on the VPS:
 
-```
-VPS: npm run open-in-browser     # serves VS Code Web on :3001
-Mac: ssh -L 3001:localhost:3001 vps
-Mac: open http://localhost:3001 in browser
-```
+| If the diff touches… | User needs to also run |
+|---|---|
+| `package.json` deps or `package-lock.json` | `npm install` |
+| `scripts/*.cjs` preloads, or any `package.json` `scripts` entry | `pm2 restart pptx-dev-server` |
+| Both of the above | both, in that order |
 
-This is functionally equivalent to running it locally — the SSH tunnel just
-moves the browser to the Mac. The CSP allowlist for `localhost` is what makes
-this work; remote URLs are blocked by vscode.dev's CSP (see "Dead ends").
+**Things to keep in mind when committing from the phone:**
 
-Test pptx files: the user will need to bring their own. The parser was
-written against real-world files but they're not in the repo. A handful of
-edge cases worth probing:
+- `dist/` is gitignored. Don't commit a local build; the VPS rebuilds from `src/`.
+- Don't touch `.vscode-test-web/` — it's gitignored and only relevant on the VPS.
+- The two Termux preload scripts (`scripts/fix-cpus.cjs`, `scripts/fix-platform.cjs`)
+  still no-op on Linux, so they cost nothing. Don't remove them — the user is
+  still iterating on the phone and they're needed there.
+- A **third** preload script now exists, `scripts/fix-koa-proxy.cjs`. This one
+  is **only useful when test-web sits behind a reverse proxy** (the VPS case).
+  On Termux it does nothing harmful — `process.connection.encrypted` is false
+  and `X-Forwarded-Proto` is absent, so it falls through to `http`. Keep it.
+- The `open-in-browser` script now preloads both `fix-platform.cjs` AND
+  `fix-koa-proxy.cjs`. If you ever rewrite the script, preserve both `--require`
+  flags.
 
-- A clean deck with no media, no kiosk mode → all flags should be green.
-- A deck with `<p:browse/>` or `<p:kiosk/>` in `<p:showPr>` → "Show type"
-  flag warns.
-- A deck with `showMediaControls="1"` → "Show media controls" warns.
-- A deck with externally linked video/audio → "Linked media" warns.
-- A deck with unicode in author/title → no mojibake.
-- An intentionally broken/truncated pptx → graceful error, not a crash.
+**Where to push your changes:** `origin/main`. There's no PR workflow; the
+user is comfortable pushing directly to main on this repo since they're the
+only contributor.
 
-## Termux-isms you can ignore (or remove)
+**Commit message style** (from `git log`): "Add X for Y" / "Fix X". Recent
+examples in the log will guide you. The user explicitly approved the
+`Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer.
 
-Two scripts in `scripts/` exist purely to work around Android sandbox quirks.
-Both have `if (process.platform === 'android')` guards so they no-op on
-Linux. **You don't have to remove them** — they cost nothing — but if you
-prefer a clean repo, they can go along with their references in
-`package.json`:
+## Infrastructure (NOT in this repo)
 
-- `scripts/fix-cpus.cjs` — preloaded into `vsce package`. Android's app
-  sandbox makes `os.cpus()` return `[]`, which makes `@secretlint/node`
-  (used by `vsce` for secrets scanning) crash with `concurrency ... got 0`.
-  The preload clamps to `os.availableParallelism()`. On Linux this is
-  unnecessary.
+Everything that makes the live URL work lives on the VPS at
+`/home/jonathan/pptx-viewer-ext-INFRASTRUCTURE.md`. You don't need it for
+extension work — but if you SSH in and want context for what you're seeing,
+read that file. High-level layout:
 
-- `scripts/fix-platform.cjs` — preloaded into `vscode-test-web`.
-  `playwright-core` (transitive dep of `@vscode/test-web`) throws
-  *"Unsupported platform: android"* at import time. The preload spoofs
-  `process.platform = 'linux'`. On Linux this is unnecessary.
+- **Caddy** (system unit) terminates TLS for both `vscode.sophtwhere.com`
+  and `*.vscode.sophtwhere.com`, reverse-proxies to `127.0.0.1:3001`.
+  Apex cert auto-renewed by Caddy via HTTP-01; wildcard cert auto-renewed
+  by certbot via a self-hosted **acme-dns** instance (system unit, listens
+  on `:53` for the delegated `acme.sophtwhere.com` zone).
+- **pm2** (resurrected on boot via `pm2-jonathan.service`) runs two apps:
+  `pptx-dev-server` (`npm run open-in-browser`) and `pptx-watch`
+  (`npm run watch-web`).
+- The Koa proxy patch (`scripts/fix-koa-proxy.cjs`) is what makes test-web
+  emit `https://` URLs when behind Caddy. Without it, the browser would
+  show a wall of mixed-content errors.
 
-If removing, update the `package` and `open-in-browser` scripts in
-`package.json` to drop the `--require ./scripts/fix-*.cjs` flags. Don't
-remove the `--ignore-scripts` advice from the README without also testing
-that `@vscode/vsce-sign`'s postinstall succeeds on the VPS (it ships
-prebuilt binaries for linux-x64 / linux-arm64 / darwin / win32, so it
-*should* be fine — but verify).
+Five DNS records on BinaryLane make it work; never edit them by hand
+without checking the infrastructure doc first.
 
-Also irrelevant on Linux: the "first run downloads ~34 MB of VS Code
-Insiders" note in the README is still true, but the download is fast and
-unremarkable on a normal connection.
+## Open / not-done things
+
+- **Visual verification of the Pptx Info webview rendering real .pptx
+  content** — see "Verification status" above. Highest-priority outstanding
+  item.
+- **Publishing path** (Marketplace vs Open VSX vs `.vsix` only) — unchanged
+  from the previous handover; awaiting user decision.
+- **`pptx-watch` rebuild after a `git pull`** — the user has verified
+  esbuild's inotify watch picks up checkout writes in normal cases, but
+  if you ever see "I pushed but the VPS still serves old code", the first
+  thing to ask the user to check is `pm2 logs pptx-watch` for the rebuild
+  line. If absent, `pm2 restart pptx-watch` is the fix.
 
 ## Dead ends — don't relitigate these
 
+(Carried over verbatim from the previous handover; still apply.)
+
 - **"Install Extension from Location..." in vscode.dev does NOT work for
   github.io URLs.** vscode.dev's CSP `connect-src` directive blocks any
-  fetch to non-allowlisted origins. The allowlist is localhost +
-  Microsoft CDNs + api.github.com. github.io is not on it. Confirmed by
-  Microsoft maintainers in `microsoft/vscode#201317`. The "Install from
-  VSIX" menu only exists on desktop VS Code, not vscode.dev. This is why
-  we ended up on `@vscode/test-web` for dev — localhost is the only
-  origin vscode.dev's CSP will let you sideload from, and `test-web`
-  serves a VS Code Web instance from localhost with the extension
-  preloaded.
+  fetch to non-allowlisted origins. We don't need this any more — the
+  user runs their own test-web instance over HTTPS.
 
-- **Signing is not the issue.** The CSP error fires before any content
-  validation. vsce signing is for Marketplace, not for sideloading.
+- **Signing is not the issue.** vsce signing is for Marketplace, not for
+  sideloading.
 
 - **The Copilot diagnosis claiming CJS bundle was wrong and
   `activationEvents` needed entries was incorrect.** Web extensions DO
-  use CJS (the host provides `require`/`module`). `activationEvents` are
-  auto-inferred from `contributes.customEditors` since VS Code 1.74.
-  Don't change either.
+  use CJS. `activationEvents` are auto-inferred from
+  `contributes.customEditors` since VS Code 1.74. Don't change either.
 
-## Potential next steps (user-directed)
+## Context files to read on the phone
 
-The user mentioned "once tested i can look into publishing." Open
-questions to surface at that point:
+- `README.md` — user-facing build/install/test docs (current)
+- `pptx-viewer-agent-plan.md` — original bootstrap plan, history only
+- `~/projects/CLAUDE.md` — user's wider preferences. Most still apply;
+  the "plain Node, no frameworks unless they earn their keep, single-file
+  until it doesn't, CSS help with explanation" guidance carries over.
+- `~/.claude/projects/.../memory/MEMORY.md` — auto-memory index; user
+  profile + GitHub auth notes still relevant.
 
-- **VS Code Marketplace** — requires a publisher account and signing.
-  Most visibility.
-- **Open VSX Registry** — used by VSCodium and many forks. No signing
-  required.
-- **Stay unlisted, just ship `.vsix` via GitHub Releases** — simplest,
-  desktop-only audience.
-- **github.io publish** — keep it for `.vsix` download URL convenience,
-  but stop pretending it enables vscode.dev install.
+## One thing the user values (unchanged)
 
-Also worth a thought once the basic UI is verified:
-
-- Does the user want to add slide rendering later, or keep "by design no
-  rendering" as a stable identity? (README currently says the latter.)
-- Is there value in supporting `.ppt` (legacy binary) or is the scope
-  intentionally pptx-only?
-
-## Context files to read
-
-- `README.md` — user-facing build/install/test docs
-- `pptx-viewer-agent-plan.md` — the original plan that bootstrapped the
-  project (history, not active guidance)
-- `~/projects/CLAUDE.md` — the user's wider Termux/Android context. Most
-  of it won't apply on a Linux VPS, but the "user preferences" section
-  (plain Node, no frameworks unless they earn their keep, single-file
-  until it doesn't, CSS help with explanation) carries over.
-- `~/.claude/projects/.../memory/MEMORY.md` — auto-memory index. Note
-  that the "Termux Node.js quirks" memory and the Doze memory are
-  Android-specific and won't matter on the VPS, but the user profile and
-  GitHub auth notes do carry over.
-
-## One thing the user values
-
-They prefer Claude to do the coding so the iterations stay documented
-and reviewable. They are fluent in JavaScript but struggle with CSS —
-when CSS comes up (e.g., if you end up tweaking `webview.ts`), be
-generous with styling help and *explain the rules being applied* so the
-lesson sticks.
+They prefer Claude to do the coding so iterations stay documented and
+reviewable. They are fluent in JavaScript but struggle with CSS — when
+CSS comes up (likely if you end up tweaking `src/webview.ts`), be generous
+with styling help and **explain the rules being applied** so the lesson
+sticks.
