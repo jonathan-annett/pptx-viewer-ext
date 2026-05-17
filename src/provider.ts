@@ -39,11 +39,31 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     webviewPanel: vscode.WebviewPanel,
     _token: vscode.CancellationToken,
   ): Promise<void> {
-    // No scripts needed — pure static HTML/CSS panel.
-    webviewPanel.webview.options = { enableScripts: false };
+    // Scripts enabled for the download button. The webview's CSP gates execution
+    // via a per-render nonce; we don't allow inline scripts without a nonce and
+    // we don't load remote scripts at all.
+    webviewPanel.webview.options = { enableScripts: true };
 
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
+
+    // Handle download requests from the webview. We re-read the bytes on demand
+    // rather than holding them in memory after parse — pptx files can be large,
+    // and most viewer opens never click download.
+    webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
+      if (!msg || typeof msg !== 'object') return;
+      const m = msg as { type?: unknown };
+      if (m.type !== 'download') return;
+      try {
+        const fresh = await vscode.workspace.fs.readFile(document.uri);
+        log(`download: ${fileName} (${fresh.byteLength} bytes)`);
+        webviewPanel.webview.postMessage({ type: 'bytes', payload: fresh });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`download ERROR ${fileName}: ${message}`);
+        webviewPanel.webview.postMessage({ type: 'download-error', message });
+      }
+    });
 
     try {
       const [bytes, stat] = await Promise.all([
@@ -69,11 +89,20 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           `thumbnail: ${thumbDesc}` +
           (result.parseError ? `, parseError: ${result.parseError}` : ''),
       );
-      webviewPanel.webview.html = renderHtml(result);
+      webviewPanel.webview.html = renderHtml(result, makeNonce());
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`ERROR opening ${fileName}: ${message}`);
       webviewPanel.webview.html = renderError(document.uri.path, message);
     }
   }
+}
+
+// Cryptographically-random nonce for the webview's CSP. 16 bytes → 32 hex chars
+// is comfortably above the "guessable" line and well below any header-size
+// concern. crypto.getRandomValues is available in the web-extension worker.
+function makeNonce(): string {
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
 }

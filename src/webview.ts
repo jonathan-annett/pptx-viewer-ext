@@ -17,7 +17,7 @@
 
 import type { Flag, MediaEntry, ParseResult } from './pptx';
 
-export function renderHtml(r: ParseResult): string {
+export function renderHtml(r: ParseResult, nonce: string): string {
   const metadataRows: Array<[string, string]> = [
     ['File name', r.fileName],
     ['Size', `${r.sizeHuman} (${r.size.toLocaleString()} bytes)`],
@@ -38,13 +38,17 @@ export function renderHtml(r: ParseResult): string {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';">
 <title>${escapeHtml(r.fileName)}</title>
 <style>${css()}</style>
 </head>
 <body>
   <main>
     <h1>${escapeHtml(r.fileName)}</h1>
+    <div class="actions">
+      <button id="download-btn" class="action-btn" type="button">Download</button>
+      <span id="download-status" class="action-status" aria-live="polite"></span>
+    </div>
     ${thumbnailImg(r)}
     ${errorBanner}
 
@@ -64,6 +68,7 @@ export function renderHtml(r: ParseResult): string {
       </ul>
     </section>
   </main>
+  <script nonce="${nonce}">${downloadScript(r.fileName)}</script>
 </body>
 </html>`;
 }
@@ -116,6 +121,50 @@ function flagLi(f: Flag): string {
 function formatMedia(media: MediaEntry[]): string {
   if (media.length === 0) return 'none';
   return media.map((m) => `${m.mime} × ${m.count}`).join(', ');
+}
+
+// Webview-side download flow:
+//   click  → postMessage({type:'download'}) to extension
+//   extension reads bytes from disk and posts {type:'bytes', payload: Uint8Array}
+//   webview wraps in a Blob, clicks a hidden <a download>, browser handles save dialog
+//
+// The script is inlined as a string (not a separate file) so the bundle stays
+// single-file — there's no asset-URL plumbing in this extension. The nonce in
+// CSP gates execution; the file name is embedded as a JSON literal so quoting
+// and unicode survive the round trip.
+function downloadScript(fileName: string): string {
+  return `(function(){
+  const vscode = acquireVsCodeApi();
+  const fileName = ${JSON.stringify(fileName)};
+  const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  const btn = document.getElementById('download-btn');
+  const status = document.getElementById('download-status');
+  btn.addEventListener('click', function(){
+    btn.disabled = true;
+    status.textContent = 'Preparing…';
+    vscode.postMessage({type:'download'});
+  });
+  window.addEventListener('message', function(e){
+    const m = e.data;
+    if (!m || typeof m !== 'object') return;
+    if (m.type === 'bytes' && m.payload) {
+      const blob = new Blob([m.payload], {type: PPTX_MIME});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+      status.textContent = '';
+      btn.disabled = false;
+    } else if (m.type === 'download-error') {
+      status.textContent = 'Download failed: ' + (m.message || 'unknown');
+      btn.disabled = false;
+    }
+  });
+})();`;
 }
 
 function escapeHtml(s: string): string {
@@ -248,5 +297,41 @@ function css(): string {
     }
     .label { font-weight: 600; }
     .detail { color: var(--vscode-descriptionForeground); }
+
+    /* Action row (Download button + transient status text).
+       - flex with align-items:center keeps the status text vertically centred on the button.
+       - --vscode-button-* matches VS Code's primary-button styling across themes,
+         so the button looks native rather than bolted on. */
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 16px;
+    }
+    .action-btn {
+      font-family: inherit;
+      font-size: inherit;
+      padding: 6px 14px;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border: 1px solid transparent;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+    .action-btn:hover:not(:disabled) {
+      background: var(--vscode-button-hoverBackground);
+    }
+    .action-btn:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+    .action-btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .action-status {
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.9em;
+    }
   `;
 }
