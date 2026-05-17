@@ -13,10 +13,10 @@ import { parsePptx } from '../src/pptx';
 
 type ZipMap = Record<string, Uint8Array>;
 
-function makePptx(files: Record<string, string>): Uint8Array {
+function makePptx(files: Record<string, string | Uint8Array>): Uint8Array {
   const zip: ZipMap = {};
   for (const [name, content] of Object.entries(files)) {
-    zip[name] = strToU8(content);
+    zip[name] = typeof content === 'string' ? strToU8(content) : content;
   }
   return zipSync(zip);
 }
@@ -185,6 +185,48 @@ async function testGarbage() {
   console.log('  ok: garbage bytes fail soft');
 }
 
+// ---- Test 8: Thumbnail jpeg is extracted as data URL; emf is skipped ----
+async function testThumbnail() {
+  const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+  const withJpeg = await parsePptx(
+    makePptx({
+      '[Content_Types].xml': `<?xml version="1.0"?><Types/>`,
+      'docProps/core.xml': core('A', 'B'),
+      'ppt/presentation.xml': presentation(),
+      'ppt/slides/slide1.xml': slide(),
+      'docProps/thumbnail.jpeg': jpegBytes,
+    }),
+    info,
+  );
+  assert.ok(withJpeg.thumbnail, 'thumbnail extracted');
+  assert.equal(withJpeg.thumbnail!.mime, 'image/jpeg');
+  assert.match(withJpeg.thumbnail!.dataUrl, /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/);
+
+  const withEmf = await parsePptx(
+    makePptx({
+      '[Content_Types].xml': `<?xml version="1.0"?><Types/>`,
+      'docProps/core.xml': core('A', 'B'),
+      'ppt/presentation.xml': presentation(),
+      'ppt/slides/slide1.xml': slide(),
+      'docProps/thumbnail.emf': new Uint8Array([1, 2, 3, 4]),
+    }),
+    info,
+  );
+  assert.equal(withEmf.thumbnail, undefined, 'emf thumbnail is skipped');
+
+  const noThumb = await parsePptx(
+    makePptx({
+      '[Content_Types].xml': `<?xml version="1.0"?><Types/>`,
+      'docProps/core.xml': core('A', 'B'),
+      'ppt/presentation.xml': presentation(),
+      'ppt/slides/slide1.xml': slide(),
+    }),
+    info,
+  );
+  assert.equal(noThumb.thumbnail, undefined, 'no thumbnail entry => undefined');
+  console.log('  ok: thumbnail extraction');
+}
+
 (async () => {
   console.log('parse.test.ts');
   await testNormal();
@@ -194,6 +236,7 @@ async function testGarbage() {
   await testSelfClosingShowPr();
   await testInternalMediaIsFine();
   await testGarbage();
+  await testThumbnail();
   console.log('all tests passed');
 })().catch((err) => {
   console.error('FAIL:', err);

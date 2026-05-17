@@ -15,6 +15,11 @@ export interface MediaEntry {
   count: number;
 }
 
+export interface Thumbnail {
+  mime: string;   // image/jpeg | image/png | image/gif | image/webp
+  dataUrl: string;
+}
+
 export interface Flag {
   ok: boolean; // true = pass, false = warn
   label: string;
@@ -33,6 +38,7 @@ export interface ParseResult {
   author: string;
   lastModifiedBy: string;
   embeddedMedia: MediaEntry[];
+  thumbnail?: Thumbnail;
   flags: {
     linkedMedia: Flag;
     showType: Flag;
@@ -77,6 +83,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const lastModifiedBy = extractElementText(core, 'cp:lastModifiedBy') ?? UNKNOWN;
 
   const embeddedMedia = parseEmbeddedMedia(contentTypes);
+  const thumbnail = extractThumbnail(entries);
 
   const linkedMediaFound = anyLinkedMedia(entries);
   const showType = parseShowType(presentation);
@@ -94,6 +101,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
     author,
     lastModifiedBy,
     embeddedMedia,
+    thumbnail,
     flags: {
       linkedMedia: linkedMediaFound
         ? { ok: false, label: 'Linked media', detail: 'External video/audio/media relationship present on at least one slide' }
@@ -244,6 +252,43 @@ function parseShowMediaControls(presXml: string): boolean {
   const block = getShowPrBlock(presXml);
   if (!block) return false;
   return /\bshowMediaControls="(1|true)"/i.test(block);
+}
+
+// Pull docProps/thumbnail.<ext> out of the zip and turn it into a data URL.
+// PowerPoint usually writes thumbnail.jpeg; older/Office variants sometimes
+// emit .emf, which browsers can't render — those are skipped. A pptx with no
+// thumbnail (e.g. one synthesised in tests) just returns undefined.
+function extractThumbnail(entries: Record<string, Uint8Array>): Thumbnail | undefined {
+  const supported: Record<string, string> = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+  };
+  for (const name of Object.keys(entries)) {
+    const m = /^docProps\/thumbnail\.([a-z0-9]+)$/i.exec(name);
+    if (!m) continue;
+    const mime = supported[m[1].toLowerCase()];
+    if (!mime) continue; // skip emf etc.
+    const bytes = entries[name];
+    if (!bytes || bytes.length === 0) continue;
+    return { mime, dataUrl: `data:${mime};base64,${bytesToBase64(bytes)}` };
+  }
+  return undefined;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  // Chunked to keep String.fromCharCode argument list bounded — large
+  // thumbnails would otherwise blow the call-stack limit on .apply.
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+    binary += String.fromCharCode.apply(null, Array.from(slice));
+  }
+  // btoa is available in the VS Code web worker context and in Node 16+.
+  return btoa(binary);
 }
 
 function isHiddenSlide(bytes: Uint8Array | undefined): boolean {

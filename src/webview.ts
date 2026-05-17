@@ -38,13 +38,14 @@ export function renderHtml(r: ParseResult): string {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">
 <title>${escapeHtml(r.fileName)}</title>
 <style>${css()}</style>
 </head>
 <body>
   <main>
     <h1>${escapeHtml(r.fileName)}</h1>
+    ${thumbnailImg(r)}
     ${errorBanner}
 
     <section>
@@ -87,6 +88,13 @@ export function renderError(path: string, message: string): string {
 }
 
 // ---------- pieces ----------
+
+function thumbnailImg(r: ParseResult): string {
+  if (!r.thumbnail) return '';
+  // alt="" because the image is decorative — the filename above already labels
+  // the content. A non-empty alt would just be read twice by a screen reader.
+  return `<img class="thumbnail" src="${r.thumbnail.dataUrl}" alt="">`;
+}
 
 function row(key: string, value: string): string {
   return `<div class="row">
@@ -135,6 +143,23 @@ function css(): string {
       font-size: 1.4em;
       margin: 0 0 16px;
       word-break: break-all;
+    }
+    /* Thumbnail styling:
+       - max-width:100% keeps the image from overflowing the panel on narrow widths.
+       - height:auto preserves the aspect ratio while max-width shrinks it.
+       - max-height clamps very tall thumbnails (rare, but Office can produce them).
+       - The subtle border + radius matches the rest of the panel's chrome and
+         keeps a near-white slide image from bleeding into a light theme background.
+    */
+    .thumbnail {
+      display: block;
+      max-width: 100%;
+      max-height: 360px;
+      height: auto;
+      margin: 0 0 16px;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+      border-radius: 4px;
+      background: var(--vscode-editor-background);
     }
     h2 {
       font-size: 1.05em;
