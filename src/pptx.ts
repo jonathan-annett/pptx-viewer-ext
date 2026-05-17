@@ -1,0 +1,253 @@
+// Parse a .pptx (a zip) into the small data shape the webview needs.
+//
+// Design notes:
+// - We unzip with fflate (small, pure JS, works in a web worker).
+// - For each datum we only decode the entries we need, and use targeted
+//   regex/substring searches rather than a full XML parser. Real pptx files
+//   are noisy; tolerant scanning is more robust than strict parsing.
+// - Anything we cannot find resolves to "unknown" / empty rather than throwing.
+//   The whole point of the tool is to inspect potentially-malformed files.
+
+import { unzipSync, strFromU8 } from 'fflate';
+
+export interface MediaEntry {
+  mime: string;
+  count: number;
+}
+
+export interface Flag {
+  ok: boolean; // true = pass, false = warn
+  label: string;
+  detail: string;
+}
+
+export interface ParseResult {
+  fileName: string;
+  size: number;
+  sizeHuman: string;
+  mtime: number;
+  mtimeHuman: string;
+  sha256: string;
+  slideCount: number;
+  hiddenSlideCount: number;
+  author: string;
+  lastModifiedBy: string;
+  embeddedMedia: MediaEntry[];
+  flags: {
+    linkedMedia: Flag;
+    showType: Flag;
+    showMediaControls: Flag;
+  };
+  parseError?: string;
+}
+
+export interface FileInfo {
+  fileName: string;
+  size: number;
+  mtime: number;
+}
+
+const UNKNOWN = 'unknown';
+
+export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<ParseResult> {
+  const sha256 = await sha256Hex(bytes);
+
+  let entries: Record<string, Uint8Array> = {};
+  let parseError: string | undefined;
+  try {
+    entries = unzipSync(bytes);
+  } catch (err) {
+    parseError = `Could not unzip file: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const contentTypes = readText(entries['[Content_Types].xml']);
+  const core = readText(entries['docProps/core.xml']);
+  const presentation = readText(entries['ppt/presentation.xml']);
+
+  const slideNames = Object.keys(entries)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort(naturalSort);
+
+  let hiddenSlideCount = 0;
+  for (const name of slideNames) {
+    if (isHiddenSlide(entries[name])) hiddenSlideCount++;
+  }
+
+  const author = extractElementText(core, 'dc:creator') ?? UNKNOWN;
+  const lastModifiedBy = extractElementText(core, 'cp:lastModifiedBy') ?? UNKNOWN;
+
+  const embeddedMedia = parseEmbeddedMedia(contentTypes);
+
+  const linkedMediaFound = anyLinkedMedia(entries);
+  const showType = parseShowType(presentation);
+  const mediaControlsOn = parseShowMediaControls(presentation);
+
+  return {
+    fileName: info.fileName,
+    size: info.size,
+    sizeHuman: humanSize(info.size),
+    mtime: info.mtime,
+    mtimeHuman: formatTime(info.mtime),
+    sha256,
+    slideCount: slideNames.length,
+    hiddenSlideCount,
+    author,
+    lastModifiedBy,
+    embeddedMedia,
+    flags: {
+      linkedMedia: linkedMediaFound
+        ? { ok: false, label: 'Linked media', detail: 'External video/audio/media relationship present on at least one slide' }
+        : { ok: true, label: 'Linked media', detail: 'No external media relationships found' },
+      showType:
+        showType === 'kiosk'
+          ? { ok: false, label: 'Show type', detail: 'Kiosk mode (<p:kiosk/>) is set' }
+          : showType === 'browse'
+          ? { ok: false, label: 'Show type', detail: 'Window/browse mode (<p:browse/>) is set' }
+          : { ok: true, label: 'Show type', detail: 'Presenter mode (default)' },
+      showMediaControls: mediaControlsOn
+        ? { ok: false, label: 'Show media controls', detail: 'showMediaControls is enabled on <p:showPr>' }
+        : { ok: true, label: 'Show media controls', detail: 'showMediaControls is absent or disabled' },
+    },
+    parseError,
+  };
+}
+
+// ---------- helpers ----------
+
+function readText(bytes: Uint8Array | undefined): string {
+  if (!bytes) return '';
+  try {
+    return strFromU8(bytes);
+  } catch {
+    return '';
+  }
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // crypto.subtle is available in the VS Code web worker context.
+  // Cast to BufferSource — TS 5.7's generic Uint8Array<ArrayBufferLike> doesn't
+  // satisfy the BufferSource constraint directly, but the runtime value is fine.
+  // Cast through `unknown` to sidestep TS 5.7's generic Uint8Array<ArrayBufferLike>
+  // vs BufferSource (which requires ArrayBuffer, not SharedArrayBuffer). The runtime
+  // value is a normal Uint8Array — fine for crypto.subtle.
+  const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as ArrayBuffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function humanSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = n / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value < 10 ? 2 : 1)} ${units[i]}`;
+}
+
+function formatTime(ms: number): string {
+  if (!ms) return UNKNOWN;
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return UNKNOWN;
+  }
+}
+
+function naturalSort(a: string, b: string): number {
+  const na = parseInt(a.match(/(\d+)\.xml$/)?.[1] ?? '0', 10);
+  const nb = parseInt(b.match(/(\d+)\.xml$/)?.[1] ?? '0', 10);
+  return na - nb;
+}
+
+function extractElementText(xml: string, tag: string): string | undefined {
+  if (!xml) return undefined;
+  // Escape `:` and other characters by using a literal alternation. `:` is fine in regex.
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`<${escaped}\\b[^>]*>([\\s\\S]*?)</${escaped}>`);
+  const m = xml.match(re);
+  if (!m) return undefined;
+  const inner = decodeXmlEntities(m[1]).trim();
+  return inner.length > 0 ? inner : undefined;
+}
+
+function decodeXmlEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+function parseEmbeddedMedia(contentTypesXml: string): MediaEntry[] {
+  if (!contentTypesXml) return [];
+  const counts = new Map<string, number>();
+  // ContentType attribute can appear before or after PartName; match either.
+  const re = /ContentType="((?:audio|video)\/[^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(contentTypesXml))) {
+    counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([mime, count]) => ({ mime, count }));
+}
+
+function anyLinkedMedia(entries: Record<string, Uint8Array>): boolean {
+  for (const name of Object.keys(entries)) {
+    if (!/^ppt\/slides\/_rels\/slide\d+\.xml\.rels$/.test(name)) continue;
+    const xml = readText(entries[name]);
+    if (!xml) continue;
+    if (relsHasExternalMedia(xml)) return true;
+  }
+  return false;
+}
+
+function relsHasExternalMedia(relsXml: string): boolean {
+  // Iterate <Relationship .../> tags; check Type and TargetMode independently
+  // so we don't depend on attribute order.
+  const re = /<Relationship\b([^>]*)\/?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(relsXml))) {
+    const attrs = m[1];
+    const typeMatch = /\bType="[^"]*\/(video|audio|media)"/.test(attrs);
+    const external = /\bTargetMode="External"/.test(attrs);
+    if (typeMatch && external) return true;
+  }
+  return false;
+}
+
+function getShowPrBlock(presXml: string): string | null {
+  if (!presXml) return null;
+  // Self-closing form: <p:showPr ... />
+  const selfClose = presXml.match(/<p:showPr\b[^>]*\/>/);
+  if (selfClose) return selfClose[0];
+  const full = presXml.match(/<p:showPr\b[^>]*>[\s\S]*?<\/p:showPr>/);
+  return full ? full[0] : null;
+}
+
+function parseShowType(presXml: string): 'presenter' | 'browse' | 'kiosk' {
+  const block = getShowPrBlock(presXml);
+  if (!block) return 'presenter';
+  if (/<p:kiosk\b/.test(block)) return 'kiosk';
+  if (/<p:browse\b/.test(block)) return 'browse';
+  return 'presenter';
+}
+
+function parseShowMediaControls(presXml: string): boolean {
+  const block = getShowPrBlock(presXml);
+  if (!block) return false;
+  return /\bshowMediaControls="(1|true)"/i.test(block);
+}
+
+function isHiddenSlide(bytes: Uint8Array | undefined): boolean {
+  if (!bytes) return false;
+  const head = strFromU8(bytes.subarray(0, Math.min(bytes.length, 500)));
+  return /<p:sld\b[^>]*\bshow="0"/.test(head);
+}

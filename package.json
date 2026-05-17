@@ -1,0 +1,47 @@
+{
+  "name": "pptx-viewer",
+  "displayName": "Pptx Info",
+  "description": "Read-only pptx metadata and validation viewer for vscode.dev",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Visualization", "Other"],
+  "browser": "./dist/extension.js",
+  "activationEvents": [],
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": { "supported": true }
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "pptxViewer.viewer",
+        "displayName": "Pptx Info",
+        "selector": [{ "filenamePattern": "*.pptx" }],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "bundle": "node esbuild.config.js",
+    "watch": "node esbuild.config.js --watch",
+    "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
+    "test:parse": "node --import tsx test/parse.test.ts",
+    "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

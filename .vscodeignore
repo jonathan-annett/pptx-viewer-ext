@@ -1,0 +1,13 @@
+.vscode/**
+.vscode-test/**
+src/**
+test/**
+scripts/**
+node_modules/**
+esbuild.config.js
+tsconfig.json
+.gitignore
+.vscodeignore
+pptx-viewer-agent-plan.md
+**/*.map
+**/*.ts
