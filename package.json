@@ -9,19 +9,28 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Visualization", "Other"],
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
   "browser": "./dist/extension.js",
   "activationEvents": [],
   "capabilities": {
     "virtualWorkspaces": true,
-    "untrustedWorkspaces": { "supported": true }
+    "untrustedWorkspaces": {
+      "supported": true
+    }
   },
   "contributes": {
     "customEditors": [
       {
         "viewType": "pptxViewer.viewer",
         "displayName": "Pptx Info",
-        "selector": [{ "filenamePattern": "*.pptx" }],
+        "selector": [
+          {
+            "filenamePattern": "*.pptx"
+          }
+        ],
         "priority": "default"
       }
     ]
@@ -34,7 +43,8 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
-    "publish:web": "node scripts/publish-web.cjs"
+    "publish:web": "node scripts/publish-web.cjs",
+    "open-in-browser": "node --require ./scripts/fix-platform.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
   },
   "webPublish": {
     "repo": "jonathan-annett/jonathan-annett.github.io",
@@ -47,6 +57,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-web": "^0.0.80",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
     "tsx": "^4.19.0",
