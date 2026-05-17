@@ -142,7 +142,11 @@ Things tried and found wrong. Don't propose them again without new evidence:
 
 ## What's currently shipping
 
-- **Pptx viewer custom editor**, verified working on the live URL. Shows file name, size, mtime, SHA-256, slide count, hidden slide count, author, last-modified-by, embedded media list, and the three validation flags (linked media, show type, media controls).
+- **Pptx viewer custom editor**, verified working on the live URL. Shows file name, size, mtime, SHA-256, slide count, hidden slide count, author, last-modified-by, embedded media list, and three validation flags:
+  - **Linked media** — warn when any slide has a `Relationship` with a media type and `TargetMode="External"`.
+  - **Show type** — warn when `<p:showPr>` contains `<p:kiosk/>` or `<p:browse/>`. Presenter mode (default) is the pass case.
+  - **Show media controls** — warn only when *both* `showMediaCtrls` resolves to on (explicit `val="1"`, or absent — PowerPoint's ECMA-376 default is on) *and* at least one embedded video part exists. Controls-on with no embedded video, or audio-only files, are intentional passes — there is no on-screen controls bar to worry about.
+- **Real-world samples in `samples/`** — five `.pptx` files covering each flag state (kiosk, browse/window, controls explicitly off, controls implicit-on with no video, controls implicit-on with embedded video). Checked into the repo and exercised by `testRealSamples` in `test/parse.test.ts` alongside the synthetic-zip cases.
 - **Thumbnail extraction.** Pulls `docProps/thumbnail.{jpg,jpeg,png,gif,webp}` from the zip and renders it as a `data:` URL `<img>` under the filename. EMF thumbnails are deliberately skipped — browsers can't render them. A file with no thumbnail (or only `.emf`) shows just the filename, which is the prior layout.
 - **Build-info logged at activation.** `[pptx-viewer] build: <ISO timestamp> sha=<short git SHA>` printed to the Pptx Info output channel and DevTools console. Implemented by an esbuild `onEnd` plugin that text-replaces a placeholder string in the emitted bundle on every (re)build; the runtime side reads the inlined JSON. Lets the user instantly tell whether a stale browser cache is serving an old bundle.
 - **Per-file parse log.** `[pptx-viewer] parsed: <name> — <bytes> bytes, <N> slides (<M> hidden), <W> warning(s), thumbnail: <mime+size | none>` printed per file open. Diagnostic only — no behavioural effect.
@@ -153,7 +157,6 @@ Things tried and found wrong. Don't propose them again without new evidence:
 ## Open project decisions
 
 - **Publishing path** — not yet chosen. Options are Marketplace pre-release, Open VSX, or `.vsix`-only distribution. Decision deferred until the sync feature is closer to v1.
-- **Validation-flag verification.** The three warn paths (linked media, kiosk/browse mode, media controls) work in unit tests against synthetic zips, but no real-world "bad" `.pptx` has been opened in the live viewer yet. Will close when one is.
 
 ---
 
