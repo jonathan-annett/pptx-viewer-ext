@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { parsePptx } from './pptx';
 import { renderHtml, renderError } from './webview';
+import { log } from './log';
 
 class PptxDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -41,20 +42,33 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     // No scripts needed — pure static HTML/CSS panel.
     webviewPanel.webview.options = { enableScripts: false };
 
+    const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
+    log(`open: ${document.uri.toString()}`);
+
     try {
       const [bytes, stat] = await Promise.all([
         vscode.workspace.fs.readFile(document.uri),
         vscode.workspace.fs.stat(document.uri),
       ]);
-      const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
       const result = await parsePptx(bytes, {
         fileName,
         size: stat.size,
         mtime: stat.mtime,
       });
+      const warnCount = [
+        result.flags.linkedMedia.ok,
+        result.flags.showType.ok,
+        result.flags.showMediaControls.ok,
+      ].filter((ok) => !ok).length;
+      log(
+        `parsed: ${fileName} — ${result.size} bytes, ${result.slideCount} slides ` +
+          `(${result.hiddenSlideCount} hidden), ${warnCount} warning(s)` +
+          (result.parseError ? `, parseError: ${result.parseError}` : ''),
+      );
       webviewPanel.webview.html = renderHtml(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      log(`ERROR opening ${fileName}: ${message}`);
       webviewPanel.webview.html = renderError(document.uri.path, message);
     }
   }

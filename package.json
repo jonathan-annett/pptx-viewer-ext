@@ -2,7 +2,7 @@
   "name": "pptx-viewer",
   "displayName": "Pptx Info",
   "description": "Read-only pptx metadata and validation viewer for vscode.dev",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "local",
   "license": "MIT",
   "private": true,
@@ -33,7 +33,13 @@
     "watch": "node esbuild.config.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
-    "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository"
+    "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
+    "publish:web": "node scripts/publish-web.cjs"
+  },
+  "webPublish": {
+    "repo": "jonathan-annett/jonathan-annett.github.io",
+    "branch": "main",
+    "folder": "vscode-ext-dev/pptx-viewer-ext"
   },
   "dependencies": {
     "fflate": "^0.8.2"
