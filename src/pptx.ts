@@ -93,6 +93,11 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const linkedMediaFound = anyLinkedMedia(entries);
   const showType = parseShowType(showSettingsXml);
   const mediaControlsOn = parseShowMediaControls(showSettingsXml);
+  // showMediaCtrls only matters when there's embedded video for the controls
+  // to attach to. A file with the setting on but no video has nothing to
+  // show — so we don't warn. Audio doesn't get an on-screen controls bar in
+  // PowerPoint slideshow mode, so audio-only files are excluded here too.
+  const hasEmbeddedVideo = embeddedMedia.some((m) => m.mime.startsWith('video/') && m.count > 0);
 
   return {
     fileName: info.fileName,
@@ -117,9 +122,24 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
           : showType === 'browse'
           ? { ok: false, label: 'Show type', detail: 'Window/browse mode (<p:browse/>) is set' }
           : { ok: true, label: 'Show type', detail: 'Presenter mode (default)' },
-      showMediaControls: mediaControlsOn
-        ? { ok: false, label: 'Show media controls', detail: 'showMediaCtrls is enabled (val="1") or unset — PowerPoint default is on' }
-        : { ok: true, label: 'Show media controls', detail: 'showMediaCtrls is explicitly disabled (val="0")' },
+      showMediaControls:
+        mediaControlsOn && hasEmbeddedVideo
+          ? {
+              ok: false,
+              label: 'Show media controls',
+              detail: 'showMediaCtrls is enabled (val="1") or unset (PowerPoint default), and embedded video is present',
+            }
+          : !mediaControlsOn
+          ? {
+              ok: true,
+              label: 'Show media controls',
+              detail: 'showMediaCtrls is explicitly disabled (val="0")',
+            }
+          : {
+              ok: true,
+              label: 'Show media controls',
+              detail: 'showMediaCtrls is on, but no embedded video — controls have nothing to attach to',
+            },
     },
     parseError,
   };

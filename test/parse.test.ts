@@ -127,8 +127,9 @@ async function testBad() {
 }
 
 // ---- Test 3: Messy — missing author, no <p:showPr/> at all ----
-// PowerPoint's default for showMediaCtrls is true when absent (matches the
-// "Has media controls.pptx" sample, which has no showPr but is the warn case).
+// PowerPoint's default for showMediaCtrls is true when absent. The
+// showMediaControls warn additionally requires embedded video to be present —
+// this messy fixture has no media, so controls "on" is harmless and we pass.
 async function testMessy() {
   const bytes = makePptx({
     '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`,
@@ -140,7 +141,8 @@ async function testMessy() {
   assert.equal(r.author, 'unknown');
   assert.equal(r.lastModifiedBy, 'unknown');
   assert.equal(r.flags.showType.ok, true, 'no showPr => presenter pass');
-  assert.equal(r.flags.showMediaControls.ok, false, 'no showPr => controls default ON, warn');
+  assert.equal(r.flags.showMediaControls.ok, true, 'no video => controls flag passes regardless of setting');
+  assert.match(r.flags.showMediaControls.detail, /no embedded video/i);
   console.log('  ok: messy');
 }
 
@@ -161,7 +163,9 @@ async function testBrowse() {
   console.log('  ok: browse');
 }
 
-// ---- Test 5: Self-closing <p:showPr/> — no inner setting → ECMA default ON ----
+// ---- Test 5: Self-closing <p:showPr/> — no inner setting → ECMA default ON.
+// With no embedded video the controls flag still passes (the warn requires both
+// controls-on and embedded video). A separate test below covers the warn path.
 async function testSelfClosingShowPr() {
   const bytes = makePptx({
     '[Content_Types].xml': `<?xml version="1.0"?><Types/>`,
@@ -173,9 +177,45 @@ async function testSelfClosingShowPr() {
     'ppt/slides/slide1.xml': slide(),
   });
   const r = await parsePptx(bytes, info);
-  assert.equal(r.flags.showMediaControls.ok, false, 'self-closing showPr → ECMA default = controls on, warn');
+  assert.equal(r.flags.showMediaControls.ok, true, 'self-closing showPr + no video → pass');
+  assert.match(r.flags.showMediaControls.detail, /no embedded video/i);
   assert.equal(r.flags.showType.ok, true, 'no child => presenter pass');
   console.log('  ok: self-closing showPr');
+}
+
+// ---- Test 5c: Controls on AND embedded video — both conditions, warn fires.
+async function testControlsOnWithVideo() {
+  const bytes = makePptx({
+    '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="mp4" ContentType="video/mp4"/>
+    </Types>`,
+    'docProps/core.xml': core('A', 'B'),
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({ showPr: `<p:showPr/>` }), // default ON
+    'ppt/slides/slide1.xml': slide(),
+    'ppt/media/media1.mp4': new Uint8Array([0, 0, 0, 1]),
+  });
+  const r = await parsePptx(bytes, info);
+  assert.equal(r.flags.showMediaControls.ok, false, 'controls on + embedded video → warn');
+  assert.match(r.flags.showMediaControls.detail, /embedded video is present/i);
+  console.log('  ok: controls on + video warns');
+}
+
+// ---- Test 5d: Controls on but only embedded audio — no warn (audio not gated).
+async function testControlsOnWithAudioOnly() {
+  const bytes = makePptx({
+    '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="mp3" ContentType="audio/mpeg"/>
+    </Types>`,
+    'docProps/core.xml': core('A', 'B'),
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({ showPr: `<p:showPr/>` }), // default ON
+    'ppt/slides/slide1.xml': slide(),
+    'ppt/media/audio1.mp3': new Uint8Array([0, 0, 0, 1]),
+  });
+  const r = await parsePptx(bytes, info);
+  assert.equal(r.flags.showMediaControls.ok, true, 'controls on + audio only → pass');
+  console.log('  ok: controls on + audio only passes');
 }
 
 // ---- Test 5b: Default-by-extension media in Content_Types — count per actual zip part.
@@ -287,10 +327,14 @@ async function testRealSamples() {
     mediaCtrlsOk: boolean;
     embeddedMedia?: string[]; // ["video/mp4:2", ...] — checked only when provided
   }> = [
-    { file: 'Has media controls.pptx', showType: 'presenter', mediaCtrlsOk: false },
-    { file: 'No media controls.pptx',  showType: 'presenter', mediaCtrlsOk: true  },
-    { file: 'Is kiosk.pptx',           showType: 'kiosk',     mediaCtrlsOk: false },
-    { file: 'Is windowed.pptx',        showType: 'browse',    mediaCtrlsOk: false },
+    // mediaCtrlsOk now requires (controls-on AND embedded-video) to fail.
+    // None of the first four samples contain video, so all four pass the
+    // controls flag regardless of the underlying setting.
+    { file: 'Has media controls.pptx', showType: 'presenter', mediaCtrlsOk: true },
+    { file: 'No media controls.pptx',  showType: 'presenter', mediaCtrlsOk: true },
+    { file: 'Is kiosk.pptx',           showType: 'kiosk',     mediaCtrlsOk: true },
+    { file: 'Is windowed.pptx',        showType: 'browse',    mediaCtrlsOk: true },
+    // has media.pptx has 2 embedded mp4s and the default (on) controls setting → warn.
     { file: 'has media.pptx',          showType: 'presenter', mediaCtrlsOk: false, embeddedMedia: ['video/mp4:2'] },
   ];
   for (const c of cases) {
@@ -334,6 +378,8 @@ async function testRealSamples() {
   await testMessy();
   await testBrowse();
   await testSelfClosingShowPr();
+  await testControlsOnWithVideo();
+  await testControlsOnWithAudioOnly();
   await testDefaultExtensionMedia();
   await testInternalMediaIsFine();
   await testGarbage();
