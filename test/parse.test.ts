@@ -8,6 +8,8 @@
 // Run with: npm run test:parse
 
 import { strict as assert } from 'node:assert';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { zipSync, strToU8 } from 'fflate';
 import { parsePptx } from '../src/pptx';
 
@@ -39,11 +41,20 @@ function core(creator: string | null, lastMod: string | null): string {
 </cp:coreProperties>`;
 }
 
-function presentation(opts: { showPr?: string } = {}): string {
+function presentation(): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  ${opts.showPr ?? ''}
-</p:presentation>`;
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>`;
+}
+
+// PowerPoint writes <p:showPr> into ppt/presProps.xml, not presentation.xml.
+function presProps(opts: { showPr?: string } = {}): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentationPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">${opts.showPr ?? ''}</p:presentationPr>`;
+}
+
+// p14 extension element form: <p14:showMediaCtrls val="0|1"/> wrapped in <p:extLst>.
+function showMediaCtrlsExt(val: '0' | '1'): string {
+  return `<p:extLst><p:ext uri="{2FDB2607-1784-4EEB-B798-7EB5836EED8A}"><p14:showMediaCtrls xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" val="${val}"/></p:ext></p:extLst>`;
 }
 
 function rels(entries: string): string {
@@ -63,6 +74,9 @@ async function testNormal() {
     </Types>`,
     'docProps/core.xml': core('Alice Author', 'Bob Editor'),
     'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({
+      showPr: `<p:showPr><p:present/>${showMediaCtrlsExt('0')}</p:showPr>`,
+    }),
     'ppt/slides/slide1.xml': slide(),
     'ppt/slides/slide2.xml': slide(),
   });
@@ -74,7 +88,7 @@ async function testNormal() {
   assert.equal(r.embeddedMedia.length, 0);
   assert.equal(r.flags.linkedMedia.ok, true, 'linked media pass');
   assert.equal(r.flags.showType.ok, true, 'show type pass');
-  assert.equal(r.flags.showMediaControls.ok, true, 'media controls pass');
+  assert.equal(r.flags.showMediaControls.ok, true, 'media controls pass (val=0)');
   assert.match(r.sha256, /^[0-9a-f]{64}$/);
   console.log('  ok: normal');
 }
@@ -88,8 +102,9 @@ async function testBad() {
       <Override PartName="/ppt/media/audio1.mp3" ContentType="audio/mpeg"/>
     </Types>`,
     'docProps/core.xml': core('Bad Actor', 'Bad Actor'),
-    'ppt/presentation.xml': presentation({
-      showPr: `<p:showPr showMediaControls="1"><p:kiosk/></p:showPr>`,
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({
+      showPr: `<p:showPr><p:kiosk/>${showMediaCtrlsExt('1')}</p:showPr>`,
     }),
     'ppt/slides/slide1.xml': slide('0'), // hidden
     'ppt/slides/slide2.xml': slide(),
@@ -112,6 +127,8 @@ async function testBad() {
 }
 
 // ---- Test 3: Messy — missing author, no <p:showPr/> at all ----
+// PowerPoint's default for showMediaCtrls is true when absent (matches the
+// "Has media controls.pptx" sample, which has no showPr but is the warn case).
 async function testMessy() {
   const bytes = makePptx({
     '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`,
@@ -123,7 +140,7 @@ async function testMessy() {
   assert.equal(r.author, 'unknown');
   assert.equal(r.lastModifiedBy, 'unknown');
   assert.equal(r.flags.showType.ok, true, 'no showPr => presenter pass');
-  assert.equal(r.flags.showMediaControls.ok, true, 'no showPr => controls pass');
+  assert.equal(r.flags.showMediaControls.ok, false, 'no showPr => controls default ON, warn');
   console.log('  ok: messy');
 }
 
@@ -132,8 +149,9 @@ async function testBrowse() {
   const bytes = makePptx({
     '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>`,
     'docProps/core.xml': core('X', 'Y'),
-    'ppt/presentation.xml': presentation({
-      showPr: `<p:showPr><p:browse/></p:showPr>`,
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({
+      showPr: `<p:showPr><p:browse/>${showMediaCtrlsExt('0')}</p:showPr>`,
     }),
     'ppt/slides/slide1.xml': slide(),
   });
@@ -143,18 +161,19 @@ async function testBrowse() {
   console.log('  ok: browse');
 }
 
-// ---- Test 5: Self-closing <p:showPr/> with showMediaControls ----
+// ---- Test 5: Self-closing <p:showPr/> — no inner setting → ECMA default ON ----
 async function testSelfClosingShowPr() {
   const bytes = makePptx({
     '[Content_Types].xml': `<?xml version="1.0"?><Types/>`,
     'docProps/core.xml': core('A', 'B'),
-    'ppt/presentation.xml': presentation({
-      showPr: `<p:showPr showMediaControls="true"/>`,
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps({
+      showPr: `<p:showPr/>`,
     }),
     'ppt/slides/slide1.xml': slide(),
   });
   const r = await parsePptx(bytes, info);
-  assert.equal(r.flags.showMediaControls.ok, false, 'self-closing with controls=true');
+  assert.equal(r.flags.showMediaControls.ok, false, 'self-closing showPr → ECMA default = controls on, warn');
   assert.equal(r.flags.showType.ok, true, 'no child => presenter pass');
   console.log('  ok: self-closing showPr');
 }
@@ -227,6 +246,51 @@ async function testThumbnail() {
   console.log('  ok: thumbnail extraction');
 }
 
+// ---- Test 9: Real-world samples — exercise the parser against actual PowerPoint output.
+// Samples live in samples/ and are checked into the repo. The existsSync guard
+// keeps the test conditional in case the dir is ever absent (shallow clone etc.).
+async function testRealSamples() {
+  const samplesDir = join(__dirname, '..', 'samples');
+  if (!existsSync(samplesDir)) {
+    console.log('  skip: real samples (samples/ not present)');
+    return;
+  }
+  const cases: Array<{
+    file: string;
+    showType: 'presenter' | 'browse' | 'kiosk';
+    mediaCtrlsOk: boolean;
+  }> = [
+    { file: 'Has media controls.pptx', showType: 'presenter', mediaCtrlsOk: false },
+    { file: 'No media controls.pptx',  showType: 'presenter', mediaCtrlsOk: true  },
+    { file: 'Is kiosk.pptx',           showType: 'kiosk',     mediaCtrlsOk: false },
+    { file: 'Is windowed.pptx',        showType: 'browse',    mediaCtrlsOk: false },
+  ];
+  for (const c of cases) {
+    const path = join(samplesDir, c.file);
+    if (!existsSync(path)) {
+      console.log(`  skip: ${c.file} not found`);
+      continue;
+    }
+    const bytes = new Uint8Array(readFileSync(path));
+    const st = statSync(path);
+    const r = await parsePptx(bytes, { fileName: c.file, size: st.size, mtime: st.mtimeMs });
+    const expectShowTypeOk = c.showType === 'presenter';
+    assert.equal(
+      r.flags.showType.ok, expectShowTypeOk,
+      `${c.file}: showType.ok expected ${expectShowTypeOk}, got ${r.flags.showType.ok} (detail: ${r.flags.showType.detail})`,
+    );
+    if (c.showType !== 'presenter') {
+      assert.match(r.flags.showType.detail, new RegExp(c.showType, 'i'),
+        `${c.file}: showType.detail should mention ${c.showType}`);
+    }
+    assert.equal(
+      r.flags.showMediaControls.ok, c.mediaCtrlsOk,
+      `${c.file}: showMediaControls.ok expected ${c.mediaCtrlsOk}, got ${r.flags.showMediaControls.ok} (detail: ${r.flags.showMediaControls.detail})`,
+    );
+    console.log(`  ok: ${c.file} (showType=${c.showType}, mediaCtrlsOk=${c.mediaCtrlsOk})`);
+  }
+}
+
 (async () => {
   console.log('parse.test.ts');
   await testNormal();
@@ -237,6 +301,7 @@ async function testThumbnail() {
   await testInternalMediaIsFine();
   await testGarbage();
   await testThumbnail();
+  await testRealSamples();
   console.log('all tests passed');
 })().catch((err) => {
   console.error('FAIL:', err);

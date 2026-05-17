@@ -68,7 +68,12 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
 
   const contentTypes = readText(entries['[Content_Types].xml']);
   const core = readText(entries['docProps/core.xml']);
+  // <p:showPr> is written by PowerPoint into ppt/presProps.xml, NOT
+  // ppt/presentation.xml. We also fall back to presentation.xml for tolerance
+  // — the element shape is the same and some tooling writes it there.
+  const presProps = readText(entries['ppt/presProps.xml']);
   const presentation = readText(entries['ppt/presentation.xml']);
+  const showSettingsXml = presProps || presentation;
 
   const slideNames = Object.keys(entries)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
@@ -86,8 +91,8 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const thumbnail = extractThumbnail(entries);
 
   const linkedMediaFound = anyLinkedMedia(entries);
-  const showType = parseShowType(presentation);
-  const mediaControlsOn = parseShowMediaControls(presentation);
+  const showType = parseShowType(showSettingsXml);
+  const mediaControlsOn = parseShowMediaControls(showSettingsXml);
 
   return {
     fileName: info.fileName,
@@ -113,8 +118,8 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
           ? { ok: false, label: 'Show type', detail: 'Window/browse mode (<p:browse/>) is set' }
           : { ok: true, label: 'Show type', detail: 'Presenter mode (default)' },
       showMediaControls: mediaControlsOn
-        ? { ok: false, label: 'Show media controls', detail: 'showMediaControls is enabled on <p:showPr>' }
-        : { ok: true, label: 'Show media controls', detail: 'showMediaControls is absent or disabled' },
+        ? { ok: false, label: 'Show media controls', detail: 'showMediaCtrls is enabled (val="1") or unset — PowerPoint default is on' }
+        : { ok: true, label: 'Show media controls', detail: 'showMediaCtrls is explicitly disabled (val="0")' },
     },
     parseError,
   };
@@ -248,10 +253,36 @@ function parseShowType(presXml: string): 'presenter' | 'browse' | 'kiosk' {
   return 'presenter';
 }
 
+// PowerPoint encodes the "show media controls during slideshow" setting as a
+// p14 extension element nested inside <p:showPr>:
+//
+//   <p:showPr>
+//     <p:extLst>
+//       <p:ext uri="{2FDB2607-1784-4EEB-B798-7EB5836EED8A}">
+//         <p14:showMediaCtrls val="1"/>     (or val="0")
+//
+// Note: element name is "showMediaCtrls" (no -ols), with val="0|1|true|false".
+// Per ECMA-376 the value defaults to true when absent — and that matches the
+// samples in samples/: "Has media controls.pptx" has no <p:showPr> at all but
+// the user named it as the warn case. So:
+//   - showPr absent, or showPr present without a showMediaCtrls element → ON
+//   - explicit val="0" / "false"                                         → OFF
+//   - explicit val="1" / "true"                                          → ON
+// We also keep a tolerant fallback for an attribute-style spelling on showPr
+// in case some other tool writes it that way.
 function parseShowMediaControls(presXml: string): boolean {
   const block = getShowPrBlock(presXml);
-  if (!block) return false;
-  return /\bshowMediaControls="(1|true)"/i.test(block);
+  if (!block) return true;
+  // Attribute-style fallback (not used by PowerPoint but harmless to support).
+  const attr = block.match(/\bshowMediaControls="(1|0|true|false)"/i);
+  if (attr) return attr[1] === '1' || attr[1].toLowerCase() === 'true';
+  // p14 extension element form (what PowerPoint actually writes).
+  const ext = block.match(/<(?:[A-Za-z0-9_-]+:)?showMediaCtrls\b[^>]*\bval="(1|0|true|false)"/i);
+  if (ext) return ext[1] === '1' || ext[1].toLowerCase() === 'true';
+  // Element present but no val (rare): defaults to true.
+  if (/<(?:[A-Za-z0-9_-]+:)?showMediaCtrls\b/i.test(block)) return true;
+  // showPr present but no explicit setting → ECMA-376 default = true.
+  return true;
 }
 
 // Pull docProps/thumbnail.<ext> out of the zip and turn it into a data URL.
