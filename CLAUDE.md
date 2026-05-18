@@ -1,6 +1,6 @@
 # SUBSTRATE — pptx-viewer-ext
 
-This document describes the world an agent works within on this project: what the project is, how the dev workflow operates, what conventions apply, and where to find things. It is paired with **task briefs** in `briefs/` that describe the specific feature being worked on this iteration.
+This document describes the world an agent works within on this project: what the project is, how the dev workflow operates, what conventions apply, and where to find things. It is paired with the **project plan** at the repo root (`folder-sync-v1-plan.md`) that describes the specific feature being worked on this iteration.
 
 Substrate changes slowly and deliberately. When reality drifts from this doc, it gets updated as a sign-off action on the relevant feature — small diffs on commit, never rewrites from scratch.
 
@@ -10,7 +10,7 @@ Substrate changes slowly and deliberately. When reality drifts from this doc, it
 
 A VS Code **web extension** targeting **vscode.dev**.
 
-The long-term goal is a **one-way folder sync tool** for vscode.dev users: read access on a source folder tree, write access on one or more destination trees, user-convened sync with a plan-gate-execute model. Full spec in `briefs/folder-sync-v1-plan.md`.
+The long-term goal is a **one-way folder sync tool** for vscode.dev users: read access on a source folder tree, write access on one or more destination trees, user-convened sync with a plan-gate-execute model. Full spec in `folder-sync-v1-plan.md` at the repo root.
 
 The first feature shipped — and still part of v1 — is a **pptx viewer**. When a user opens a `.pptx` file with the extension installed, a custom read-only editor shows file metadata, content hash, three validation flags (linked external media, kiosk/window show mode, media-controls-enabled), and a thumbnail when one is embedded. The viewer's parsing layer is also the input to the sync engine's pptx validator, so the two features share code.
 
@@ -160,14 +160,13 @@ Things tried and found wrong. Don't propose them again without new evidence:
 
 ---
 
-## Briefs and project history
+## Project plans
 
-Task briefs live in `briefs/` and are the per-iteration instruction set the agent works against. Substrate (this doc) is the world the brief operates in. They have different lifecycles and should not be merged.
+Project plans live at the repo root and are the per-iteration instruction set the agent works against. Substrate (this doc) is the world the plan operates in. They have different lifecycles and should not be merged.
 
-Current briefs:
+Current plan:
 
-- `briefs/folder-sync-v1-plan.md` — **active target.** Adds folder sync to the extension alongside the existing pptx viewer. The next major piece of work.
-- `briefs/pptx-viewer-agent-plan.md` — historical reference. The original bootstrap brief that produced the pptx viewer. Worth reading for the conventions it established (defensive parsing, validation flags, the "one decision surface" UX) since those carry into the sync work.
+- `folder-sync-v1-plan.md` — **active target.** Adds folder sync to the extension alongside the existing pptx viewer. The next major piece of work.
 
 ---
 
