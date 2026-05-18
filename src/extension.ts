@@ -3,6 +3,8 @@
 import * as vscode from 'vscode';
 import { PptxEditorProvider } from './provider';
 import { initLog, log } from './log';
+import { SyncManager } from './sync/manager';
+import { createStatusBarItem } from './sync/statusBar';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -12,12 +14,29 @@ import { initLog, log } from './log';
 // context creation and would freeze the values at watcher start.
 const BUILD_INFO_RAW = '__PPTX_BUILD_INFO_PLACEHOLDER__';
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLog(context);
   log(`activate: pptx-viewer ${packageVersion(context)} loaded`);
   logBuildInfo();
   context.subscriptions.push(PptxEditorProvider.register());
   log('activate: custom editor registered for *.pptx');
+
+  // Sync feature — M1: config layer + diagnostics. The manager owns yaml
+  // discovery, hot-reload, and topology resolution. The status bar and the
+  // showTopology command are surface layers over the manager's state.
+  const manager = await SyncManager.create(context);
+  createStatusBarItem(context, manager);
+  context.subscriptions.push(
+    vscode.commands.registerCommand('folderSync.showTopology', () => {
+      log('sync: showTopology invoked');
+      log('--- topology ---');
+      for (const line of manager.dumpTopology().split('\n')) log(line);
+      log('--- end topology ---');
+      // Surface the Output Channel so the user can read what just printed.
+      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+    }),
+  );
+  log('activate: folder sync manager initialised');
 }
 
 export function deactivate(): void {

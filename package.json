@@ -33,6 +33,13 @@
         ],
         "priority": "default"
       }
+    ],
+    "commands": [
+      {
+        "command": "folderSync.showTopology",
+        "title": "Folder Sync: Show Topology",
+        "category": "Folder Sync"
+      }
     ]
   },
   "scripts": {
@@ -42,6 +49,7 @@
     "watch": "node esbuild.config.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
+    "test:sync-yaml": "node --import tsx test/sync-yaml.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
