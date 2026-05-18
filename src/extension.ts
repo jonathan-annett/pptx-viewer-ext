@@ -6,6 +6,7 @@ import { initLog, log } from './log';
 import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
+import { openPlanPanel } from './sync/planView';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -45,6 +46,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log(`sync: dryRunPlan failed — ${err instanceof Error ? err.message : String(err)}`);
       }
       void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+    }),
+    vscode.commands.registerCommand('folderSync.openPlan', async () => {
+      await openPlanPanel(manager.getTopology());
     }),
   );
   log('activate: folder sync manager initialised');
