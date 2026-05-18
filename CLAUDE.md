@@ -65,7 +65,7 @@ The phone-resident agent does its work in Termux on Android, pushing to GitHub. 
 ```
 phone agent edits src/*.ts  →  commit  →  push to origin/main
                                        ↓
-user runs `git pull` on the VPS in the repo dir
+agent (or user) runs `git pull` on the VPS in the repo dir
                                        ↓
 pm2-managed esbuild --watch picks up the change via inotify
                                        ↓
@@ -78,13 +78,30 @@ new code runs
 
 That's the loop. Most cycles need nothing more.
 
+### Agent VPS access
+
+The phone agent has SSH access to the VPS as `jonathan@vscode.sophtwhere.com`. The checkout lives at `~/pptx-viewer-ext`. The pm2 process layout: `pptx-watch` (esbuild `--watch`) and `pptx-dev-server` (Koa test-web server).
+
+What the agent can do unprompted:
+
+- `git pull --ff-only origin main` in the repo dir right after pushing — closes the loop without making the user switch terminals. `--ff-only` makes any unexpected divergence a loud failure instead of an implicit merge.
+- Read-only verification: `git log`, `git rev-parse`, `pm2 logs <name> --nostream`, `pm2 jlist`, file reads, `npm run test:*`.
+- Inspect the embedded `gitSha` in `dist/extension.js` to confirm a rebuild fired (grep for `buildTime` / `gitSha`).
+
+What the agent should ask about first:
+
+- `pm2 restart` of any process — interrupts the live test harness for whoever is using it.
+- `npm install` on the VPS — mutates `node_modules`; may require a watcher restart afterwards.
+- Edits to anything outside the git checkout (Caddyfile, systemd units, infra docs).
+- Any action in the exceptions table below — the agent can perform them, but they're exception-path operations and warrant a heads-up.
+
 ### Local smoke test before pushing
 
 `npm run test:parse` runs `test/parse.test.ts` under Node via tsx. It exercises the parser against synthetic in-memory zips covering each code path (normal, warnings, malformed, thumbnail extraction). Cheap, no VS Code dependency — run it before any push that touches `src/pptx.ts`.
 
 ### Exceptions — extra step on the VPS
 
-| If the diff touches… | User also runs |
+| If the diff touches… | Also run after the pull |
 |---|---|
 | `package.json` deps or `package-lock.json` | `npm install` |
 | `scripts/*.cjs` preloads, or `package.json` `scripts` entries | `pm2 restart pptx-dev-server` |
