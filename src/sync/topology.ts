@@ -27,6 +27,9 @@ export interface ResolvedSource {
   yamlUri: vscode.Uri;
   sourceFolderUri: vscode.Uri;
   workspaceFolderUri: vscode.Uri;
+  /** Name of the source's enclosing workspace folder. Used as the source
+   * identifier in manifest keys. */
+  workspaceFolderName: string;
   destinations: ResolvedDestination[];
 }
 
@@ -53,7 +56,11 @@ export function resolveTopology(
   const sources: ResolvedSource[] = [];
 
   const byName = new Map<string, vscode.WorkspaceFolder>();
-  for (const f of workspaceFolders) byName.set(f.name, f);
+  const byUri = new Map<string, vscode.WorkspaceFolder>();
+  for (const f of workspaceFolders) {
+    byName.set(f.name, f);
+    byUri.set(f.uri.toString(), f);
+  }
 
   for (const load of loads) {
     if (load.config === null) {
@@ -105,10 +112,12 @@ export function resolveTopology(
       });
     }
 
+    const sourceWsFolder = byUri.get(load.workspaceFolderUri.toString());
     sources.push({
       yamlUri: load.yamlUri,
       sourceFolderUri: load.sourceFolderUri,
       workspaceFolderUri: load.workspaceFolderUri,
+      workspaceFolderName: sourceWsFolder?.name ?? '<unknown>',
       destinations: resolved,
     });
   }

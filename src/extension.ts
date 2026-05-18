@@ -5,6 +5,7 @@ import { PptxEditorProvider } from './provider';
 import { initLog, log } from './log';
 import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
+import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -33,6 +34,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       for (const line of manager.dumpTopology().split('\n')) log(line);
       log('--- end topology ---');
       // Surface the Output Channel so the user can read what just printed.
+      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+    }),
+    vscode.commands.registerCommand('folderSync.dryRunPlan', async () => {
+      log('sync: dryRunPlan invoked');
+      try {
+        const plans = await buildDryRunPlan(manager.getTopology());
+        for (const line of formatDryRunPlan(plans).split('\n')) log(line);
+      } catch (err) {
+        log(`sync: dryRunPlan failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
       void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
     }),
   );
