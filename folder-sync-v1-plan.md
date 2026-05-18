@@ -358,3 +358,17 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 - Per-file failures don't abort the run; summary surfaces them clearly
 - Pptx validation flags appear in the plan as a dedicated category and behave as blocks
 - All vscode.dev FSA constraints respected: no Node APIs, web-extension only, atomic writes via tmp + rename
+
+---
+
+## Post-v1 roadmap
+
+Items raised in conversation that wait until v1 ships. Listed in rough order of expected value; sequencing decided when v1 is closer to done.
+
+### `.sync.yaml` editor with embedded dry-run
+
+A custom editor for `.sync.yaml` files. Upper half: form-style controls that list currently-open workspace folders so destinations can be picked from a dropdown rather than typed (eliminates the unresolved-name failure mode at authoring time, not just at load). Lower half: the existing plan webview, refreshed by a "Dry run" button on the editor. Reuses `renderPlanHtml` + `buildDryRunPlan` from M3 — no new engine, just a new front door that ties authoring and previewing into one surface.
+
+### Per-file sync from the pptx viewer
+
+A "Sync now" action on the pptx custom editor's metadata page. Resolves the file's source `.sync.yaml` (nearest-yaml rule), pushes the single file to each destination immediately (no plan/gate cycle — the user already saw the file open), updates the manifest, and surfaces sync status as a new metadata row (last synced timestamp + destination list, or "not under a sync source"). Skips the collision/validator gate when invoked this way — the user is acting on one known file and has the viewer's validation output in front of them.
