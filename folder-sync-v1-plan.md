@@ -280,9 +280,9 @@ Raised in conversation, deliberately not in v1:
 
 The v1 scope is sequenced into six milestones. Each milestone is a single coherent diff, testable end-to-end on the VPS test harness, and leaves the existing pptx viewer untouched. Earlier milestones de-risk later ones — the config layer and plan engine are exercised long before any code writes a file.
 
-### M1 — Config layer + diagnostics
+### M1 — Config layer + diagnostics ✅ shipped (commit 4a60c73)
 
-- Add the `yaml` npm package and load `.sync.yaml` files via `vscode.workspace.findFiles`
+- Load `.sync.yaml` files via `vscode.workspace.findFiles`, parsed with a hand-rolled subset parser (`src/sync/yaml-mini.ts`) — the `yaml` npm package was tried first and dropped because it added 207 KB to the bundle
 - `FileSystemWatcher` on `**/.sync.yaml` for hot reload
 - Topology validation at load: destination name resolution, subpath collision detection, malformed yaml reporting
 - Output Channel diagnostics for each load cycle
@@ -291,13 +291,13 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 
 **Done when:** authoring a yaml causes topology to resolve live, unresolved destinations produce a warning, the topology command prints the current resolved view.
 
-### M2 — Plan engine (workspace-wide, no UI)
+### M2 — Plan engine (workspace-wide, no UI) ✅ shipped (commit 9e05937)
 
 - Glob matching for `include`/`exclude` plus the built-in ignore list
 - Source-tree walk via `vscode.workspace.fs`
 - SHA-256 hashing via `crypto.subtle`
-- Manifest reader (missing/corrupt treated as "no entries")
-- State comparison producing the six operation categories (create, update-tracked, update-collision, skip-unchanged, delete-tracked, destination-only)
+- Manifest reader (missing/corrupt treated as "no entries"). Split into `manifest-types.ts` (pure data) and `manifest.ts` (vscode I/O) so the pure plan tests can run under tsx without a vscode shim.
+- State comparison producing the six operation categories (create, update-tracked, update-collision, skip-unchanged, delete-tracked, destination-only) — pure function in `src/sync/plan.ts`, no vscode dependency
 - Command **Folder Sync: Dry-Run Plan** — dumps the categorized plan to the Output Channel
 
 **Done when:** every operation category is exercisable by setting up the right source/destination state and verifying the output text. No filesystem writes anywhere yet.
