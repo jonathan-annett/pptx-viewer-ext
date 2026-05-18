@@ -1,10 +1,17 @@
 # Pptx Info — VS Code web extension
 
-A read-only viewer for `.pptx` files. It does not render slides; it surfaces
-metadata and three safety-relevant validation flags so a file can be inspected
-at a glance before opening it in PowerPoint.
+A VS Code web extension that combines two features:
 
-## What it shows
+1. **Pptx viewer** — a read-only viewer for `.pptx` files that surfaces
+   metadata and three safety-relevant validation flags so a file can be
+   inspected at a glance before opening it in PowerPoint. (No slide
+   rendering — by design.)
+2. **Folder sync** *(in development)* — a one-way folder sync for
+   vscode.dev: read access on a source folder tree, write access on one or
+   more destination folders, user-convened with a plan-gate-execute model.
+   The pptx viewer's validation checks plug into the sync as flagged items.
+
+## What the pptx viewer shows
 
 **Metadata**: file name, size, mtime, SHA-256, slide count, hidden slide count,
 author, last-modified-by, embedded media (mime → count).
@@ -23,6 +30,82 @@ Once installed, activation and per-file events are logged in two places:
 
 - **Output panel** — *View → Output → Pptx Info*
 - **DevTools console** — *Help → Toggle Developer Tools*, lines are prefixed `[pptx-viewer]`
+
+## Folder sync (in development)
+
+The folder-sync feature is being shipped incrementally. Currently landed
+(milestone M1):
+
+- `.sync.yaml` discovery across all workspace folders
+- Schema validation and topology resolution (matching destination names to
+  open workspace folders, detecting subpath collisions)
+- Hot-reload via `FileSystemWatcher` — edit a yaml and the topology
+  re-resolves
+- Status bar item showing source/destination counts and any issues
+- Command palette: **Folder Sync: Show Topology** — dumps the resolved view
+  to the Output Channel
+
+No filesystem writes happen yet — the plan engine, plan webview, executor,
+and manifest layer ship in later milestones (M2–M6). See
+`folder-sync-v1-plan.md` at the repo root for the full spec.
+
+### `.sync.yaml` example
+
+```yaml
+# .sync.yaml at the root of any folder you want treated as a source.
+# This file itself is implicitly excluded from sync.
+
+destinations:
+  # Minimal: just a workspace folder name. Whole source goes to the
+  # destination's root.
+  - name: usb-backup
+
+  # With a subpath — the source maps into a nested location.
+  - name: nas-archive
+    path: projects/alpha/2026
+
+  # Multiple destinations are independent; each gets the full source
+  # (filtered by the include/exclude rules below).
+  - name: dropbox-mirror
+    path: work/alpha
+
+# Glob patterns excluded in addition to the built-in ignores
+# (.git/, .DS_Store, Thumbs.db, ~$*, .sync.yaml itself,
+# .foldersync-manifest.json).
+exclude:
+  - "node_modules/**"
+  - "*.tmp"
+  - "build/**"
+  - ".vscode/**"
+  - "**/*.log"
+
+# Optional. Default is everything not excluded — only set this if you
+# want to whitelist specific patterns.
+include:
+  - "**/*"
+```
+
+### Field meanings
+
+- `destinations[].name` — must match a workspace folder name currently open
+  in vscode.dev. Unresolved names produce a warning at load and are skipped
+  at sync time.
+- `destinations[].path` — optional subpath under the destination. Normalised
+  (no leading or trailing slashes, no doubled separators).
+- `exclude` / `include` — glob patterns. The parser accepts them today;
+  enforcement lands with the plan engine in M2.
+
+### What to look for when testing M1
+
+- Workspace folder names in vscode.dev come from whatever you add via
+  *Add Folder to Workspace*. Pick simple, distinctive names — collisions
+  across destinations are detected and reported.
+- Two sources writing to the same destination subpath (e.g. both `.sync.yaml`
+  files declaring `name: usb-backup` with no `path`) trigger the collision
+  diagnostic.
+- An invalid yaml gets a `yaml parse error: line N:` message in the Output
+  Channel, the affected source is skipped, and the rest of the topology
+  still loads.
 
 ## Building
 
@@ -123,15 +206,22 @@ no-op when `process.platform !== 'android'`.
 
 ```
 src/
-  extension.ts   activate, register provider, log channel init
-  provider.ts    CustomReadonlyEditorProvider
-  pptx.ts        parse pptx bytes -> ParseResult
-  webview.ts     ParseResult -> HTML string
-  log.ts         OutputChannel + console mirror
+  extension.ts     activate, register provider, init sync manager, log channel
+  provider.ts      CustomReadonlyEditorProvider (pptx viewer)
+  pptx.ts          parse pptx bytes -> ParseResult
+  webview.ts       ParseResult -> HTML string
+  log.ts           OutputChannel + console mirror
+  sync/            folder sync feature (in development)
+    yaml-mini.ts     minimal YAML subset parser (no runtime deps)
+    config.ts        .sync.yaml loader + schema validation
+    topology.ts      destination resolution + collision detection
+    manager.ts       discovery, hot-reload, topology lifecycle
+    statusBar.ts     status bar item
 scripts/
   fix-cpus.cjs       Termux workaround for vsce
   fix-platform.cjs   Termux workaround for vscode-test-web
   publish-web.cjs    atomic GitHub Pages deploy
 test/
-  parse.test.ts  Node-runnable parser smoke test
+  parse.test.ts    Node-runnable pptx parser smoke test
+  sync-yaml.test.ts  Node-runnable mini YAML parser test
 ```
