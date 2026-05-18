@@ -296,27 +296,55 @@ function renderEmpty(): string {
 
 function renderFooter(blocking: number, hasWork: boolean): string {
   // Traffic-light per folder-sync-v1-plan.md:
-  // - No blocks: single green Proceed (disabled in M3, no execute path yet).
+  // - No blocks: single green Proceed (wired in M4).
   // - Blocks present: orange "Proceed with OK only" + red Cancel, no default.
-  // M3 always disables proceed; Cancel always closes the panel.
+  // The orange button stays disabled until inline decisions land in M5.
   if (blocking === 0) {
-    const proceedLabel = hasWork ? 'Proceed' : 'Nothing to do';
+    if (!hasWork) {
+      // No-op plan: nothing to do, only Cancel is meaningful.
+      return `<button type="button" class="btn btn-cancel" id="cancel-btn">Close</button>
+      <button type="button" class="btn btn-green" disabled>Nothing to do</button>`;
+    }
     return `<button type="button" class="btn btn-cancel" id="cancel-btn">Cancel</button>
-      <button type="button" class="btn btn-green" disabled title="Execution lands in M4">${escapeHtml(proceedLabel)}</button>`;
+      <button type="button" class="btn btn-green" id="proceed-btn">Proceed</button>`;
   }
   return `<button type="button" class="btn btn-orange" disabled title="Inline decisions land in M5">Proceed with OK only</button>
       <button type="button" class="btn btn-cancel btn-red" id="cancel-btn">Cancel</button>`;
 }
 
 function footerScript(): string {
-  // Single responsibility for M3: post a {type:'cancel'} message when the
-  // cancel button is clicked. The extension host listens and disposes the
-  // panel. No other interactivity ships in this milestone.
+  // M3 wired Cancel; M4 adds Proceed. Both post a typed message and disable
+  // both buttons immediately to prevent double-clicks during the in-flight
+  // operation. The extension host listens, disposes on cancel, runs sync on
+  // proceed, then disposes. Status messages from the extension during sync
+  // land in the proceed button's label so the user sees progress.
   return `(function(){
     const vscode = acquireVsCodeApi();
-    const btn = document.getElementById('cancel-btn');
-    if (btn) btn.addEventListener('click', function(){
+    const cancelBtn = document.getElementById('cancel-btn');
+    const proceedBtn = document.getElementById('proceed-btn');
+
+    function lock(label){
+      if (cancelBtn) cancelBtn.disabled = true;
+      if (proceedBtn) {
+        proceedBtn.disabled = true;
+        if (label) proceedBtn.textContent = label;
+      }
+    }
+
+    if (cancelBtn) cancelBtn.addEventListener('click', function(){
       try { vscode.postMessage({type:'cancel'}); } catch (_) {}
+    });
+    if (proceedBtn) proceedBtn.addEventListener('click', function(){
+      lock('Syncing\\u2026');
+      try { vscode.postMessage({type:'proceed'}); } catch (_) {}
+    });
+
+    window.addEventListener('message', function(e){
+      const m = e.data;
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'status' && typeof m.label === 'string') {
+        lock(m.label);
+      }
     });
   })();`;
 }

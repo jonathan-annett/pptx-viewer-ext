@@ -127,7 +127,7 @@ test('renderPlanHtml: CSP, nonce, scope label, totals chips appear', () => {
   assert.ok(html.includes('aabbccdd'), 'short source hash not rendered');
 });
 
-test('renderPlanHtml: clean plan shows green Proceed (disabled) + Cancel', () => {
+test('renderPlanHtml: clean plan with work shows enabled green Proceed + Cancel', () => {
   const plans = [
     fakePlan({
       destName: 'backup',
@@ -138,10 +138,31 @@ test('renderPlanHtml: clean plan shows green Proceed (disabled) + Cancel', () =>
   const html = renderPlanHtml(vm, 'n');
 
   // Scope to <button> tags — the CSS contains the class names as selectors too.
+  // In M4, a clean plan with work to do has an enabled Proceed button so the
+  // user can run the sync. Disabled-state assertions live in the no-work and
+  // collision-block tests below.
   assert.ok(/<button[^>]*class="btn btn-green"/.test(html), 'green proceed button missing');
-  assert.ok(/<button[^>]*disabled[^>]*>Proceed</.test(html), 'proceed button not disabled');
+  assert.ok(html.includes('id="proceed-btn"'), 'proceed-btn id missing');
+  assert.ok(!/<button[^>]*id="proceed-btn"[^>]*disabled/.test(html), 'proceed should not be disabled');
   assert.ok(html.includes('id="cancel-btn"'), 'cancel button missing');
   assert.ok(!/<button[^>]*btn-orange/.test(html), 'orange button leaked into clean plan');
+});
+
+test('renderPlanHtml: clean plan with NO work shows Close + disabled "Nothing to do"', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('skip', 'a.txt', { sourceSize: 1, sourceHash: 'h', destHash: 'h' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+
+  // No actionable work → no proceed-btn id; the green button is just an
+  // informational "Nothing to do" placeholder; cancel doubles as Close.
+  assert.ok(!html.includes('id="proceed-btn"'), 'proceed-btn must be absent on no-op plan');
+  assert.ok(/<button[^>]*class="btn btn-green"[^>]*disabled[^>]*>Nothing to do</.test(html), 'disabled "Nothing to do" missing');
+  assert.ok(/<button[^>]*id="cancel-btn"[^>]*>Close</.test(html), 'Close button missing');
 });
 
 test('renderPlanHtml: plan with collisions shows orange + red, no green', () => {

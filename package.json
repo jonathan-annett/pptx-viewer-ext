@@ -63,6 +63,7 @@
     "test:sync-glob": "node --import tsx test/sync-glob.test.ts",
     "test:sync-plan": "node --import tsx test/sync-plan.test.ts",
     "test:sync-planview": "node --import tsx test/sync-planview.test.ts",
+    "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"

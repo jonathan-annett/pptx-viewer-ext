@@ -1,0 +1,421 @@
+// Tests for the pure executor.
+// Run with: npm run test:sync-executor
+//
+// The executor takes an injected `SyncFs<U>` so we can stand up a fake fs
+// keyed by string URIs and inspect what happened after each run. Manifest
+// mutations are visible by inspecting the passed-in Manifest object.
+
+import { strict as assert } from 'node:assert';
+import { executePlan, type SyncFs } from '../src/sync/executor';
+import { emptyManifest, manifestKey } from '../src/sync/manifest-types';
+import type { PlanItem } from '../src/sync/plan';
+
+const tests: Array<[string, () => Promise<void> | void]> = [];
+const test = (name: string, fn: () => Promise<void> | void): void => {
+  tests.push([name, fn]);
+};
+
+const SOURCE_NAME = 'src-folder';
+const SOURCE_ROOT = 'src://';
+const DEST_ROOT = 'dst://';
+
+// ───── fake fs ───────────────────────────────────────────────────────────
+//
+// URIs are strings; "join" is path concatenation with a single slash.
+// `files` is the on-disk map; `readErrors` and `writeErrors` let a test
+// inject failures keyed by URI.
+
+interface FakeFs extends SyncFs<string> {
+  files: Map<string, Uint8Array>;
+  readErrors: Map<string, Error>;
+  writeErrors: Map<string, Error>;
+  renameErrors: Map<string, Error>;
+  deleteErrors: Map<string, Error>;
+  ops: string[]; // ordered log of "verb uri"
+}
+
+function makeFakeFs(): FakeFs {
+  const files = new Map<string, Uint8Array>();
+  const readErrors = new Map<string, Error>();
+  const writeErrors = new Map<string, Error>();
+  const renameErrors = new Map<string, Error>();
+  const deleteErrors = new Map<string, Error>();
+  const ops: string[] = [];
+
+  return {
+    files,
+    readErrors,
+    writeErrors,
+    renameErrors,
+    deleteErrors,
+    ops,
+    joinPath(root, relPath) {
+      const base = root.endsWith('/') ? root.slice(0, -1) : root;
+      const sep = relPath.startsWith('/') ? '' : '/';
+      return `${base}${sep}${relPath}`;
+    },
+    async readFile(uri) {
+      ops.push(`read ${uri}`);
+      const err = readErrors.get(uri);
+      if (err) throw err;
+      const bytes = files.get(uri);
+      if (!bytes) {
+        const e = new Error(`fake: file not found at ${uri}`);
+        (e as { code?: string }).code = 'FileNotFound';
+        throw e;
+      }
+      return bytes;
+    },
+    async writeFile(uri, bytes) {
+      ops.push(`write ${uri}`);
+      const err = writeErrors.get(uri);
+      if (err) throw err;
+      files.set(uri, bytes);
+    },
+    async rename(src, dst) {
+      ops.push(`rename ${src} ${dst}`);
+      const err = renameErrors.get(src) ?? renameErrors.get(dst);
+      if (err) throw err;
+      const bytes = files.get(src);
+      if (!bytes) {
+        const e = new Error(`fake: rename source missing ${src}`);
+        (e as { code?: string }).code = 'FileNotFound';
+        throw e;
+      }
+      files.delete(src);
+      files.set(dst, bytes);
+    },
+    async delete(uri) {
+      ops.push(`delete ${uri}`);
+      const err = deleteErrors.get(uri);
+      if (err) throw err;
+      if (!files.has(uri)) {
+        const e = new Error(`fake: nothing to delete at ${uri}`);
+        (e as { code?: string }).code = 'FileNotFound';
+        throw e;
+      }
+      files.delete(uri);
+    },
+  };
+}
+
+// Deterministic hash for tests: tag the bytes with a predictable string.
+// The plan classifier doesn't compute hashes; tests supply them via PlanItem
+// so the executor's hash check has something to compare against.
+async function tagHash(bytes: Uint8Array): Promise<string> {
+  // Cheap stable identifier: byte length + first/last bytes. Sufficient for
+  // tests where we set hashes manually on PlanItems.
+  const len = bytes.byteLength;
+  const first = len > 0 ? bytes[0] : 0;
+  const last = len > 0 ? bytes[len - 1] : 0;
+  return `len${len}-f${first}-l${last}`;
+}
+
+function bytesOf(s: string): Uint8Array {
+  return new TextEncoder().encode(s);
+}
+
+const FIXED_NOW = (): string => '2026-05-18T12:00:00Z';
+
+// ───── happy paths ───────────────────────────────────────────────────────
+
+test('create: writes via tmp+rename, adds manifest entry, lastSync stamped', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('hello'));
+  const manifest = emptyManifest();
+  const helloHash = await tagHash(bytesOf('hello'));
+
+  const items: PlanItem[] = [
+    { kind: 'create', relPath: 'a.txt', sourceSize: 5, sourceHash: helloHash },
+  ];
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: 'projects/alpha',
+    items,
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.counts.create.ok, 1);
+
+  // Final file on disk; tmp gone.
+  assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('hello'));
+  assert.equal(fs.files.has('dst://a.txt.tmp'), false);
+
+  // Op order: read → write tmp → rename tmp → final.
+  assert.deepEqual(fs.ops, [
+    'read src://a.txt',
+    'write dst://a.txt.tmp',
+    'rename dst://a.txt.tmp dst://a.txt',
+  ]);
+
+  // Manifest entry shape.
+  const key = manifestKey(SOURCE_NAME, 'a.txt');
+  assert.ok(manifest.entries[key], 'manifest entry missing');
+  assert.equal(manifest.entries[key].destPath, 'projects/alpha/a.txt');
+  assert.equal(manifest.entries[key].sha256, helloHash);
+  assert.equal(manifest.entries[key].size, 5);
+  assert.equal(manifest.entries[key].syncedAt, '2026-05-18T12:00:00Z');
+  assert.equal(manifest.lastSync, '2026-05-18T12:00:00Z');
+});
+
+test('update-tracked: overwrites destination atomically, updates manifest entry', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('NEW'));
+  fs.files.set('dst://a.txt', bytesOf('OLD'));
+  const manifest = emptyManifest();
+  const oldHash = await tagHash(bytesOf('OLD'));
+  const newHash = await tagHash(bytesOf('NEW'));
+  manifest.entries[manifestKey(SOURCE_NAME, 'a.txt')] = {
+    destPath: 'a.txt',
+    size: 3,
+    sha256: oldHash,
+    syncedAt: '2026-01-01T00:00:00Z',
+  };
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-tracked', relPath: 'a.txt', sourceSize: 3, sourceHash: newHash, destHash: oldHash, manifestHash: oldHash },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.counts.updateTracked.ok, 1);
+  assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('NEW'));
+
+  const entry = manifest.entries[manifestKey(SOURCE_NAME, 'a.txt')];
+  assert.equal(entry.sha256, newHash);
+  assert.equal(entry.syncedAt, '2026-05-18T12:00:00Z');
+  // Empty subpath: destPath is just the rel path with no leading slash.
+  assert.equal(entry.destPath, 'a.txt');
+});
+
+test('delete-tracked: removes file, prunes manifest entry', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('dst://gone.txt', bytesOf('zzz'));
+  const manifest = emptyManifest();
+  const zHash = await tagHash(bytesOf('zzz'));
+  manifest.entries[manifestKey(SOURCE_NAME, 'gone.txt')] = {
+    destPath: 'gone.txt',
+    size: 3,
+    sha256: zHash,
+    syncedAt: '2026-01-01T00:00:00Z',
+  };
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'delete-tracked', relPath: 'gone.txt', manifestHash: zHash, destHash: zHash, destSize: 3 }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.counts.deleteTracked.ok, 1);
+  assert.equal(fs.files.has('dst://gone.txt'), false);
+  assert.equal(manifest.entries[manifestKey(SOURCE_NAME, 'gone.txt')], undefined);
+});
+
+test('delete-tracked: already-missing file counts as success, manifest pruned', async () => {
+  const fs = makeFakeFs();
+  // No file in fs.files — user removed it manually before this run.
+  const manifest = emptyManifest();
+  manifest.entries[manifestKey(SOURCE_NAME, 'gone.txt')] = {
+    destPath: 'gone.txt',
+    size: 3,
+    sha256: 'h',
+    syncedAt: '2026-01-01T00:00:00Z',
+  };
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'delete-tracked', relPath: 'gone.txt' }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(manifest.entries[manifestKey(SOURCE_NAME, 'gone.txt')], undefined);
+});
+
+// ───── failure isolation ─────────────────────────────────────────────────
+
+test('hash mismatch (source changed between plan and execute) → per-file failure, no write', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('actual'));
+  const manifest = emptyManifest();
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'create', relPath: 'a.txt', sourceSize: 6, sourceHash: 'stale-hash-from-plan' }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results[0].status, 'failed');
+  assert.match(result.results[0].error ?? '', /source changed between plan and execute/);
+  assert.equal(fs.files.has('dst://a.txt'), false);
+  assert.equal(fs.files.has('dst://a.txt.tmp'), false);
+  // No manifest entry on failure.
+  assert.equal(manifest.entries[manifestKey(SOURCE_NAME, 'a.txt')], undefined);
+});
+
+test('write failure leaves no tmp; reports per-file failure; following ops still run', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://bad.txt', bytesOf('x'));
+  fs.files.set('src://good.txt', bytesOf('y'));
+  const xHash = await tagHash(bytesOf('x'));
+  const yHash = await tagHash(bytesOf('y'));
+  // Write of the tmp will throw; the executor should still attempt good.txt.
+  fs.writeErrors.set('dst://bad.txt.tmp', new Error('disk full'));
+
+  const manifest = emptyManifest();
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'create', relPath: 'bad.txt', sourceSize: 1, sourceHash: xHash },
+      { kind: 'create', relPath: 'good.txt', sourceSize: 1, sourceHash: yHash },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results.length, 2);
+  assert.equal(result.results[0].status, 'failed');
+  assert.match(result.results[0].error ?? '', /disk full/);
+  assert.equal(result.results[1].status, 'ok');
+  assert.equal(fs.files.has('dst://bad.txt'), false);
+  assert.deepEqual(fs.files.get('dst://good.txt'), bytesOf('y'));
+});
+
+test('rename failure cleans up tmp; failure reported with rename error', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('hi'));
+  const hash = await tagHash(bytesOf('hi'));
+  fs.renameErrors.set('dst://a.txt.tmp', new Error('rename forbidden'));
+
+  const manifest = emptyManifest();
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'create', relPath: 'a.txt', sourceSize: 2, sourceHash: hash }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results[0].status, 'failed');
+  assert.match(result.results[0].error ?? '', /rename forbidden/);
+  // tmp was cleaned up after the rename failed.
+  assert.equal(fs.files.has('dst://a.txt.tmp'), false);
+  assert.equal(fs.files.has('dst://a.txt'), false);
+});
+
+test('skip items are no-ops — no FS calls, no manifest mutation', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('same'));
+  fs.files.set('dst://a.txt', bytesOf('same'));
+  const hash = await tagHash(bytesOf('same'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'skip', relPath: 'a.txt', sourceHash: hash, destHash: hash }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results.length, 0);
+  assert.equal(fs.ops.length, 0);
+  assert.equal(manifest.lastSync, null);
+});
+
+test('update-collision and destination-only items are ignored in M4', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('x'));
+  fs.files.set('dst://a.txt', bytesOf('y'));
+  fs.files.set('dst://orphan.txt', bytesOf('z'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-collision', relPath: 'a.txt' },
+      { kind: 'destination-only', relPath: 'orphan.txt' },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  // Neither op kind is handled; both files remain untouched.
+  assert.equal(result.results.length, 0);
+  assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('y'));
+  assert.deepEqual(fs.files.get('dst://orphan.txt'), bytesOf('z'));
+});
+
+// ───── runner ────────────────────────────────────────────────────────────
+
+(async (): Promise<void> => {
+  let failed = 0;
+  for (const [name, fn] of tests) {
+    try {
+      await fn();
+      console.log(`  ok: ${name}`);
+    } catch (err) {
+      failed++;
+      console.error(`  FAIL: ${name}`);
+      console.error(`    ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+    }
+  }
+  if (failed > 0) {
+    console.error(`\n${failed} test(s) failed`);
+    process.exit(1);
+  }
+  console.log('all tests passed');
+})();

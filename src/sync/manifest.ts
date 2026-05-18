@@ -5,7 +5,8 @@
 // of placement. The plan engine uses it to distinguish files we placed
 // from files the user added independently, and to recognise overwrites.
 //
-// M2 ships read-only. Writes (and the version-mismatch refusal) come in M4.
+// M2 ships read-only. Writes land in M4 (tmp+rename via writeManifest).
+// Version-mismatch refusal still belongs to M6.
 //
 // Schema (per folder-sync-v1-plan.md):
 //
@@ -82,6 +83,29 @@ export async function readManifest(destRootUri: vscode.Uri): Promise<Manifest> {
 export function manifestUri(destRootUri: vscode.Uri): vscode.Uri {
   const base = destRootUri.path.endsWith('/') ? destRootUri.path.slice(0, -1) : destRootUri.path;
   return destRootUri.with({ path: `${base}/${MANIFEST_FILENAME}` });
+}
+
+/**
+ * Atomic manifest write: encode → writeFile(<path>.tmp) → rename to final.
+ * Same pattern the executor uses for synced files. If anything along the
+ * chain throws, the caller sees the failure and the destination's manifest
+ * is left unchanged (the tmp file may linger; M6's orphan sweep cleans).
+ */
+export async function writeManifest(
+  destRootUri: vscode.Uri,
+  manifest: Manifest,
+): Promise<void> {
+  const finalUri = manifestUri(destRootUri);
+  const tmpUri = destRootUri.with({ path: `${finalUri.path}.tmp` });
+  // 2-space indent keeps the file diff-friendly when the user inspects it.
+  const bytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2) + '\n');
+  await vscode.workspace.fs.writeFile(tmpUri, bytes);
+  try {
+    await vscode.workspace.fs.rename(tmpUri, finalUri, { overwrite: true });
+  } catch (err) {
+    try { await vscode.workspace.fs.delete(tmpUri); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 /**
