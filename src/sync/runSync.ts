@@ -16,10 +16,12 @@ import * as vscode from 'vscode';
 import type { PlanForDestination } from './planner';
 import type { PlanItem } from './plan';
 import { readManifest, writeManifest } from './manifest';
-import { executePlan, type ExecuteResult, type OperationResult, type SyncFs } from './executor';
+import { executePlan, type ExecuteResult, type OperationResult } from './executor';
 import type { RowDecision } from './decisions';
 import { manifestKey } from './manifest-types';
 import { sha256Hex } from './hash';
+import { getHashCacheSingleton } from './hashCache';
+import { vscodeFs } from './vscodeFs';
 import { log } from '../log';
 
 export interface RunSummary {
@@ -58,6 +60,11 @@ export async function runSync(
   decisions?: ReadonlyMap<string, RowDecision>,
 ): Promise<RunSummary> {
   const fs = vscodeFs();
+  // Cache is set at activation. Treated as optional so tests / partial setups
+  // still work; production always has one (in-memory at minimum).
+  const cache = getHashCacheSingleton() as
+    | undefined
+    | import('./hashCache').UriHashCache<vscode.Uri>;
   const summary: RunSummary = { ok: 0, failed: 0, perPlan: [], manifestWriteFailures: [] };
 
   // Group by destination workspace folder URI. A single manifest is shared
@@ -90,6 +97,7 @@ export async function runSync(
         manifest,
         fs,
         hash: sha256Hex,
+        cache,
         decidedOverwrites: armed.decidedOverwrites,
         decidedDeletes: armed.decidedDeletes,
         decidedWarningOverrides: armed.decidedWarningOverrides,
@@ -246,29 +254,6 @@ function decisionMatchesItem(d: RowDecision, it: PlanItem): boolean {
   // (collision rows fold warning arming into the overwrite decision).
   return it.kind === 'create' || it.kind === 'update-tracked';
 }
-
-// ───── adapters ──────────────────────────────────────────────────────────
-
-function vscodeFs(): SyncFs<vscode.Uri> {
-  // The web-extension host's vscode.workspace.fs is the only filesystem
-  // primitive available. URIs are opaque to the executor — we just need
-  // joinPath to produce a child URI under a root.
-  return {
-    joinPath(root, relPath) {
-      const base = root.path.endsWith('/') ? root.path.slice(0, -1) : root.path;
-      const sep = relPath.startsWith('/') ? '' : '/';
-      return root.with({ path: `${base}${sep}${relPath}` });
-    },
-    readFile: (uri) => Promise.resolve(vscode.workspace.fs.readFile(uri)).then(toUint8),
-    writeFile: (uri, bytes) => Promise.resolve(vscode.workspace.fs.writeFile(uri, bytes)).then(noop),
-    rename: (src, dst) =>
-      Promise.resolve(vscode.workspace.fs.rename(src, dst, { overwrite: true })).then(noop),
-    delete: (uri) => Promise.resolve(vscode.workspace.fs.delete(uri)).then(noop),
-  };
-}
-
-function toUint8(x: Uint8Array): Uint8Array { return x; }
-function noop(): void { /* discard return */ }
 
 // ───── grouping ──────────────────────────────────────────────────────────
 

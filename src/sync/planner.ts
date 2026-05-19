@@ -17,7 +17,9 @@ import type { ResolvedSource, ResolvedDestination, ResolvedTopology } from './to
 import type { FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree } from './walker';
-import { sha256Hex } from './hash';
+import { hashFileAtUri } from './hash';
+import { getHashCacheSingleton, type UriHashCache } from './hashCache';
+import { vscodeFs } from './vscodeFs';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
 import { parseSyncConfigText } from './config';
@@ -38,6 +40,25 @@ export interface PlanForDestination {
   summary: PlanSummary;
   /** Sources that couldn't be walked (e.g. destination root URI absent). */
   skippedReason?: string;
+  /**
+   * URI hash cache diagnostics for this plan build (M5.2.5). Counted across
+   * the source walk + destination walk for this pair. `bytesSaved` is the
+   * sum of file sizes for which we got a cache hit and skipped the read
+   * entirely (destination walk only — source-walk hits still read for
+   * validation).
+   */
+  hashCacheStats?: PlanHashCacheStats;
+}
+
+export interface PlanHashCacheStats {
+  /** Total files inspected across source + destination walks. */
+  walked: number;
+  /** Number where the cache served the sha256 (read or hash skipped). */
+  hits: number;
+  /** Number where the cache had to be populated (read + hash). */
+  misses: number;
+  /** Sum of `size` for files where the cache made the read unnecessary. */
+  bytesSaved: number;
 }
 
 /**
@@ -132,16 +153,27 @@ async function planForSource(
   const destExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
   const destInclude = new GlobSet([]); // include filter only meaningful on source
 
+  // One cache instance shared across source + destination walks — the
+  // singleton is initialised at activation; tests / no-cache contexts get
+  // undefined and walkAndHash degrades to stat+read+hash.
+  const cache = getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined;
+
   let sourceFiles: FileInfo[] = [];
+  const sourceStats = freshStats();
   try {
-    sourceFiles = await walkAndHash(source.sourceFolderUri, {
-      exclude: sourceExclude,
-      include: sourceInclude,
-      // Source walk validates each known file type from the same bytes used
-      // for hashing — one read per source file, validators see the same content
-      // we will (or won't) sync.
-      validate: true,
-    });
+    sourceFiles = await walkAndHash(
+      source.sourceFolderUri,
+      {
+        exclude: sourceExclude,
+        include: sourceInclude,
+        // Source walk validates each known file type from the same bytes used
+        // for hashing — one read per source file, validators see the same content
+        // we will (or won't) sync.
+        validate: true,
+      },
+      cache,
+      sourceStats,
+    );
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
   }
@@ -161,11 +193,17 @@ async function planForSource(
     }
 
     let destFiles: FileInfo[] = [];
+    const destStats = freshStats();
     try {
-      destFiles = await walkAndHash(dest.destRootUri, {
-        exclude: destExclude,
-        include: destInclude,
-      });
+      destFiles = await walkAndHash(
+        dest.destRootUri,
+        {
+          exclude: destExclude,
+          include: destInclude,
+        },
+        cache,
+        destStats,
+      );
     } catch (err) {
       log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
     }
@@ -184,10 +222,40 @@ async function planForSource(
       scopedManifest,
     );
     const summary = summarisePlan(items);
-    results.push({ source, destination: dest, items, summary });
+    // Diagnostics: merge the source-walk stats (paid once for this pair) with
+    // this destination's walk stats. The destination walk is the multiplier;
+    // surfacing it per-destination lets the user see where the wins land.
+    const pairStats: PlanHashCacheStats = mergeStats(sourceStats, destStats);
+    if (cache) {
+      log(
+        `sync: hash-cache: ${destStats.hits}/${destStats.walked} on ` +
+          `${dest.name}${dest.subpath ? `/${dest.subpath}` : ''}` +
+          (destStats.bytesSaved > 0 ? ` (saved ${destStats.bytesSaved} bytes)` : ''),
+      );
+    }
+    results.push({
+      source,
+      destination: dest,
+      items,
+      summary,
+      hashCacheStats: pairStats,
+    });
   }
 
   return results;
+}
+
+function freshStats(): PlanHashCacheStats {
+  return { walked: 0, hits: 0, misses: 0, bytesSaved: 0 };
+}
+
+function mergeStats(a: PlanHashCacheStats, b: PlanHashCacheStats): PlanHashCacheStats {
+  return {
+    walked: a.walked + b.walked,
+    hits: a.hits + b.hits,
+    misses: a.misses + b.misses,
+    bytesSaved: a.bytesSaved + b.bytesSaved,
+  };
 }
 
 async function pathIsFile(uri: vscode.Uri): Promise<boolean> {
@@ -230,16 +298,45 @@ interface WalkAndHashOpts {
   validate?: boolean;
 }
 
-async function walkAndHash(root: vscode.Uri, opts: WalkAndHashOpts): Promise<FileInfo[]> {
+async function walkAndHash(
+  root: vscode.Uri,
+  opts: WalkAndHashOpts,
+  cache: UriHashCache<vscode.Uri> | undefined,
+  stats: PlanHashCacheStats,
+): Promise<FileInfo[]> {
   const entries = await walkTree(root, opts);
   const out: FileInfo[] = [];
+  const fs = vscodeFs();
   for (const e of entries) {
     try {
-      const bytes = await vscode.workspace.fs.readFile(e.uri);
-      const sha256 = await sha256Hex(bytes);
-      const info: FileInfo = { relPath: e.relPath, size: e.size, sha256 };
-      if (opts.validate) {
-        const warnings = await runValidators(e.relPath, bytes);
+      // Source walk needs bytes for the per-filetype validator pass; the
+      // destination walk doesn't, so passing needBytes=opts.validate gives
+      // the read-skip win on the destination side without sacrificing
+      // validation coverage on the source side.
+      //
+      // Even with needBytes=true, a cache hit still skips the sha256
+      // compute — that's a non-trivial saving on big decks (~73% of the
+      // parse cost on the 137MB sample per M5.2 timings).
+      const needBytes = !!opts.validate;
+      // Snapshot cache stats before the call so we can tell hit vs miss.
+      // hashFileAtUri internally bumps the cache's hit/miss counter — but
+      // we want our own per-walk accounting that includes "no cache"
+      // calls (which never count as hits). Use a simple before/after
+      // delta on the cache's stats when one is present.
+      const beforeHits = cache?.stats().hits ?? 0;
+      const result = await hashFileAtUri(fs, e.uri, cache, { needBytes });
+      const afterHits = cache?.stats().hits ?? 0;
+      const wasHit = afterHits > beforeHits;
+      stats.walked++;
+      if (wasHit) {
+        stats.hits++;
+        if (!needBytes) stats.bytesSaved += result.size;
+      } else {
+        stats.misses++;
+      }
+      const info: FileInfo = { relPath: e.relPath, size: e.size, sha256: result.sha256 };
+      if (opts.validate && result.bytes) {
+        const warnings = await runValidators(e.relPath, result.bytes);
         if (warnings.length > 0) info.warnings = warnings;
       }
       out.push(info);

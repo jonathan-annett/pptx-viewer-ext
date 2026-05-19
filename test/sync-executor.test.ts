@@ -54,6 +54,16 @@ function makeFakeFs(): FakeFs {
       const sep = relPath.startsWith('/') ? '' : '/';
       return `${base}${sep}${relPath}`;
     },
+    async stat(uri) {
+      ops.push(`stat ${uri}`);
+      const bytes = files.get(uri);
+      if (!bytes) {
+        const e = new Error(`fake: file not found at ${uri}`);
+        (e as { code?: string }).code = 'FileNotFound';
+        throw e;
+      }
+      return { size: bytes.byteLength, mtime: 0 };
+    },
     async readFile(uri) {
       ops.push(`read ${uri}`);
       const err = readErrors.get(uri);
@@ -159,8 +169,12 @@ test('create: writes via tmp+rename, adds manifest entry, lastSync stamped', asy
   assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('hello'));
   assert.equal(fs.files.has('dst://a.txt.tmp'), false);
 
-  // Op order: read → write tmp → rename tmp → final.
+  // Op order: stat → read → write tmp → rename tmp → final.
+  // (The stat call was added in M5.2.5: every write path now goes through
+  // hashFileAtUri so the URI hash cache can short-circuit on cache hit.
+  // No cache is supplied in tests; stat just happens then we read+hash.)
   assert.deepEqual(fs.ops, [
+    'stat src://a.txt',
     'read src://a.txt',
     'write dst://a.txt.tmp',
     'rename dst://a.txt.tmp dst://a.txt',

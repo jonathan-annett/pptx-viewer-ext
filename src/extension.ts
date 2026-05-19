@@ -11,6 +11,8 @@ import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { registerProbe } from './sync/probe';
 import { registerProbeStat } from './sync/probeStat';
+import { setHashCacheSingleton } from './sync/hashCache';
+import { openHashCache } from './sync/hashCacheIdb';
 import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
@@ -55,6 +57,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await ensureWorkspaceLockSettings();
   } catch (err) {
     log(`snapshot: ensureWorkspaceLockSettings threw — ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // M5.2.5 — URI hash cache. Initialised once at activation and parked on a
+  // module singleton (planner.ts + runSync.ts read it via getHashCacheSingleton).
+  // Falls back to in-memory when IndexedDB is unavailable. Cold-restore of
+  // warm entries via IDB is silent — the user just sees faster plan builds.
+  try {
+    const { cache, idb, warmEntries } = await openHashCache<vscode.Uri>();
+    setHashCacheSingleton(cache);
+    log(`hash-cache: idb=${idb ? 'available' : 'unavailable'} warm-entries=${warmEntries}`);
+  } catch (err) {
+    log(
+      `hash-cache: init failed — ${err instanceof Error ? err.message : String(err)} (continuing without cache)`,
+    );
   }
 
   // Sync feature — M1: config layer + diagnostics. The manager owns config

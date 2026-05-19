@@ -26,11 +26,19 @@ import type { Manifest } from './manifest-types';
 import { manifestKey } from './manifest-types';
 import type { OpKind, PlanItem } from './plan';
 import { hasBlockingWarning, hasOverridableWarningOnly } from './plan';
+import { hashFileAtUri } from './hash';
+import type { UriHashCache } from './hashCache';
 
 /** Abstract FS contract — production wires vscode.workspace.fs, tests fake. */
 export interface SyncFs<U> {
   /** Resolve a relative path under a root URI. Implementation owns URI shape. */
   joinPath(root: U, relPath: string): U;
+  /**
+   * Cheap metadata lookup used by the URI hash cache (M5.2.5) to decide
+   * whether a previous hash for this file is still valid. `mtime` is ms
+   * since epoch (vscode.FileStat shape); fake implementations may return 0.
+   */
+  stat(uri: U): Promise<{ size: number; mtime: number }>;
   readFile(uri: U): Promise<Uint8Array>;
   writeFile(uri: U, bytes: Uint8Array): Promise<void>;
   rename(src: U, dst: U): Promise<void>;
@@ -82,6 +90,14 @@ export interface ExecuteOptions<U> {
    * set is consulted only for non-collision rows.
    */
   decidedWarningOverrides?: ReadonlySet<string>;
+  /**
+   * Optional URI hash cache (M5.2.5). When supplied, the per-file source
+   * read goes through `hashFileAtUri` so a previously-hashed source skips
+   * the sha256 compute — the read still happens because we need the bytes
+   * to write. Successful writes also record the freshly-placed destination
+   * bytes in the cache so the next plan-build's destination walk hits.
+   */
+  cache?: UriHashCache<U>;
 }
 
 export interface OperationResult {
@@ -131,7 +147,9 @@ const TMP_SUFFIX = '.tmp';
  * pair. Returns per-op results; mutates `opts.manifest` in place on each success.
  * Caller persists the manifest once (or per pair) after this returns.
  */
-export async function executePlan<U>(opts: ExecuteOptions<U>): Promise<ExecuteResult> {
+export async function executePlan<U extends { toString(): string }>(
+  opts: ExecuteOptions<U>,
+): Promise<ExecuteResult> {
   const now = opts.now ?? defaultNow;
   const results: OperationResult[] = [];
   const counts = freshCounts();
@@ -212,7 +230,7 @@ function resolveDispatch<U>(
 
 // ───── per-op handlers ───────────────────────────────────────────────────
 
-async function executeWrite<U>(
+async function executeWrite<U extends { toString(): string }>(
   opts: ExecuteOptions<U>,
   item: PlanItem,
   kind: 'create' | 'update-tracked' | 'update-collision',
@@ -223,8 +241,16 @@ async function executeWrite<U>(
   const destUri = fs.joinPath(destRootUri, item.relPath);
   const tmpUri = fs.joinPath(destRootUri, item.relPath + TMP_SUFFIX);
 
-  const bytes = await fs.readFile(sourceUri);
-  const actualHash = await opts.hash(bytes);
+  // hashFileAtUri short-circuits the sha256 compute on cache hit (the read
+  // is unavoidable — we need the bytes to write). When no cache is supplied
+  // it falls back to stat → read → opts.hash, matching the pre-M5.2.5 path
+  // modulo an extra stat call.
+  const result = await hashFileAtUri(fs, sourceUri, opts.cache, {
+    needBytes: true,
+    hash: opts.hash,
+  });
+  const bytes = result.bytes!;
+  const actualHash = result.sha256;
 
   // Source-change detection: the file we just read isn't the file the plan
   // saw. The plan's hash is the source of truth for "what the user agreed
@@ -247,6 +273,19 @@ async function executeWrite<U>(
     throw err;
   }
 
+  // Record the freshly-placed destination bytes so the next plan build's
+  // destination walk hits the cache. We re-stat to capture whatever mtime
+  // the filesystem stamped on the rename; the stat is the only viable key
+  // material. Best-effort — a stat failure here doesn't unwind the write.
+  if (opts.cache) {
+    try {
+      const destStat = await fs.stat(destUri);
+      await opts.cache.record(destUri, destStat.size, destStat.mtime, actualHash);
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Manifest entry records what's actually on disk (the hash we just placed),
   // plus the destination-relative path. Subpath is stored alongside relPath so
   // a manifest entry stays meaningful even when looking at the destination
@@ -265,7 +304,7 @@ async function executeWrite<U>(
   void kind;
 }
 
-async function executeDelete<U>(
+async function executeDelete<U extends { toString(): string }>(
   opts: ExecuteOptions<U>,
   item: PlanItem,
 ): Promise<void> {
@@ -277,6 +316,10 @@ async function executeDelete<U>(
     // treat as success and prune the manifest entry. Any other failure
     // propagates out.
     if (!isFileNotFound(err)) throw err;
+  }
+  // Drop the cache entry for the now-deleted destination URI — best-effort.
+  if (opts.cache) {
+    try { await opts.cache.forget(destUri); } catch { /* ignore */ }
   }
   const key = manifestKey(opts.sourceWorkspaceFolderName, item.relPath);
   delete opts.manifest.entries[key];
