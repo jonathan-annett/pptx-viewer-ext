@@ -506,9 +506,14 @@ test('decidedOverwrites only acts on the listed relPaths', async () => {
 // that carries warnings, regardless of its kind or any armed decision.
 
 const WARN: import('../src/sync/plan').PlanWarning = {
-  severity: 'warn',
+  severity: 'block',
   code: 'show-type',
   message: 'Show type is kiosk',
+};
+const WARN_OVERRIDABLE: import('../src/sync/plan').PlanWarning = {
+  severity: 'override',
+  code: 'media-controls',
+  message: 'Media controls visible over embedded video',
 };
 
 test('Phase D: create item with warnings is skipped', async () => {
@@ -597,6 +602,125 @@ test('Phase D: armed overwrite on a warned collision still skips', async () => {
 
   assert.equal(result.results.length, 0);
   assert.deepEqual(fs.files.get('dst://a.pptx'), bytesOf('y'));
+});
+
+// ───── warning-override severity (M5 Phase D-adj) ──────────────────────
+//
+// Block-severity warnings have no per-row override; the executor refuses
+// regardless of any decidedWarningOverrides arming. Override-severity
+// warnings (e.g. pptx media-controls + embedded video) can be armed via
+// decidedWarningOverrides — only then do they ship. Collision rows with
+// override warnings fold the warning arming into the overwrite arming.
+
+test('Phase D-adj: override-severity warning skipped without arming', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('A'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'create', relPath: 'a.pptx', sourceHash: tagHashOf('A'), warnings: [WARN_OVERRIDABLE] },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results.length, 0);
+  assert.equal(fs.files.has('dst://a.pptx'), false);
+});
+
+test('Phase D-adj: override-severity warning ships with arming', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('A'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'create', relPath: 'a.pptx', sourceHash: tagHashOf('A'), warnings: [WARN_OVERRIDABLE] },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedWarningOverrides: new Set(['a.pptx']),
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].status, 'ok');
+  assert.deepEqual(fs.files.get('dst://a.pptx'), bytesOf('A'));
+});
+
+test('Phase D-adj: block-severity ignores decidedWarningOverrides', async () => {
+  // Block trumps. Even when the path is in decidedWarningOverrides (e.g. a
+  // stale arming from before the validator surfaced the block-severity
+  // issue), the executor refuses.
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('A'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'create', relPath: 'a.pptx', sourceHash: tagHashOf('A'), warnings: [WARN] },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedWarningOverrides: new Set(['a.pptx']),
+  });
+
+  assert.equal(result.results.length, 0);
+  assert.equal(fs.files.has('dst://a.pptx'), false);
+});
+
+test('Phase D-adj: update-collision + override warning ships with overwrite arming only', async () => {
+  // Overwrite arming on a collision row implicitly covers an override-
+  // severity warning on the same row — no separate decidedWarningOverrides
+  // arming is required.
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('NEW'));
+  fs.files.set('dst://a.pptx', bytesOf('OLD'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      {
+        kind: 'update-collision',
+        relPath: 'a.pptx',
+        sourceHash: tagHashOf('NEW'),
+        destHash: tagHashOf('OLD'),
+        warnings: [WARN_OVERRIDABLE],
+      },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedOverwrites: new Set(['a.pptx']),
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.results[0].kind, 'update-collision');
+  assert.deepEqual(fs.files.get('dst://a.pptx'), bytesOf('NEW'));
 });
 
 // ───── runner ────────────────────────────────────────────────────────────

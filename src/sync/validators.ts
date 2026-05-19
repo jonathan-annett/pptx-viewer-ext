@@ -36,24 +36,33 @@ export async function validatePptxBytes(
   });
   if (result.parseError) return [];
 
+  // Severity per code (see PlanWarning JSDoc for the full rationale):
+  //  - linked-media: 'block' — externally-linked media won't play at the
+  //    destination; transferring deploys a known-broken file.
+  //  - show-type:    'block' — kiosk/browse modes are show-stoppers in a
+  //    presentation context; deploy in this state is never desired.
+  //  - media-controls: 'override' — controls render a subtle progress bar
+  //    over embedded video at playback; ugly at a conference but the file
+  //    plays. The user can opt in per file via the plan webview's "Sync
+  //    anyway" affordance.
   const warnings: PlanWarning[] = [];
   if (!result.flags.linkedMedia.ok) {
     warnings.push({
-      severity: 'warn',
+      severity: 'block',
       code: 'linked-media',
       message: result.flags.linkedMedia.detail,
     });
   }
   if (!result.flags.showType.ok) {
     warnings.push({
-      severity: 'warn',
+      severity: 'block',
       code: 'show-type',
       message: result.flags.showType.detail,
     });
   }
   if (!result.flags.showMediaControls.ok) {
     warnings.push({
-      severity: 'warn',
+      severity: 'override',
       code: 'media-controls',
       message: result.flags.showMediaControls.detail,
     });

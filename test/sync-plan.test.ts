@@ -210,12 +210,12 @@ test('summarisePlan sorts each category by path', () => {
 // no source bytes to validate.
 
 const WARN_KIOSK: PlanWarning = {
-  severity: 'warn',
+  severity: 'block',
   code: 'show-type',
   message: 'Show type is kiosk',
 };
 const WARN_LINKED: PlanWarning = {
-  severity: 'warn',
+  severity: 'block',
   code: 'linked-media',
   message: 'External media link present',
 };
@@ -358,6 +358,7 @@ test('update-collision: manifest.decisions.collisionOverwrite=true → item.reme
   manifest.decisions[manifestKey(SOURCE, 'a.txt')] = {
     destOnlyDelete: false,
     collisionOverwrite: true,
+    warningOverride: false,
     decidedAt: '2026-05-19T00:00:00Z',
   };
   const items = classifyFiles(
@@ -388,6 +389,7 @@ test('destination-only: manifest.decisions.destOnlyDelete=true → item.remember
   manifest.decisions[manifestKey(SOURCE, 'orphan.txt')] = {
     destOnlyDelete: true,
     collisionOverwrite: false,
+    warningOverride: false,
     decidedAt: '2026-05-19T00:00:00Z',
   };
   const items = classifyFiles(SOURCE, [], [file('orphan.txt', 'h')], manifest);
@@ -402,6 +404,7 @@ test('destination-only: matching decision belongs to a different source → no r
   manifest.decisions[manifestKey('other-source', 'orphan.txt')] = {
     destOnlyDelete: true,
     collisionOverwrite: false,
+    warningOverride: false,
     decidedAt: '2026-05-19T00:00:00Z',
   };
   const items = classifyFiles(SOURCE, [], [file('orphan.txt', 'h')], manifest);
@@ -416,6 +419,7 @@ test('update-tracked: ignores manifest.decisions (only collisions consult it)', 
   manifest.decisions[manifestKey(SOURCE, 'a.txt')] = {
     destOnlyDelete: false,
     collisionOverwrite: true,
+    warningOverride: false,
     decidedAt: '2026-05-19T00:00:00Z',
   };
   const items = classifyFiles(

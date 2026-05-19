@@ -7,6 +7,7 @@
 
 import type { PlanForDestination } from './planner';
 import type { PlanItem, PlanWarning } from './plan';
+import { hasBlockingWarning, hasOverridableWarningOnly } from './plan';
 
 // ───── view model ────────────────────────────────────────────────────────
 //
@@ -55,9 +56,15 @@ export interface PlanRowDecisionView {
    * row list. Format: `${pairIndex}:${kind}:${relPath}`.
    */
   id: string;
-  /** Which user-intent this row collects. */
-  kind: 'overwrite' | 'delete';
-  /** Checkbox-adjacent label, e.g. "Overwrite" or "Delete from destination". */
+  /**
+   * Which user-intent this row collects:
+   *  - 'overwrite'        — collision row; arm to overwrite destination bytes.
+   *  - 'delete'           — destination-only row; arm to delete from dest.
+   *  - 'warning-override' — green-path row with override-severity warnings;
+   *                         arm to ship despite the validator concern.
+   */
+  kind: 'overwrite' | 'delete' | 'warning-override';
+  /** Checkbox-adjacent label, e.g. "Overwrite" or "Sync anyway". */
   label: string;
   /**
    * Initial checked state for the input. Set to `true` when the manifest
@@ -97,8 +104,25 @@ export interface PlanTotals {
   skip: number;
   deleteTracked: number;
   destinationOnly: number;
-  /** Validator warnings — always 0 in M3, wired in M5. */
+  /**
+   * All items carrying at least one validator warning — the union of
+   * blocking + overridable below. Footer + chips use the breakdown; this
+   * total stays here for back-compat with embedded callers that just want
+   * "is there a validator concern at all?".
+   */
   warnings: number;
+  /**
+   * Items with at least one 'block'-severity warning (e.g. kiosk show mode,
+   * externally-linked media). These can never ship — no per-file override
+   * exists; the user must fix the source file and re-plan.
+   */
+  blockingWarnings: number;
+  /**
+   * Items whose only warnings are 'override' severity (e.g. media-controls
+   * + embedded video). These can ship via the "Sync anyway" affordance on
+   * the row, which arms a warning-override decision for the executor.
+   */
+  overridableWarnings: number;
   /** Source/destination pairs that couldn't be planned (unresolved, etc). */
   skipped: number;
 }
@@ -142,6 +166,8 @@ export function toViewModel(
     deleteTracked: 0,
     destinationOnly: 0,
     warnings: 0,
+    blockingWarnings: 0,
+    overridableWarnings: 0,
     skipped: 0,
   };
 
@@ -178,6 +204,14 @@ export function toViewModel(
     totals.deleteTracked += s.deleteTracked.length;
     totals.destinationOnly += s.destinationOnly.length;
     totals.warnings += s.warnings.length;
+    // Severity breakdown for chip rendering + embedded editor hints. An item
+    // with any 'block'-severity warning is blocking (even if it also has
+    // override warnings — block trumps); an item whose warnings are all
+    // 'override' is overridable.
+    for (const w of s.warnings) {
+      if (hasBlockingWarning(w)) totals.blockingWarnings++;
+      else if (hasOverridableWarningOnly(w)) totals.overridableWarnings++;
+    }
 
     // Collision rows offer an "Overwrite" decision; destination-only rows
     // offer a "Delete from destination" decision. Both default unchecked —
@@ -206,13 +240,37 @@ export function toViewModel(
             ...(item.remembered?.accepted ? { checked: true, remembered: true } : {}),
           })
         : toRow(item);
+    // Green-path rows (create / update-tracked) with override-only warnings
+    // get a "Sync anyway" arming affordance. Block-only or mixed-severity
+    // warnings get no affordance — the row can't ship at all. Collision
+    // rows skip this entirely; their overwrite arming covers any override
+    // warning on the same file.
+    const greenWithMaybeWarningOverride = (item: PlanItem): PlanRowView => {
+      const row = toRow(item);
+      if (!interactive) return row;
+      if (!hasOverridableWarningOnly(item)) return row;
+      return withDecision(row, {
+        id: `${pairIndex}:warning-override:${item.relPath}`,
+        kind: 'warning-override',
+        label: 'Sync anyway',
+        ...(item.remembered?.accepted ? { checked: true, remembered: true } : {}),
+      });
+    };
+    // Warnings section is a derived view of files already shown in their
+    // primary category. We deliberately DON'T duplicate the decision
+    // affordance here — the checkbox belongs in the primary section
+    // (Collisions for overwrite-arming, Create / To update for warning-
+    // override). Duplicating would put two checkboxes with the same id in
+    // the DOM and the user's clicks would silently disagree across them.
+    // The Warnings section's job is to expand the full message text so the
+    // user can read it without scanning the rest of the plan.
 
     pairs.push({
       sourceLabel: srcKey,
       destLabel,
       sections: {
-        create: s.create.map(toRow),
-        updateTracked: s.updateTracked.map(toRow),
+        create: s.create.map(greenWithMaybeWarningOverride),
+        updateTracked: s.updateTracked.map(greenWithMaybeWarningOverride),
         updateCollision: s.updateCollision.map(overwriteDecision),
         skip: s.skip.map(toRow),
         deleteTracked: s.deleteTracked.map(toRow),
@@ -273,12 +331,12 @@ function withDecision(row: PlanRowView, decision: PlanRowDecisionView): PlanRowV
  */
 export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
   const t = vm.totals;
-  // M5 Phase D: warnings now block green alongside collisions. Validator
-  // findings on a file (linked external media, kiosk show mode, media-controls
-  // + embedded video) flip the footer to orange + red — there's no per-row
-  // override for warnings (the user must fix the file and re-plan), so the
-  // orange "Proceed with safe items only" path skips warned items in the
-  // executor (see `resolveDispatch` in executor.ts).
+  // M5 Phase D: warnings block green alongside collisions. Two severities:
+  //  - 'block' (kiosk show mode, externally-linked media) — no per-row
+  //    override; the executor refuses, the orange path just skips them.
+  //  - 'override' (media-controls + embedded video) — a per-row "Sync
+  //    anyway" affordance arms the row, then the orange Proceed ships it.
+  // Either category flips the footer to orange + red.
   const blocking = t.updateCollision + t.warnings;
   const hasWork =
     t.create + t.updateTracked + t.deleteTracked + t.updateCollision > 0;
@@ -348,7 +406,11 @@ function renderTotals(t: PlanTotals): string {
     ['delete', t.deleteTracked, 'ok'],
     ['collisions', t.updateCollision, 'block'],
     ['destination-only', t.destinationOnly, 'info'],
-    ['warnings', t.warnings, 'warn'],
+    // Two warning chips: blocking files (red — can't ship) and overridable
+    // files (warn yellow — can ship with "Sync anyway"). Both default hidden
+    // when zero, so a clean plan keeps the strip uncluttered.
+    ['blocked', t.blockingWarnings, 'block'],
+    ['needs override', t.overridableWarnings, 'warn'],
     ['skip', t.skip, 'mute'],
     ['skipped pairs', t.skipped, 'warn'],
   ];
@@ -891,6 +953,13 @@ function planContentCss(): string {
       color: var(--vscode-errorForeground);
     }
     ul.rows .decision-delete .decision-label {
+      color: var(--vscode-editorWarning-foreground, #cca700);
+    }
+    /* warning-override = "Sync anyway" on a green-path row whose only
+       warnings are override severity (e.g. pptx media-controls). Same warn
+       palette as the delete affordance — the action is "ship despite a
+       quality concern", not destructive but not neutral either. */
+    ul.rows .decision-warning-override .decision-label {
       color: var(--vscode-editorWarning-foreground, #cca700);
     }
     /* When the checkbox is checked we promote the label to full strength to

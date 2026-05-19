@@ -224,14 +224,19 @@ test('renderPlanHtml: hostile path is HTML-escaped', () => {
 // canary test below for the gating assertion.
 
 const WARN_KIOSK: PlanWarning = {
-  severity: 'warn',
+  severity: 'block',
   code: 'show-type',
   message: 'Show type is kiosk',
 };
 const WARN_LINKED: PlanWarning = {
-  severity: 'warn',
+  severity: 'block',
   code: 'linked-media',
   message: 'External media link present',
+};
+const WARN_MEDIA_CONTROLS: PlanWarning = {
+  severity: 'override',
+  code: 'media-controls',
+  message: 'Media controls visible over embedded video',
 };
 
 test('toViewModel: warnings total counts items with non-empty warnings', () => {
@@ -263,7 +268,9 @@ test('renderPlanHtml: warnings chip appears and "Validation warnings" section re
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
 
-  assert.ok(html.includes('warnings: 2'), 'warnings chip not rendered');
+  // Severity chips: both files are block-severity warnings, so "blocked: 2"
+  // is the chip label (overridable warnings would render as "needs override").
+  assert.ok(html.includes('blocked: 2'), '"blocked: 2" chip not rendered');
   assert.ok(html.includes('Validation warnings'), 'Validation warnings section header missing');
   assert.ok(/sec-warn[^>]* open/.test(html), 'warnings section not initially expanded');
   // Full message text must appear in the dedicated section.
@@ -328,7 +335,7 @@ test('renderPlanHtml: Phase D — warnings flip footer to orange + red', () => {
 
 test('renderPlanHtml: warning messages are HTML-escaped', () => {
   const HOSTILE: PlanWarning = {
-    severity: 'warn',
+    severity: 'block',
     code: 'show-type',
     message: '<img src=x onerror=alert(1)>',
   };
@@ -448,6 +455,137 @@ test('renderPlanHtml: destination-only row emits a Delete checkbox', () => {
   assert.ok(html.includes('data-decision-kind="delete"'), 'delete data-decision-kind missing');
   assert.ok(/decision decision-delete/.test(html), 'decision wrapper class missing');
   assert.ok(html.includes('Delete from destination'), 'delete label missing');
+});
+
+// ───── warning-override decision (M5 Phase D-adj) ───────────────────────
+//
+// Override-severity warnings (e.g. pptx media-controls + embedded video) get
+// a per-row "Sync anyway" decision affordance on green-path rows (create /
+// update-tracked). Block-severity warnings don't get a checkbox — they can't
+// ship. Collision rows fold their warning arming into the overwrite decision.
+
+test('toViewModel: green row with override-only warning gets warning-override decision', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.pptx', { sourceSize: 1, sourceHash: 'h', warnings: [WARN_MEDIA_CONTROLS] }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.create[0];
+  assert.equal(row.decision?.kind, 'warning-override');
+  assert.equal(row.decision?.label, 'Sync anyway');
+  assert.equal(row.decision?.id, '0:warning-override:a.pptx');
+});
+
+test('toViewModel: green row with block-severity warning gets no decision', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.pptx', { sourceSize: 1, sourceHash: 'h', warnings: [WARN_KIOSK] }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.pairs[0].sections.create[0].decision, undefined);
+});
+
+test('toViewModel: green row with mixed block+override warnings gets no decision', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.pptx', {
+          sourceSize: 1,
+          sourceHash: 'h',
+          warnings: [WARN_KIOSK, WARN_MEDIA_CONTROLS],
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  // Block trumps — even mixed-severity rows can't ship.
+  assert.equal(vm.pairs[0].sections.create[0].decision, undefined);
+});
+
+test('toViewModel: collision row with override warning keeps overwrite decision (no doubling)', () => {
+  // Collisions fold warning-override arming into the overwrite arming —
+  // the user agreeing to overwrite the destination is taken as agreement
+  // on the warning too. So we don't emit a separate warning-override row.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.pptx', {
+          sourceSize: 1,
+          sourceHash: 'h1',
+          destHash: 'h2',
+          warnings: [WARN_MEDIA_CONTROLS],
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.updateCollision[0];
+  assert.equal(row.decision?.kind, 'overwrite');
+});
+
+test('toViewModel: totals split into blockingWarnings + overridableWarnings', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'block.pptx', { sourceSize: 1, sourceHash: 'h1', warnings: [WARN_KIOSK] }),
+        item('create', 'override.pptx', {
+          sourceSize: 1,
+          sourceHash: 'h2',
+          warnings: [WARN_MEDIA_CONTROLS],
+        }),
+        item('create', 'clean.txt', { sourceSize: 1, sourceHash: 'h3' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.totals.warnings, 2);
+  assert.equal(vm.totals.blockingWarnings, 1);
+  assert.equal(vm.totals.overridableWarnings, 1);
+});
+
+test('renderPlanHtml: override-warning row emits "Sync anyway" checkbox', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.pptx', {
+          sourceSize: 1,
+          sourceHash: 'h',
+          warnings: [WARN_MEDIA_CONTROLS],
+        }),
+      ],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('data-decision-kind="warning-override"'), 'warning-override kind data attr missing');
+  assert.ok(/decision decision-warning-override/.test(html), 'decision wrapper class missing');
+  assert.ok(html.includes('Sync anyway'), '"Sync anyway" label missing');
+});
+
+test('renderPlanHtml: severity chips split blocked vs needs-override', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'block.pptx', { sourceSize: 1, sourceHash: 'h1', warnings: [WARN_KIOSK] }),
+        item('create', 'override.pptx', { sourceSize: 1, sourceHash: 'h2', warnings: [WARN_MEDIA_CONTROLS] }),
+      ],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('blocked: 1'), '"blocked: 1" chip missing');
+  assert.ok(html.includes('needs override: 1'), '"needs override: 1" chip missing');
 });
 
 test('renderPlanHtml: clean row has no decision checkbox', () => {

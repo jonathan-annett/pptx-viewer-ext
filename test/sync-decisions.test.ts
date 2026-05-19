@@ -91,6 +91,19 @@ test('parseDecisionMessage: rejects wrong type', () => {
   assert.equal(parseDecisionMessage({ type: 'cancel' }), undefined);
 });
 
+test('parseDecisionMessage: accepts warning-override kind', () => {
+  const out = parseDecisionMessage({
+    type: 'decision',
+    id: '0:warning-override:a.pptx',
+    kind: 'warning-override',
+    relPath: 'a.pptx',
+    accepted: true,
+    remember: false,
+  });
+  assert.equal(out?.kind, 'warning-override');
+  assert.equal(out?.relPath, 'a.pptx');
+});
+
 test('parseDecisionMessage: rejects unknown kind', () => {
   assert.equal(
     parseDecisionMessage({
@@ -141,7 +154,7 @@ test('parseDecisionMessage: rejects non-object input', () => {
 
 const dec = (
   id: string,
-  kind: 'overwrite' | 'delete',
+  kind: 'overwrite' | 'delete' | 'warning-override',
   relPath: string,
   accepted: boolean,
   remember = false,

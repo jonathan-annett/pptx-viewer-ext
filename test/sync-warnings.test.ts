@@ -91,7 +91,7 @@ test('kiosk mode → show-type warning', async () => {
   const warnings = await validatePptxBytes('kiosk.pptx', bytes);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0].code, 'show-type');
-  assert.equal(warnings[0].severity, 'warn');
+  assert.equal(warnings[0].severity, 'block');
   assert.match(warnings[0].message, /[Kk]iosk/);
 });
 
@@ -106,6 +106,7 @@ test('window/browse mode → show-type warning', async () => {
   const warnings = await validatePptxBytes('browse.pptx', bytes);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0].code, 'show-type');
+  assert.equal(warnings[0].severity, 'block');
   assert.match(warnings[0].message, /[Bb]rowse|[Ww]indow/);
 });
 
@@ -123,6 +124,7 @@ test('linked external video → linked-media warning', async () => {
   const warnings = await validatePptxBytes('linked.pptx', bytes);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0].code, 'linked-media');
+  assert.equal(warnings[0].severity, 'block');
   assert.match(warnings[0].message, /external/i);
 });
 
@@ -139,6 +141,9 @@ test('media controls on + embedded video → media-controls warning', async () =
   const warnings = await validatePptxBytes('mediactrls.pptx', bytes);
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0].code, 'media-controls');
+  // media-controls is the only override-severity warning — files with the
+  // progress bar over a video are ugly but ship-able.
+  assert.equal(warnings[0].severity, 'override');
   assert.match(warnings[0].message, /embedded video/i);
 });
 

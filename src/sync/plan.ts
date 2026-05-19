@@ -43,9 +43,19 @@ export interface FileInfo {
  *
  * The codes are an enumerated set, not a free-form string, so callers can
  * style or filter on them. New validators add codes here as they land.
+ *
+ * Severity tiers:
+ *  - 'block'    — a file in this state would be broken at the destination
+ *                 (kiosk show mode, externally-linked media). No per-file
+ *                 override; the user must fix the source and re-plan.
+ *  - 'override' — a quality concern that doesn't break the file, but the
+ *                 user should acknowledge before shipping (e.g. media
+ *                 controls visible over an embedded video at a conference).
+ *                 Surfaced in the plan webview with a "Sync anyway" checkbox
+ *                 + "Don't ask again"; armed rows flow through the executor.
  */
 export interface PlanWarning {
-  severity: 'warn';
+  severity: 'block' | 'override';
   code: 'linked-media' | 'show-type' | 'media-controls';
   message: string;
 }
@@ -100,9 +110,19 @@ export function classifyFiles(
   //    Warnings from the source FileInfo ride along onto each item — the
   //    plan view's Validation warnings section is a derived view of items
   //    with a non-empty `warnings` list.
+  //
+  //    Remembered decisions for the row's kind ride along too:
+  //    - create / update-tracked with override-only warnings → consult
+  //      manifest.decisions[key].warningOverride.
+  //    - update-collision → consult manifest.decisions[key].collisionOverwrite.
+  //      (Block-severity warnings on a collision skip the lookup — there's
+  //      no decision that unblocks them.)
+  //    - destination-only → consult manifest.decisions[key].destOnlyDelete.
   for (const sourceFile of sourceFiles) {
     const carry = carryWarnings(sourceFile);
     const destFile = destMap.get(sourceFile.relPath);
+    const key = manifestKey(sourceWorkspaceFolderName, sourceFile.relPath);
+    const warningCarry = rememberedForWarning(sourceFile, manifest, key);
     if (!destFile) {
       items.push({
         kind: 'create',
@@ -110,6 +130,7 @@ export function classifyFiles(
         sourceSize: sourceFile.size,
         sourceHash: sourceFile.sha256,
         ...carry,
+        ...warningCarry,
       });
       continue;
     }
@@ -127,7 +148,6 @@ export function classifyFiles(
       continue;
     }
 
-    const key = manifestKey(sourceWorkspaceFolderName, sourceFile.relPath);
     const entry = manifest.entries[key];
     if (entry && entry.sha256 === destFile.sha256) {
       // Manifest agrees with current destination state → safe overwrite.
@@ -140,6 +160,7 @@ export function classifyFiles(
         destHash: destFile.sha256,
         manifestHash: entry.sha256,
         ...carry,
+        ...warningCarry,
       });
     } else {
       // Manifest absent, or it disagrees — could be user-edited destination.
@@ -255,4 +276,54 @@ function carryWarnings(src: FileInfo): { warnings?: PlanWarning[] } {
   return src.warnings && src.warnings.length > 0
     ? { warnings: src.warnings }
     : {};
+}
+
+/**
+ * Look up a remembered "Sync anyway" decision for a source file's
+ * override-severity warnings. Returns the shape the spread operator can
+ * splat into a PlanItem.
+ *
+ * Three early-outs:
+ *  - file has no warnings → nothing to remember
+ *  - any warning is 'block' severity → no decision can unblock; ignore any
+ *    stale warningOverride in the manifest
+ *  - manifest has no warningOverride for this key → no carry
+ *
+ * Only consulted from green-path rows (create / update-tracked). Collisions
+ * route through `collisionOverwrite` instead — overwrite arming on a
+ * collision row implicitly covers its override warnings.
+ */
+function rememberedForWarning(
+  src: FileInfo,
+  manifest: Manifest,
+  key: string,
+): { remembered?: { accepted: true } } {
+  const ws = src.warnings;
+  if (!ws || ws.length === 0) return {};
+  if (ws.some((w) => w.severity === 'block')) return {};
+  return manifest.decisions[key]?.warningOverride
+    ? { remembered: { accepted: true as const } }
+    : {};
+}
+
+// ───── severity helpers ───────────────────────────────────────────────────
+//
+// Centralised so the executor, planHtml renderer, and runSync all classify
+// warning-bearing items identically. A row is "blocked by warnings" if any
+// warning is 'block' severity. A row is "override-only" if it has warnings
+// and none are 'block' — the orange path can ship it with explicit arming.
+
+/** True iff the item carries at least one 'block'-severity warning. */
+export function hasBlockingWarning(item: PlanItem): boolean {
+  return !!item.warnings?.some((w) => w.severity === 'block');
+}
+
+/**
+ * True iff the item has warnings, all of which are 'override' severity. A
+ * row with zero warnings returns false (no override is required because no
+ * warning is present).
+ */
+export function hasOverridableWarningOnly(item: PlanItem): boolean {
+  if (!item.warnings || item.warnings.length === 0) return false;
+  return item.warnings.every((w) => w.severity === 'override');
 }

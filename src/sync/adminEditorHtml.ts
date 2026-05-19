@@ -595,10 +595,15 @@ const CLIENT_JS = `
     if (msg.blocking > 0) {
       runSyncBtn.disabled = true;
       const collisions = t.updateCollision || 0;
-      const warnings = t.warnings || 0;
+      // Severity breakdown: blocked = block-severity warnings (can never
+      // ship); overridable = override-severity warnings (the user can arm
+      // "Sync anyway" per file in the workspace plan).
+      const blocked = t.blockingWarnings || 0;
+      const overridable = t.overridableWarnings || 0;
       const hintParts = [];
       if (collisions) hintParts.push(collisions + ' collision' + (collisions === 1 ? '' : 's'));
-      if (warnings) hintParts.push(warnings + ' warning' + (warnings === 1 ? '' : 's'));
+      if (blocked) hintParts.push(blocked + ' blocked file' + (blocked === 1 ? '' : 's'));
+      if (overridable) hintParts.push(overridable + ' file' + (overridable === 1 ? '' : 's') + ' needing override');
       let hint = hintParts.join(' + ');
       if (safeUpper > 0) {
         runSyncSafeBtn.hidden = false;

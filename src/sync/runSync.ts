@@ -92,6 +92,7 @@ export async function runSync(
         hash: sha256Hex,
         decidedOverwrites: armed.decidedOverwrites,
         decidedDeletes: armed.decidedDeletes,
+        decidedWarningOverrides: armed.decidedWarningOverrides,
       });
 
       for (const r of result.results) {
@@ -136,6 +137,7 @@ export async function runSync(
 interface ArmedDecisions {
   decidedOverwrites: Set<string>;
   decidedDeletes: Set<string>;
+  decidedWarningOverrides: Set<string>;
 }
 
 /**
@@ -150,6 +152,7 @@ function pickArmedDecisions(
   const out: ArmedDecisions = {
     decidedOverwrites: new Set<string>(),
     decidedDeletes: new Set<string>(),
+    decidedWarningOverrides: new Set<string>(),
   };
   if (!decisions) return out;
   const prefix = `${pairIndex}:`;
@@ -157,7 +160,8 @@ function pickArmedDecisions(
     if (!id.startsWith(prefix)) continue;
     if (!d.accepted) continue;
     if (d.kind === 'overwrite') out.decidedOverwrites.add(d.relPath);
-    else out.decidedDeletes.add(d.relPath);
+    else if (d.kind === 'delete') out.decidedDeletes.add(d.relPath);
+    else out.decidedWarningOverrides.add(d.relPath);
   }
   return out;
 }
@@ -179,18 +183,38 @@ function pickArmedDecisions(
 function applyDecisionPersistence(
   plan: PlanForDestination,
   decisions: ReadonlyMap<string, RowDecision> | undefined,
-  manifest: { decisions: { [key: string]: { destOnlyDelete: boolean; collisionOverwrite: boolean; decidedAt: string } } },
+  manifest: {
+    decisions: {
+      [key: string]: {
+        destOnlyDelete: boolean;
+        collisionOverwrite: boolean;
+        warningOverride: boolean;
+        decidedAt: string;
+      };
+    };
+  },
   okPaths: ReadonlySet<string>,
 ): void {
   const source = plan.source.workspaceFolderName;
-  // Build a quick lookup of plan items keyed by (kind, relPath) for the
-  // user-untoggle pass below.
+  // First pass: clear any previously-remembered decision on plan items that
+  // exposed a remembered choice this run. We'll re-add below if the user
+  // kept it ticked; clearing unconditionally first lets an opted-out row be
+  // forgotten without per-kind tracking.
   for (const item of plan.items) {
-    if (item.kind !== 'update-collision' && item.kind !== 'destination-only') continue;
-    if (!item.remembered?.accepted) continue;
+    const hadRemembered = !!item.remembered?.accepted;
+    if (!hadRemembered) continue;
+    // Items where remembered may apply: collisions (collisionOverwrite),
+    // destination-only (destOnlyDelete), and green-path rows with override-
+    // only warnings (warningOverride).
+    if (
+      item.kind !== 'update-collision' &&
+      item.kind !== 'destination-only' &&
+      item.kind !== 'create' &&
+      item.kind !== 'update-tracked'
+    ) {
+      continue;
+    }
     const key = manifestKey(source, item.relPath);
-    // We'll re-add below if the user kept it ticked; clear unconditionally
-    // first so an opted-out row is forgotten.
     delete manifest.decisions[key];
   }
 
@@ -208,6 +232,7 @@ function applyDecisionPersistence(
     manifest.decisions[key] = {
       destOnlyDelete: d.kind === 'delete',
       collisionOverwrite: d.kind === 'overwrite',
+      warningOverride: d.kind === 'warning-override',
       decidedAt: now,
     };
   }
@@ -216,7 +241,10 @@ function applyDecisionPersistence(
 function decisionMatchesItem(d: RowDecision, it: PlanItem): boolean {
   if (d.relPath !== it.relPath) return false;
   if (d.kind === 'overwrite') return it.kind === 'update-collision';
-  return it.kind === 'destination-only';
+  if (d.kind === 'delete') return it.kind === 'destination-only';
+  // warning-override: only attached to green-path rows that aren't collisions
+  // (collision rows fold warning arming into the overwrite decision).
+  return it.kind === 'create' || it.kind === 'update-tracked';
 }
 
 // ───── adapters ──────────────────────────────────────────────────────────

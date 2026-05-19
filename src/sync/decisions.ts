@@ -11,10 +11,22 @@
  * stable identifier emitted by the renderer
  * (`${pairIndex}:${kind}:${relPath}`) — unique within a plan panel and
  * stable across DOM updates, which is what an in-memory map needs.
+ *
+ * Three kinds, one per category of risk the user is arming:
+ *  - 'overwrite'        — collision row; user accepts overwriting the
+ *                         destination's current bytes.
+ *  - 'delete'           — destination-only row; user accepts removing the
+ *                         file from the destination.
+ *  - 'warning-override' — green-path row whose only warnings are 'override'
+ *                         severity (e.g. pptx media-controls + embedded
+ *                         video). User accepts shipping the file despite
+ *                         the validator concern. Only emitted on rows that
+ *                         AREN'T collisions — on a collision row, the
+ *                         overwrite arming implicitly covers the warning.
  */
 export interface RowDecision {
   id: string;
-  kind: 'overwrite' | 'delete';
+  kind: 'overwrite' | 'delete' | 'warning-override';
   relPath: string;
   /**
    * `true` when the user checked the box (opt-in to overwrite/delete);
@@ -40,7 +52,10 @@ export function parseDecisionMessage(msg: unknown): RowDecision | undefined {
   const m = msg as Record<string, unknown>;
   if (m.type !== 'decision') return undefined;
   const id = typeof m.id === 'string' ? m.id : undefined;
-  const kind = m.kind === 'overwrite' || m.kind === 'delete' ? m.kind : undefined;
+  const kind =
+    m.kind === 'overwrite' || m.kind === 'delete' || m.kind === 'warning-override'
+      ? m.kind
+      : undefined;
   const relPath = typeof m.relPath === 'string' ? m.relPath : undefined;
   const accepted = typeof m.accepted === 'boolean' ? m.accepted : undefined;
   if (!id || !kind || !relPath || accepted === undefined) return undefined;

@@ -25,6 +25,7 @@
 import type { Manifest } from './manifest-types';
 import { manifestKey } from './manifest-types';
 import type { OpKind, PlanItem } from './plan';
+import { hasBlockingWarning, hasOverridableWarningOnly } from './plan';
 
 /** Abstract FS contract — production wires vscode.workspace.fs, tests fake. */
 export interface SyncFs<U> {
@@ -66,6 +67,21 @@ export interface ExecuteOptions<U> {
    */
   decidedOverwrites?: ReadonlySet<string>;
   decidedDeletes?: ReadonlySet<string>;
+  /**
+   * Per-relPath "Sync anyway" decisions for rows whose only warnings are
+   * 'override' severity (e.g. pptx media-controls + embedded video). When a
+   * green-path item (create / update-tracked) has override-severity warnings
+   * and its rel-path is in this set, the executor ships it; otherwise it
+   * skips. 'block'-severity warnings ignore this set — they never ship.
+   *
+   * Decoupled from `decidedOverwrites` because the two arm different kinds
+   * of risk (collision = destination state divergence; warning = file
+   * quality concern). On an `update-collision` row that also carries
+   * override warnings, the overwrite arming implicitly covers the warning —
+   * the user agreeing to overwrite is taken as agreement on both — so this
+   * set is consulted only for non-collision rows.
+   */
+  decidedWarningOverrides?: ReadonlySet<string>;
 }
 
 export interface OperationResult {
@@ -145,26 +161,47 @@ export async function executePlan<U>(opts: ExecuteOptions<U>): Promise<ExecuteRe
 
 /**
  * Decide whether and how to act on a plan item. Returns the operation kind to
- * record in results, or `undefined` to skip. Green-path items pass through;
- * orange-path items (`update-collision`, `destination-only`) only act when
- * the caller explicitly armed them via `decidedOverwrites` / `decidedDeletes`.
+ * record in results, or `undefined` to skip.
  *
- * M5 Phase D: items carrying validator warnings are blocked unconditionally —
- * the plan webview shows them with a ⚠ badge and flips the footer to orange,
- * and the orange "Proceed with safe items only" button means exactly that.
- * There is no per-row override for warnings (the user must fix the file and
- * re-plan), so an armed overwrite on a warned collision still skips here.
- * `delete-tracked` and `destination-only` items never carry warnings (no
- * source bytes to validate), so this filter only affects `create`,
- * `update-tracked`, and armed `update-collision` items in practice.
+ * Decision matrix per category:
+ *
+ *  1. Any 'block'-severity warning → always skip. No override exists; the
+ *     user must fix the source file and re-plan. Trumps every arming flag.
+ *
+ *  2. Green-path kinds (create / update-tracked / delete-tracked):
+ *     - No warnings → execute.
+ *     - 'override'-severity warnings only → execute iff
+ *       decidedWarningOverrides has the rel-path.
+ *
+ *  3. `update-collision` kind:
+ *     - Requires decidedOverwrites arming.
+ *     - Override-severity warnings on the same row are implicitly covered
+ *       by the overwrite arming — the user agreeing to overwrite the
+ *       destination is taken as agreement on the warning too.
+ *
+ *  4. `destination-only` kind:
+ *     - Requires decidedDeletes arming. These rows never carry warnings
+ *       (no source bytes to validate), so the warning matrix doesn't apply.
+ *
+ * Items in `skip` kind are filtered by the planner before the executor sees
+ * them, so they never reach this function.
  */
 function resolveDispatch<U>(
   item: PlanItem,
   opts: ExecuteOptions<U>,
 ): OperationResult['kind'] | undefined {
-  if (item.warnings && item.warnings.length > 0) return undefined;
-  if (GREEN_KINDS.has(item.kind)) return item.kind as OperationResult['kind'];
+  if (hasBlockingWarning(item)) return undefined;
+
+  if (GREEN_KINDS.has(item.kind)) {
+    if (hasOverridableWarningOnly(item)) {
+      if (!opts.decidedWarningOverrides?.has(item.relPath)) return undefined;
+    }
+    return item.kind as OperationResult['kind'];
+  }
   if (item.kind === 'update-collision' && opts.decidedOverwrites?.has(item.relPath)) {
+    // Note: no separate warning-override arming required — overwrite covers
+    // the row's override warnings. `hasBlockingWarning` above already
+    // filtered out collisions with block-severity warnings.
     return 'update-collision';
   }
   if (item.kind === 'destination-only' && opts.decidedDeletes?.has(item.relPath)) {

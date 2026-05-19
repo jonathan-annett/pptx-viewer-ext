@@ -25,10 +25,16 @@
 //       "<sourceWorkspaceFolder>:<relativePath>": {
 //         "destOnlyDelete": false,
 //         "collisionOverwrite": true,
+//         "warningOverride": false,
 //         "decidedAt": "<ISO timestamp>"
 //       }
 //     }
 //   }
+//
+// The `warningOverride` field is the per-file "Sync anyway" memory for
+// override-severity validator warnings (e.g. pptx media-controls + embedded
+// video). Older manifests written before warning overrides shipped lack the
+// field; the parser defaults it to false so they continue to load cleanly.
 //
 // Missing or corrupt manifest → empty manifest. This is deliberate per the
 // plan: an existing destination with no manifest surfaces every file as
@@ -180,9 +186,15 @@ function asDecision(v: unknown): ManifestDecision | undefined {
   ) {
     return undefined;
   }
+  // warningOverride is a later addition; default to false when missing so
+  // manifests written before it shipped continue to load. A wrong-typed
+  // value also degrades to false rather than rejecting the whole record.
+  const warningOverride =
+    typeof d.warningOverride === 'boolean' ? d.warningOverride : false;
   return {
     destOnlyDelete: d.destOnlyDelete,
     collisionOverwrite: d.collisionOverwrite,
+    warningOverride,
     decidedAt: d.decidedAt,
   };
 }
