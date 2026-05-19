@@ -717,3 +717,32 @@ VS Code's built-in UI doesn't expose a friendly way to set a workspace folder's 
 ### Per-file sync from the pptx viewer
 
 A "Sync now" action on the pptx custom editor's metadata page. Resolves the file's source `.sync.jsonc` (nearest-config rule), pushes the single file to each destination immediately (no plan/gate cycle — the user already saw the file open), updates the manifest, and surfaces sync status as a new metadata row (last synced timestamp + destination list, or "not under a sync source"). Skips the collision/validator gate when invoked this way — the user is acting on one known file and has the viewer's validation output in front of them.
+
+### Pptx parse cache (sha256-keyed, IndexedDB-persisted)
+
+`parsePptx` is the hot path for several surfaces and the cost compounds:
+
+- Pptx viewer open / re-open / refresh
+- Compare modal on drag-and-drop or **Update…**
+- M5 validator pass — once per `.pptx` per `.sync.jsonc` plan build, fired on every room-editor + admin-editor open and on every file-tree change
+- Future per-file dry-run on each pptx viewer open
+
+Each call unzips the bytes, walks every slide XML, scans `[Content_Types].xml`, extracts the thumbnail to a data URL, and runs the validation regex set. For a multi-MB pptx with embedded video that's ~tens of ms of real work; multiplied across a room with 30 decks the validator pass alone is the dominant cost of opening `.sync.jsonc`.
+
+`parsePptx` already computes sha256 of the input bytes (`src/pptx.ts:59`) before doing any other work. That hash is a free, content-addressed cache key — same bytes always parse to the same result.
+
+Proposed shape:
+
+- **In-memory LRU** keyed by sha256 → `ParseResult`. Bounded by total bytes (e.g. 64 MB) so big thumbnails don't blow memory. Survives the lifetime of the extension host.
+- **IndexedDB tier** behind the LRU. On cache miss, look up the sha256 in IndexedDB; on hit, hydrate the LRU and return. Survives browser refresh / extension reload — the wins here are the M4.6 silent-restore case (every refresh re-mounts the same folders, the validator pass re-runs against the same bytes) and the user's normal "close tab, come back tomorrow" flow.
+- **Thumbnails as a separate store.** They're the heaviest field by far. Storing the data URL once per sha256 in its own object store lets the LRU tier optionally drop just the thumbnail when memory pressure hits, while keeping the cheap metadata + validation results hot.
+- **Write path:** every successful `parsePptx` call writes the result back to both tiers. Failures (`parseError` set) cache the failure too — same bytes, same failure, no point re-parsing.
+- **Invalidation:** content-addressed, so there is no invalidation. A file's bytes either match a cache entry's key or they don't.
+
+Open questions for when this lands:
+
+- Does the web-extension host expose IndexedDB directly, or does it need to go through `vscode.workspace.fs` / a webview proxy? Worth a 10-line probe before designing around it. Web-extension worker context *should* have IndexedDB (it's a standard worker global), but the VS Code host has been surprising before.
+- The LRU should probably be in `src/pptx.ts` itself — `parsePptx` wraps its own work with a cache check — so every caller benefits transparently. The IndexedDB tier sits behind a small async adapter that's a no-op if IndexedDB isn't available, keeping the parser usable from tsx tests.
+- Cache hit-rate diagnostics in the activation log would tell us whether the IndexedDB tier is earning its keep (cold vs warm hit ratio per refresh).
+
+Slotting target: revisit when M5's validator pass is actually exercised against real-world room sizes. Until then this is a known optimisation, not a current bottleneck.

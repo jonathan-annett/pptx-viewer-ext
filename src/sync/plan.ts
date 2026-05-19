@@ -28,6 +28,26 @@ export interface FileInfo {
   relPath: string;
   size: number;
   sha256: string;
+  /**
+   * Validator output attached during the source walk. Destination-side
+   * FileInfos always omit this — we only run validators against the bytes
+   * we're about to push.
+   */
+  warnings?: PlanWarning[];
+}
+
+/**
+ * A single per-file warning produced by a validator (e.g. the pptx kiosk-mode
+ * check). Attached to the source-side PlanItem so the plan view can list
+ * "files needing attention" without re-deriving them from raw FileInfos.
+ *
+ * The codes are an enumerated set, not a free-form string, so callers can
+ * style or filter on them. New validators add codes here as they land.
+ */
+export interface PlanWarning {
+  severity: 'warn';
+  code: 'linked-media' | 'show-type' | 'media-controls';
+  message: string;
 }
 
 export interface PlanItem {
@@ -41,6 +61,12 @@ export interface PlanItem {
   destHash?: string;
   /** Hash the manifest claims the destination has (if it has an entry). */
   manifestHash?: string;
+  /**
+   * Per-file validator warnings, copied from the source FileInfo at
+   * classification time. Only ever populated on source-side items
+   * (create / update-tracked / update-collision / skip).
+   */
+  warnings?: PlanWarning[];
 }
 
 /**
@@ -62,7 +88,11 @@ export function classifyFiles(
 
   // 1. Walk the source side. Every source file maps to one of:
   //    create / skip / update-tracked / update-collision.
+  //    Warnings from the source FileInfo ride along onto each item — the
+  //    plan view's Validation warnings section is a derived view of items
+  //    with a non-empty `warnings` list.
   for (const sourceFile of sourceFiles) {
+    const carry = carryWarnings(sourceFile);
     const destFile = destMap.get(sourceFile.relPath);
     if (!destFile) {
       items.push({
@@ -70,6 +100,7 @@ export function classifyFiles(
         relPath: sourceFile.relPath,
         sourceSize: sourceFile.size,
         sourceHash: sourceFile.sha256,
+        ...carry,
       });
       continue;
     }
@@ -82,6 +113,7 @@ export function classifyFiles(
         destSize: destFile.size,
         sourceHash: sourceFile.sha256,
         destHash: destFile.sha256,
+        ...carry,
       });
       continue;
     }
@@ -98,6 +130,7 @@ export function classifyFiles(
         sourceHash: sourceFile.sha256,
         destHash: destFile.sha256,
         manifestHash: entry.sha256,
+        ...carry,
       });
     } else {
       // Manifest absent, or it disagrees — could be user-edited destination.
@@ -109,6 +142,7 @@ export function classifyFiles(
         sourceHash: sourceFile.sha256,
         destHash: destFile.sha256,
         ...(entry ? { manifestHash: entry.sha256 } : {}),
+        ...carry,
       });
     }
   }
@@ -156,6 +190,12 @@ export interface PlanSummary {
   skip: PlanItem[];
   deleteTracked: PlanItem[];
   destinationOnly: PlanItem[];
+  /**
+   * Derived view: every item with at least one validator warning. Items also
+   * remain in their primary category — this list is for rendering the
+   * dedicated Validation warnings section in the plan webview.
+   */
+  warnings: PlanItem[];
 }
 
 export function summarisePlan(items: PlanItem[]): PlanSummary {
@@ -166,6 +206,7 @@ export function summarisePlan(items: PlanItem[]): PlanSummary {
     skip: [],
     deleteTracked: [],
     destinationOnly: [],
+    warnings: [],
   };
   for (const item of items) {
     switch (item.kind) {
@@ -176,6 +217,9 @@ export function summarisePlan(items: PlanItem[]): PlanSummary {
       case 'delete-tracked': out.deleteTracked.push(item); break;
       case 'destination-only': out.destinationOnly.push(item); break;
     }
+    if (item.warnings && item.warnings.length > 0) {
+      out.warnings.push(item);
+    }
   }
   // Stable, predictable ordering for the human reading the Output Channel.
   const byPath = (a: PlanItem, b: PlanItem): number => a.relPath.localeCompare(b.relPath);
@@ -185,5 +229,12 @@ export function summarisePlan(items: PlanItem[]): PlanSummary {
   out.skip.sort(byPath);
   out.deleteTracked.sort(byPath);
   out.destinationOnly.sort(byPath);
+  out.warnings.sort(byPath);
   return out;
+}
+
+function carryWarnings(src: FileInfo): { warnings?: PlanWarning[] } {
+  return src.warnings && src.warnings.length > 0
+    ? { warnings: src.warnings }
+    : {};
 }

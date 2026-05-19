@@ -117,6 +117,7 @@
     "test:sync-snapshot": "node --import tsx test/sync-snapshot.test.ts",
     "test:sync-admin-editor": "node --import tsx test/sync-admin-editor.test.ts",
     "test:sync-preview-context": "node --import tsx test/sync-preview-context.test.ts",
+    "test:sync-warnings": "node --import tsx test/sync-warnings.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",

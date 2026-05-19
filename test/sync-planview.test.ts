@@ -9,7 +9,7 @@
 
 import { strict as assert } from 'node:assert';
 import { renderPlanHtml, toViewModel, humanSize } from '../src/sync/planHtml';
-import { summarisePlan, type PlanItem } from '../src/sync/plan';
+import { summarisePlan, type PlanItem, type PlanWarning } from '../src/sync/plan';
 import type { PlanForDestination } from '../src/sync/planner';
 
 const tests: Array<[string, () => void]> = [];
@@ -214,6 +214,131 @@ test('renderPlanHtml: hostile path is HTML-escaped', () => {
   const html = renderPlanHtml(vm, 'n');
   assert.ok(!html.includes('<script>alert(1)'), 'unescaped <script> leaked into HTML');
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;.txt'), 'expected escaped path missing');
+});
+
+// ───── validator warnings (M5 Phase A) ──────────────────────────────────
+//
+// Phase A renders warnings as totals, an inline ⚠ badge on primary-category
+// rows, and a dedicated "Validation warnings" section listing full messages.
+// It explicitly does NOT change the footer — green proceeds even when
+// warnings are present. That gate moves in Phase B/D.
+
+const WARN_KIOSK: PlanWarning = {
+  severity: 'warn',
+  code: 'show-type',
+  message: 'Show type is kiosk',
+};
+const WARN_LINKED: PlanWarning = {
+  severity: 'warn',
+  code: 'linked-media',
+  message: 'External media link present',
+};
+
+test('toViewModel: warnings total counts items with non-empty warnings', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.pptx', { sourceSize: 10, sourceHash: 'h1', warnings: [WARN_KIOSK] }),
+        item('create', 'b.pptx', { sourceSize: 10, sourceHash: 'h2', warnings: [WARN_KIOSK, WARN_LINKED] }),
+        item('create', 'c.txt', { sourceSize: 10, sourceHash: 'h3' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.totals.create, 3);
+  assert.equal(vm.totals.warnings, 2);
+});
+
+test('renderPlanHtml: warnings chip appears and "Validation warnings" section renders', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'kiosk.pptx', { sourceSize: 1000, sourceHash: 'h1', warnings: [WARN_KIOSK] }),
+        item('create', 'linked.pptx', { sourceSize: 2000, sourceHash: 'h2', warnings: [WARN_LINKED] }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+
+  assert.ok(html.includes('warnings: 2'), 'warnings chip not rendered');
+  assert.ok(html.includes('Validation warnings'), 'Validation warnings section header missing');
+  assert.ok(/sec-warn[^>]* open/.test(html), 'warnings section not initially expanded');
+  // Full message text must appear in the dedicated section.
+  assert.ok(html.includes('Show type is kiosk'), 'full kiosk warning message missing');
+  assert.ok(html.includes('External media link present'), 'full linked-media message missing');
+});
+
+test('renderPlanHtml: inline ⚠ badge appears on primary-section rows with warnings', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.pptx', { sourceSize: 1, sourceHash: 'h', warnings: [WARN_KIOSK] })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+
+  // The badge string "⚠ 1" lands in the To-create section; primary-section
+  // rows show count only, not the message itself.
+  assert.ok(html.includes('warn-badge'), 'warn-badge class missing');
+  assert.ok(html.includes('⚠ 1'), 'inline warning badge "⚠ 1" missing');
+  // Tooltip on the badge carries the code:message pair.
+  assert.ok(html.includes('show-type: Show type is kiosk'), 'badge tooltip content missing');
+});
+
+test('renderPlanHtml: row without warnings has no badge', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  // The CSS always defines `.warn-badge` as a selector — assert on the
+  // element markup instead so we detect a leaked badge, not the rule.
+  assert.ok(!html.includes('class="warn-badge"'), 'warn-badge element leaked onto clean row');
+  assert.ok(!html.includes('Validation warnings'), 'empty Validation warnings section rendered');
+});
+
+test('renderPlanHtml: Phase A — warnings do NOT block green Proceed', () => {
+  // Crucial Phase A invariant: warnings alone keep the footer green. The
+  // orange-only proceed path lands in Phase B/D, so this assertion is the
+  // canary that prevents premature gating.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.pptx', { sourceSize: 1, sourceHash: 'h', warnings: [WARN_KIOSK, WARN_LINKED] })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+
+  assert.ok(/<button[^>]*class="btn btn-green"/.test(html), 'green proceed button missing despite warnings');
+  assert.ok(html.includes('id="proceed-btn"'), 'proceed-btn id missing despite warnings');
+  assert.ok(!/<button[^>]*id="proceed-btn"[^>]*disabled/.test(html), 'proceed-btn should not be disabled on warnings alone');
+  assert.ok(!/<button[^>]*btn-orange/.test(html), 'orange button leaked when only warnings present');
+});
+
+test('renderPlanHtml: warning messages are HTML-escaped', () => {
+  const HOSTILE: PlanWarning = {
+    severity: 'warn',
+    code: 'show-type',
+    message: '<img src=x onerror=alert(1)>',
+  };
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.pptx', { sourceSize: 1, sourceHash: 'h', warnings: [HOSTILE] })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.ok(!html.includes('<img src=x'), 'unescaped warning message leaked into HTML');
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped warning message missing');
 });
 
 // ───── humanSize sanity ──────────────────────────────────────────────────

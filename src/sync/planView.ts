@@ -74,7 +74,7 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
       `create ${vm.totals.create}, update-tracked ${vm.totals.updateTracked}, ` +
       `collisions ${vm.totals.updateCollision}, skip ${vm.totals.skip}, ` +
       `delete-tracked ${vm.totals.deleteTracked}, destination-only ${vm.totals.destinationOnly}, ` +
-      `skipped-pairs ${vm.totals.skipped}`,
+      `warnings ${vm.totals.warnings}, skipped-pairs ${vm.totals.skipped}`,
   );
 }
 

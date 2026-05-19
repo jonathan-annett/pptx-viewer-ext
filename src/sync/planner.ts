@@ -14,7 +14,7 @@
 
 import * as vscode from 'vscode';
 import type { ResolvedSource, ResolvedDestination, ResolvedTopology } from './topology';
-import type { FileInfo, PlanItem } from './plan';
+import type { FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree } from './walker';
 import { sha256Hex } from './hash';
@@ -28,6 +28,7 @@ import {
   relPathFromBase,
   scopeFromRelPath,
 } from './scopedPlan';
+import { isPptxPath, validatePptxBytes } from './validators';
 import { log } from '../log';
 
 export interface PlanForDestination {
@@ -136,6 +137,10 @@ async function planForSource(
     sourceFiles = await walkAndHash(source.sourceFolderUri, {
       exclude: sourceExclude,
       include: sourceInclude,
+      // Source walk validates each known file type from the same bytes used
+      // for hashing — one read per source file, validators see the same content
+      // we will (or won't) sync.
+      validate: true,
     });
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
@@ -217,6 +222,12 @@ async function loadConfigForSource(
 interface WalkAndHashOpts {
   exclude: GlobSet;
   include: GlobSet;
+  /**
+   * When true, run per-filetype validators against each file's bytes during
+   * the walk. Reuses the bytes already in scope for hashing — no second read.
+   * Only meaningful on the source walk; the destination walk leaves this off.
+   */
+  validate?: boolean;
 }
 
 async function walkAndHash(root: vscode.Uri, opts: WalkAndHashOpts): Promise<FileInfo[]> {
@@ -226,12 +237,35 @@ async function walkAndHash(root: vscode.Uri, opts: WalkAndHashOpts): Promise<Fil
     try {
       const bytes = await vscode.workspace.fs.readFile(e.uri);
       const sha256 = await sha256Hex(bytes);
-      out.push({ relPath: e.relPath, size: e.size, sha256 });
+      const info: FileInfo = { relPath: e.relPath, size: e.size, sha256 };
+      if (opts.validate) {
+        const warnings = await runValidators(e.relPath, bytes);
+        if (warnings.length > 0) info.warnings = warnings;
+      }
+      out.push(info);
     } catch (err) {
       log(`sync: failed to read ${e.uri.toString()} — ${errMsg(err)} (skipping)`);
     }
   }
   return out;
+}
+
+/**
+ * Dispatch a file to its validator(s) based on path. Today this is pptx-only;
+ * future filetype validators slot in here. Validation errors are swallowed —
+ * a validator that itself fails should not block the plan, only its warnings
+ * are missing. Logged for diagnostics.
+ */
+async function runValidators(relPath: string, bytes: Uint8Array): Promise<PlanWarning[]> {
+  if (isPptxPath(relPath)) {
+    try {
+      return await validatePptxBytes(relPath, bytes);
+    } catch (err) {
+      log(`sync: validator failed for ${relPath} — ${errMsg(err)} (continuing without warnings)`);
+      return [];
+    }
+  }
+  return [];
 }
 
 // ───── formatting ────────────────────────────────────────────────────────

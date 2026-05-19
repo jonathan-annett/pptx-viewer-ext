@@ -6,7 +6,7 @@
 // other sync tests; the vscode-touching half lives in planView.ts.
 
 import type { PlanForDestination } from './planner';
-import type { PlanItem } from './plan';
+import type { PlanItem, PlanWarning } from './plan';
 
 // ───── view model ────────────────────────────────────────────────────────
 //
@@ -24,6 +24,18 @@ export interface PlanRowView {
   sourceHashShort?: string;
   destHashShort?: string;
   manifestHashShort?: string;
+  /**
+   * Validator warnings attached to the source file. Rendered inline as a
+   * sub-list beneath the path row when present. The Validation warnings
+   * section uses the same renderRow path — it's a derived "all items with
+   * a warning" view, deduplicated from the primary category sections.
+   */
+  warnings?: PlanWarningView[];
+}
+
+export interface PlanWarningView {
+  code: string;
+  message: string;
 }
 
 export interface PlanPairView {
@@ -38,6 +50,8 @@ export interface PlanPairView {
     skip: PlanRowView[];
     deleteTracked: PlanRowView[];
     destinationOnly: PlanRowView[];
+    /** Derived view: items from the categories above that carry warnings. */
+    warnings: PlanRowView[];
   };
 }
 
@@ -112,6 +126,7 @@ export function toViewModel(
     totals.skip += s.skip.length;
     totals.deleteTracked += s.deleteTracked.length;
     totals.destinationOnly += s.destinationOnly.length;
+    totals.warnings += s.warnings.length;
 
     pairs.push({
       sourceLabel: srcKey,
@@ -123,6 +138,7 @@ export function toViewModel(
         skip: s.skip.map(toRow),
         deleteTracked: s.deleteTracked.map(toRow),
         destinationOnly: s.destinationOnly.map(toRow),
+        warnings: s.warnings.map(toRow),
       },
     });
   }
@@ -144,6 +160,7 @@ function emptySections(): PlanPairView['sections'] {
     skip: [],
     deleteTracked: [],
     destinationOnly: [],
+    warnings: [],
   };
 }
 
@@ -154,7 +171,14 @@ function toRow(item: PlanItem): PlanRowView {
     sourceHashShort: item.sourceHash?.slice(0, 8),
     destHashShort: item.destHash?.slice(0, 8),
     manifestHashShort: item.manifestHash?.slice(0, 8),
+    ...(item.warnings && item.warnings.length > 0
+      ? { warnings: item.warnings.map(toWarningView) }
+      : {}),
   };
+}
+
+function toWarningView(w: PlanWarning): PlanWarningView {
+  return { code: w.code, message: w.message };
 }
 
 // ───── rendering ─────────────────────────────────────────────────────────
@@ -166,10 +190,11 @@ function toRow(item: PlanItem): PlanRowView {
  */
 export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
   const t = vm.totals;
-  // The plan blocks proceed only when there are decisions the user has to
-  // make. In M3 there are no validators yet, so collisions are the only
-  // block category that can ever appear here.
-  const blocking = t.updateCollision + t.warnings;
+  // M5 Phase A: warnings render but don't yet block green. Phase B adds
+  // inline decision toggles and Phase D wires warnings into the orange-only
+  // proceed path; at that point this line becomes
+  //   `t.updateCollision + t.warnings`.
+  const blocking = t.updateCollision;
   const hasWork =
     t.create + t.updateTracked + t.deleteTracked + t.updateCollision > 0;
 
@@ -238,6 +263,7 @@ function renderTotals(t: PlanTotals): string {
     ['delete', t.deleteTracked, 'ok'],
     ['collisions', t.updateCollision, 'block'],
     ['destination-only', t.destinationOnly, 'info'],
+    ['warnings', t.warnings, 'warn'],
     ['skip', t.skip, 'mute'],
     ['skipped pairs', t.skipped, 'warn'],
   ];
@@ -268,6 +294,11 @@ function renderPair(pair: PlanPairView): string {
     section('Collisions — needs confirmation', 'block', s.updateCollision),
     section('To delete (source removed)', 'ok', s.deleteTracked),
     section('Destination-only', 'info', s.destinationOnly),
+    // Validation warnings is a derived view: every item already appears in
+    // one of the categories above. The dedicated section gathers them with
+    // full warning messages so the user can review reasons in one place
+    // without scanning every other section for ⚠ badges.
+    section('Validation warnings', 'warn', s.warnings, { expandWarnings: true }),
     section('Skip (unchanged)', 'mute', s.skip),
   ]
     .filter((html) => html !== '')
@@ -284,22 +315,32 @@ function renderPair(pair: PlanPairView): string {
 </section>`;
 }
 
-function section(label: string, cls: string, rows: PlanRowView[]): string {
+interface SectionOpts {
+  /**
+   * When true, each row also renders its full warning message list beneath
+   * the path. Off by default — primary-category sections just show a small
+   * "⚠ N" badge so the user can spot affected files without duplicating
+   * messages already shown in the dedicated Validation warnings section.
+   */
+  expandWarnings?: boolean;
+}
+
+function section(label: string, cls: string, rows: PlanRowView[], opts: SectionOpts = {}): string {
   if (rows.length === 0) return '';
   // <details>/<summary> gives us collapsibility for free: native widget,
   // keyboard-accessible, no script needed. The `open` attribute on
   // attention-worthy categories means the user doesn't have to expand them
   // to see what needs decisions.
-  const initiallyOpen = cls === 'block' || rows.length <= 10;
+  const initiallyOpen = cls === 'block' || cls === 'warn' || rows.length <= 10;
   return `<details class="sec sec-${cls}"${initiallyOpen ? ' open' : ''}>
     <summary><span class="sec-label">${escapeHtml(label)}</span><span class="sec-count">${rows.length}</span></summary>
     <ul class="rows">
-      ${rows.map(renderRow).join('\n      ')}
+      ${rows.map((r) => renderRow(r, opts)).join('\n      ')}
     </ul>
   </details>`;
 }
 
-function renderRow(row: PlanRowView): string {
+function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
   const sizeStr = row.sizeBytes !== undefined ? humanSize(row.sizeBytes) : '?';
 
   // Hash fragments matter when investigating "why was this categorised this
@@ -311,10 +352,39 @@ function renderRow(row: PlanRowView): string {
   if (row.manifestHashShort) hashes.push(`man=${row.manifestHashShort}`);
   const hashesStr = hashes.length > 0 ? ` <span class="hashes">${escapeHtml(hashes.join(' '))}</span>` : '';
 
-  return `<li class="row">
-        <span class="path">${escapeHtml(row.relPath)}</span>
-        <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}
+  const warnings = row.warnings ?? [];
+  // Primary sections (expandWarnings=false): tiny badge so the user knows
+  // this file appears in the dedicated Validation warnings section below.
+  // Warnings section (expandWarnings=true): no badge needed — the messages
+  // themselves convey the count.
+  const badge =
+    warnings.length > 0 && !opts.expandWarnings
+      ? ` <span class="warn-badge" title="${escapeHtml(warningTooltip(warnings))}">⚠ ${warnings.length}</span>`
+      : '';
+
+  const messages =
+    warnings.length > 0 && opts.expandWarnings
+      ? `\n        <ul class="warn-list">${warnings
+          .map(
+            (w) =>
+              `<li class="warn-item warn-${escapeHtml(w.code)}">${escapeHtml(w.message)}</li>`,
+          )
+          .join('')}</ul>`
+      : '';
+
+  return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}">
+        <div class="row-main">
+          <span class="path">${escapeHtml(row.relPath)}</span>
+          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}
+        </div>${messages}
       </li>`;
+}
+
+function warningTooltip(warnings: PlanWarningView[]): string {
+  // Title attribute uses newlines via &#10; — most browsers honour them in
+  // tooltips. Keeps the badge hover-discoverable without committing the
+  // primary section's vertical real estate to messages.
+  return warnings.map((w) => `${w.code}: ${w.message}`).join('\n');
 }
 
 function renderEmpty(): string {
@@ -530,6 +600,7 @@ function planContentCss(): string {
     }
     .sec[open] summary::before { transform: rotate(90deg); }
     .sec-block summary { color: var(--vscode-errorForeground); }
+    .sec-warn summary { color: var(--vscode-editorWarning-foreground, #cca700); }
     .sec-count {
       margin-left: auto;
       font-weight: 400;
@@ -538,26 +609,61 @@ function planContentCss(): string {
     }
 
     /* Row list: monospace-feeling layout where path / size / hashes line up
-       without us building a real table. */
+       without us building a real table. The grid sits inside .row-main so
+       each <li> can also carry block-level children (e.g. the warn-list)
+       without breaking the columnar layout above. */
     ul.rows {
       list-style: none;
       margin: 0;
       padding: 4px 10px 10px;
     }
     ul.rows .row {
-      display: grid;
-      grid-template-columns: 1fr max-content max-content;
-      gap: 12px;
-      align-items: baseline;
       padding: 2px 0;
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 0.92em;
+    }
+    ul.rows .row-main {
+      display: grid;
+      grid-template-columns: 1fr max-content max-content max-content;
+      gap: 12px;
+      align-items: baseline;
     }
     ul.rows .path { word-break: break-all; }
     ul.rows .size { color: var(--vscode-descriptionForeground); }
     ul.rows .hashes {
       color: var(--vscode-descriptionForeground);
       opacity: 0.8;
+    }
+    /* Warning badge appears in the right-most grid cell of .row-main; the
+       warn-list below is an indented sub-list. The badge uses the same chip
+       palette as the totals strip so the visual vocabulary is consistent. */
+    ul.rows .warn-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 0.85em;
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 18%, transparent);
+      border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 50%, transparent);
+      color: var(--vscode-editorWarning-foreground, #cca700);
+      cursor: help;
+    }
+    ul.rows .warn-list {
+      list-style: none;
+      margin: 4px 0 4px 16px;
+      padding: 0;
+      font-size: 0.9em;
+    }
+    ul.rows .warn-item {
+      padding: 1px 0 1px 12px;
+      color: var(--vscode-editorWarning-foreground, #cca700);
+      position: relative;
+    }
+    /* Bullet-style marker drawn ourselves so colour matches the warning palette. */
+    ul.rows .warn-item::before {
+      content: '⚠';
+      position: absolute;
+      left: -2px;
+      font-size: 0.85em;
     }
   `;
 }

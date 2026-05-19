@@ -6,7 +6,13 @@
 // for each file. No VS Code dependency.
 
 import { strict as assert } from 'node:assert';
-import { classifyFiles, summarisePlan, type FileInfo, type PlanItem } from '../src/sync/plan';
+import {
+  classifyFiles,
+  summarisePlan,
+  type FileInfo,
+  type PlanItem,
+  type PlanWarning,
+} from '../src/sync/plan';
 import { emptyManifest, manifestKey, type Manifest, type ManifestEntry } from '../src/sync/manifest-types';
 
 const tests: Array<[string, () => void]> = [];
@@ -193,6 +199,155 @@ test('summarisePlan sorts each category by path', () => {
   assert.deepEqual(
     summary.create.map((i) => i.relPath),
     ['a.txt', 'm.txt', 'z.txt'],
+  );
+});
+
+// ───── warning propagation (M5 Phase A) ──────────────────────────────────
+//
+// Warnings attach to source-side FileInfos at walk time and ride along onto
+// every source-side PlanItem (create, skip, update-tracked, update-collision).
+// They never appear on delete-tracked or destination-only — those rows have
+// no source bytes to validate.
+
+const WARN_KIOSK: PlanWarning = {
+  severity: 'warn',
+  code: 'show-type',
+  message: 'Show type is kiosk',
+};
+const WARN_LINKED: PlanWarning = {
+  severity: 'warn',
+  code: 'linked-media',
+  message: 'External media link present',
+};
+
+function withWarnings(f: FileInfo, ...warnings: PlanWarning[]): FileInfo {
+  return { ...f, warnings };
+}
+
+test('warnings flow through create', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [withWarnings(file('a.pptx', 'h1'), WARN_KIOSK)],
+    [],
+    emptyManifest(),
+  );
+  const item = find(items, 'a.pptx');
+  assert.equal(item?.kind, 'create');
+  assert.deepEqual(item?.warnings, [WARN_KIOSK]);
+});
+
+test('warnings flow through skip', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [withWarnings(file('a.pptx', 'h1'), WARN_KIOSK)],
+    [file('a.pptx', 'h1')],
+    emptyManifest(),
+  );
+  const item = find(items, 'a.pptx');
+  assert.equal(item?.kind, 'skip');
+  assert.deepEqual(item?.warnings, [WARN_KIOSK]);
+});
+
+test('warnings flow through update-tracked', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [withWarnings(file('a.pptx', 'newHash'), WARN_KIOSK, WARN_LINKED)],
+    [file('a.pptx', 'oldHash')],
+    manifestOf([{ relPath: 'a.pptx', entry: entry('oldHash', 'a.pptx') }]),
+  );
+  const item = find(items, 'a.pptx');
+  assert.equal(item?.kind, 'update-tracked');
+  assert.deepEqual(item?.warnings, [WARN_KIOSK, WARN_LINKED]);
+});
+
+test('warnings flow through update-collision', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [withWarnings(file('a.pptx', 'newHash'), WARN_LINKED)],
+    [file('a.pptx', 'destHash')],
+    emptyManifest(),
+  );
+  const item = find(items, 'a.pptx');
+  assert.equal(item?.kind, 'update-collision');
+  assert.deepEqual(item?.warnings, [WARN_LINKED]);
+});
+
+test('delete-tracked never carries warnings (no source bytes)', () => {
+  // Even if a previous walk had warnings, when the source is gone there's
+  // no FileInfo to attach them to — the manifest holds no warning data.
+  const items = classifyFiles(
+    SOURCE,
+    [],
+    [file('gone.pptx', 'h1')],
+    manifestOf([{ relPath: 'gone.pptx', entry: entry('h1', 'gone.pptx') }]),
+  );
+  const item = find(items, 'gone.pptx');
+  assert.equal(item?.kind, 'delete-tracked');
+  assert.equal(item?.warnings, undefined);
+});
+
+test('destination-only never carries warnings (not a source file)', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [],
+    [file('user.pptx', 'h1')],
+    emptyManifest(),
+  );
+  const item = find(items, 'user.pptx');
+  assert.equal(item?.kind, 'destination-only');
+  assert.equal(item?.warnings, undefined);
+});
+
+test('empty warnings array on FileInfo does not attach a warnings list', () => {
+  // The carry helper treats an empty list the same as no list — that way
+  // PlanItems stay minimal and downstream checks (warnings?.length > 0)
+  // never have to special-case an empty array.
+  const items = classifyFiles(
+    SOURCE,
+    [{ ...file('a.txt', 'h1'), warnings: [] }],
+    [],
+    emptyManifest(),
+  );
+  const item = find(items, 'a.txt');
+  assert.equal(item?.kind, 'create');
+  assert.equal(item?.warnings, undefined);
+});
+
+test('summarisePlan: warnings list contains every item with a non-empty warnings list', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [
+      withWarnings(file('clean.txt', 'h-clean'), /* no warnings */),
+      withWarnings(file('one.pptx', 'h-one'), WARN_KIOSK),
+      withWarnings(file('two.pptx', 'h-two'), WARN_KIOSK, WARN_LINKED),
+    ],
+    [],
+    emptyManifest(),
+  );
+  const summary = summarisePlan(items);
+  assert.equal(summary.create.length, 3);
+  // Only the two pptx items carry warnings; the clean.txt entry is absent.
+  assert.deepEqual(
+    summary.warnings.map((i) => i.relPath),
+    ['one.pptx', 'two.pptx'],
+  );
+});
+
+test('summarisePlan: warnings list is path-sorted independently of insertion order', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [
+      withWarnings(file('z.pptx', 'hz'), WARN_KIOSK),
+      withWarnings(file('a.pptx', 'ha'), WARN_KIOSK),
+      withWarnings(file('m.pptx', 'hm'), WARN_KIOSK),
+    ],
+    [],
+    emptyManifest(),
+  );
+  const summary = summarisePlan(items);
+  assert.deepEqual(
+    summary.warnings.map((i) => i.relPath),
+    ['a.pptx', 'm.pptx', 'z.pptx'],
   );
 });
 
