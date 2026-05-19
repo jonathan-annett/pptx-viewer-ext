@@ -93,6 +93,10 @@ test('renders the embedded workspace-wide plan section', () => {
   // Run Sync starts disabled — it's enabled by setPlanReady when the plan
   // finishes with hasWork && !blocking.
   assert.match(html, /id="run-sync"[^>]*disabled/);
+  // Orange "safe items only" button is in the markup, initially hidden.
+  // setPlanReady reveals it when blocking>0 and safe-path items exist.
+  assert.match(html, /id="run-sync-safe"[^>]*class="btn btn-orange"/);
+  assert.match(html, /id="run-sync-safe"[^>]*hidden/);
 });
 
 test('settings unknown flag is preserved in payload', () => {

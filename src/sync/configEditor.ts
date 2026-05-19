@@ -73,7 +73,6 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     let planTimer: ReturnType<typeof setTimeout> | undefined;
     let planRunToken = 0;
     let lastPlans: PlanForDestination[] = [];
-    let lastPlanBlocking = 0;
     let lastPlanHasWork = false;
     let disposed = false;
     let syncInFlight = false;
@@ -88,8 +87,7 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         });
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;
-        void postPlanResult(panel, plans, (totals, hasWork) => {
-          lastPlanBlocking = totals.updateCollision + totals.warnings;
+        void postPlanResult(panel, plans, (_totals, hasWork) => {
           lastPlanHasWork = hasWork;
         });
       } catch (err) {
@@ -251,11 +249,14 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
           // Room-scoped Run Sync — same machinery as the admin editor's, but
           // the stashed `lastPlans` is the room's plan (filtered to this
           // .sync.jsonc's destinations), so only this room's work runs.
+          //
+          // No blocking-guard: when collisions/warnings are present the
+          // webview only enables the orange "safe items only" button, which
+          // posts the same `runSync` message. `runSyncFromConfig` calls
+          // `executePlan` with no decided overwrites/deletes, so the
+          // executor naturally skips collisions, destination-only, and
+          // warned items. Green path + orange path land here identically.
           if (syncInFlight) return;
-          if (lastPlanBlocking > 0) {
-            log('sync-config-editor: runSync ignored — collisions present');
-            return;
-          }
           if (!lastPlanHasWork) {
             log('sync-config-editor: runSync ignored — nothing to do');
             return;

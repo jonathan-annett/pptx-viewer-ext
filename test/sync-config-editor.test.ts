@@ -99,6 +99,11 @@ test('renders a room-scoped Run Sync button, initially disabled', () => {
   assert.match(html, /id="run-sync"[^>]*class="btn btn-green"/);
   assert.match(html, /id="run-sync"[^>]*disabled/);
   assert.match(html, /id="run-sync-hint"/);
+  // Orange "safe items only" button mirrors the admin editor — present
+  // but hidden initially; setPlanReady reveals it when blocking>0 and
+  // some safe-path items exist.
+  assert.match(html, /id="run-sync-safe"[^>]*class="btn btn-orange"/);
+  assert.match(html, /id="run-sync-safe"[^>]*hidden/);
 });
 
 test('relabelled action button references the workspace-wide plan, not "dry run"', () => {

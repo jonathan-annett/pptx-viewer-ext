@@ -114,6 +114,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     <div id="plan-pairs" class="plan-pairs"></div>
     <div class="plan-actions">
       <button id="run-sync" class="btn btn-green" type="button" disabled title="Apply the green-path operations from the plan above — limited to this room's destinations">Run Sync</button>
+      <button id="run-sync-safe" class="btn btn-orange" type="button" hidden title="Sync only the items without collisions or warnings — skips the blocked ones so the clean items can still flow">Run Sync (safe items only)</button>
       <span id="run-sync-hint" class="hint plan-actions-hint"></span>
     </div>
   </section>
@@ -307,6 +308,18 @@ const EMBEDDED_PLAN_STYLE = `
   filter: brightness(1.1);
 }
 .btn-green:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-orange {
+  background: var(--vscode-charts-orange, #d97706);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.btn-orange:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.btn-orange:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
@@ -567,13 +580,21 @@ const CLIENT_JS = `
   const planPairsEl = document.getElementById('plan-pairs');
   const planRefreshBtn = document.getElementById('plan-refresh');
   const runSyncBtn = document.getElementById('run-sync');
+  const runSyncSafeBtn = document.getElementById('run-sync-safe');
   const runSyncHintEl = document.getElementById('run-sync-hint');
+
+  function hideOrange() {
+    runSyncSafeBtn.hidden = true;
+    runSyncSafeBtn.disabled = true;
+    runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
+  }
 
   function setPlanScanning() {
     planStatusEl.className = 'plan-status plan-scanning';
     planStatusEl.textContent = 'Scanning…';
     planRefreshBtn.disabled = true;
     runSyncBtn.disabled = true;
+    hideOrange();
     runSyncHintEl.textContent = '';
   }
 
@@ -588,6 +609,7 @@ const CLIENT_JS = `
       planPairsEl.innerHTML = '';
       runSyncBtn.disabled = true;
       runSyncBtn.textContent = 'Run Sync';
+      hideOrange();
       runSyncHintEl.textContent = 'Nothing to sync.';
       return;
     }
@@ -607,27 +629,43 @@ const CLIENT_JS = `
     planTotalsEl.hidden = !msg.chipsHtml;
     planPairsEl.innerHTML = msg.pairsHtml || '';
 
-    // Run Sync gating mirrors the admin editor's: blocking → disabled with
-    // a breakdown hint; no work → disabled with "Nothing to sync"; otherwise
-    // enabled in green. Per-row decisions for collisions and the orange
-    // "Proceed with safe items only" path live in the standalone plan
-    // webview (button below opens it); this room-scoped Run Sync is
-    // green-path only by design.
+    // Run Sync gating mirrors the admin editor's: blocking → green disabled
+    // with a breakdown hint, orange shown so the user can flush the safe
+    // items without resolving collisions/warnings here. Per-row decisions
+    // for collisions still live in the standalone plan webview (button
+    // below opens it); the orange button here is the bulk-skip path.
+    //
+    // Safe upper bound = create + updateTracked + deleteTracked. The
+    // executor's resolveDispatch will further drop warned items in the
+    // create/update lanes — worst case orange fires with "nothing to do"
+    // when every safe slot is warned, which is acceptable feedback.
     runSyncBtn.textContent = 'Run Sync';
+    const safeUpper =
+      (t.create || 0) + (t.updateTracked || 0) + (t.deleteTracked || 0);
     if (msg.blocking > 0) {
       runSyncBtn.disabled = true;
       const collisions = t.updateCollision || 0;
       const warnings = t.warnings || 0;
-      const parts = [];
-      if (collisions) parts.push(collisions + ' collision' + (collisions === 1 ? '' : 's'));
-      if (warnings) parts.push(warnings + ' warning' + (warnings === 1 ? '' : 's'));
-      runSyncHintEl.textContent =
-        parts.join(' + ') + ' — open the workspace plan to decide per file.';
+      const hintParts = [];
+      if (collisions) hintParts.push(collisions + ' collision' + (collisions === 1 ? '' : 's'));
+      if (warnings) hintParts.push(warnings + ' warning' + (warnings === 1 ? '' : 's'));
+      let hint = hintParts.join(' + ');
+      if (safeUpper > 0) {
+        runSyncSafeBtn.hidden = false;
+        runSyncSafeBtn.disabled = false;
+        hint += ' — orange skips them; open the workspace plan to decide per file.';
+      } else {
+        hideOrange();
+        hint += ' — open the workspace plan to decide per file.';
+      }
+      runSyncHintEl.textContent = hint;
     } else if (!msg.hasWork) {
       runSyncBtn.disabled = true;
+      hideOrange();
       runSyncHintEl.textContent = 'Nothing to sync — destinations are up to date.';
     } else {
       runSyncBtn.disabled = false;
+      hideOrange();
       runSyncHintEl.textContent = '';
     }
   }
@@ -635,6 +673,7 @@ const CLIENT_JS = `
   function setPlanError(errorMsg) {
     planRefreshBtn.disabled = false;
     runSyncBtn.disabled = true;
+    hideOrange();
     runSyncHintEl.textContent = '';
     planStatusEl.className = 'plan-status plan-error';
     planStatusEl.innerHTML =
@@ -660,6 +699,21 @@ const CLIENT_JS = `
     if (runSyncBtn.disabled) return;
     runSyncBtn.disabled = true;
     runSyncBtn.textContent = 'Syncing…';
+    runSyncSafeBtn.disabled = true;
+    planRefreshBtn.disabled = true;
+    runSyncHintEl.textContent = '';
+    vscode.postMessage({ type: 'runSync' });
+  });
+
+  // Orange button posts the same {type:'runSync'} message; the wired side
+  // calls executePlan with no decidedOverwrites/decidedDeletes, which the
+  // executor treats as safe-items-only (collisions, destination-only, and
+  // warned items all skip).
+  runSyncSafeBtn.addEventListener('click', () => {
+    if (runSyncSafeBtn.disabled) return;
+    runSyncBtn.disabled = true;
+    runSyncSafeBtn.disabled = true;
+    runSyncSafeBtn.textContent = 'Syncing…';
     planRefreshBtn.disabled = true;
     runSyncHintEl.textContent = '';
     vscode.postMessage({ type: 'runSync' });
@@ -700,15 +754,21 @@ const CLIENT_JS = `
     } else if (msg.type === 'syncStatus') {
       if (msg.status === 'running') {
         runSyncBtn.disabled = true;
-        runSyncBtn.textContent = 'Syncing…';
+        runSyncSafeBtn.disabled = true;
+        if (runSyncBtn.textContent !== 'Syncing…' && runSyncSafeBtn.textContent !== 'Syncing…') {
+          runSyncBtn.textContent = 'Syncing…';
+        }
       } else if (msg.status === 'done') {
         // The extension follows up with a fresh planStatus shortly — the
-        // chip strip will reflect the post-sync world. Keep the button
-        // disabled until then so a double-click can't re-fire mid-refresh.
+        // chip strip will reflect the post-sync world and re-gate the
+        // buttons. Reset labels here.
         runSyncBtn.textContent = 'Run Sync';
+        runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
       } else if (msg.status === 'error') {
         runSyncBtn.textContent = 'Run Sync';
+        runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
         runSyncBtn.disabled = false;
+        if (!runSyncSafeBtn.hidden) runSyncSafeBtn.disabled = false;
         runSyncHintEl.textContent = 'Sync failed: ' + (msg.error || 'unknown error');
       }
     }
