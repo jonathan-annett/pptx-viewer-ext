@@ -685,7 +685,143 @@ M5 shipped over 2026-05-19 → 2026-05-20. Collision detection, destination-only
   - **Wired sites:** `src/sync/planView.ts` (standalone — refactored to share helpers), `src/sync/adminEditor.ts` + `adminEditorHtml.ts`, `src/sync/configEditor.ts` + `configEditorHtml.ts`, `src/provider.ts` + `src/webview.ts` (pptx viewer). The viewer's `renderRunSyncRow` now emits green + orange buttons; `runPerFileSync` takes a `decisions` map and forwards it to `runSync(plans, decisions)`.
   - **Tests:** existing `test/sync-decisions.test.ts` covers the pure helpers; `sync-config-editor` and `sync-admin-editor` nonce-count assertions were updated from 2 to 3 to account for the added shared `<script>` block. All sync + viewer + parse tests pass.
 
-### M6 — Polish + remaining surfaces *(next — M5 is done)*
+### M5.2 — Parse timing instrumentation *(✅ shipped)*
+
+**Status: shipped at commit `e32f033` (2026-05-20).** Diagnostic-only — no behaviour change. Exists to size M5.3 empirically before committing to a cache design: which `parsePptx` phases dominate, and by how much, against real-world decks on the live URL.
+
+What landed:
+
+- **`ParseTimings` interface in `src/pptx.ts`** — `{ hashMs, unzipMs, xmlDecodeMs, slideScanMs, metadataMs, mediaMs, showPropsMs, totalMs }`. Optional field on `ParseResult` (absent in the malformed-zip early-return path, present on every successful parse). `performance.now()` is the time source — available in the web-extension worker context.
+- **Per-phase markers in `parsePptx`** wrapping: sha256 of input bytes, fflate unzip, XML decode of the 4 hot parts (`presentation.xml`, `app.xml`, `core.xml`, `[Content_Types].xml`), slide scan + hidden-flag pass, metadata extract (author/lastModifiedBy), media work (embedded media + thumbnail + linked-media regex), show-props (kiosk/browse/media-controls).
+- **`parse-timing:` log line in `src/provider.ts`** via a `logParseTimings(fileName, prefix, timings, readMs?)` helper. Format: `parse-timing: <name> — total=Xms read=Yms hash=… unzip=… xmlDecode=… slideScan=… metadata=… media=… showProps=…`. Three call sites instrumented:
+  - **Initial open** — `vscode.workspace.fs.readFile` is timed separately as `read=`, so the per-file line shows both I/O cost and CPU cost.
+  - **Ingest** — drag-and-drop / Update path, prefixed `ingest[<source>]:`.
+  - **Refresh** — manual editor refresh, prefixed `refresh:`.
+- **Why three sites and not the validator pass:** the validator's `parsePptx` calls happen inside `planner.ts` and are about to become the dominant cost surface in M5.3. Adding timing there now would be noise — M5.3 will instrument the cache hit/miss path directly, which is a more useful diagnostic than per-call cost. The three viewer surfaces give us the uncached-cost baseline we need.
+
+What we're looking for in the data:
+
+- **Phase ranking.** If `unzipMs + xmlDecodeMs` dominates (likely), the cache pays back proportionally; if `hashMs` is already a big chunk, that constrains the cache key strategy (can't cheaply hash on every comparison).
+- **Total-ms distribution across deck sizes.** Tens of ms for small decks vs hundreds for video-heavy decks tells us how aggressive the LRU eviction has to be.
+- **Read vs parse ratio.** If `read` is non-trivial, the IndexedDB tier earns its keep on cold loads (skip both read and parse).
+
+Empirical data feeds into M5.3 before any cache code is written.
+
+### M5.2.5 — URI hash cache *(probe ✅ complete, implementation planned)*
+
+**Why this exists:** M5.2 data + 2026-05-19 dogfooding surfaced two compounding costs. (a) Hash dominates parse on big files — 449ms of a 619ms total on the 137MB deck, ~73%. (b) The sync planner re-hashes every destination file on every plan build, which is wasteful when destinations are mostly stable copies of what sync placed. Caching by `(uri, size, mtime) → sha256` short-circuits both: the viewer's hash phase, and the planner destination walk's *entire* read+hash phase.
+
+This is **orthogonal to M5.3** (`sha256 → ParseResult`). Different keys, different values, different consumers. M5.2.5 ships independently; M5.3 reuses the same IndexedDB adapter once it's proven here.
+
+**Probe results — `folderSync.probeStat`, commit `7cda491`, 2026-05-19:**
+
+- **28 .pptx files** across 6 workspace folders, captured then verified across a browser refresh.
+- **28/28 matched.** Every `size` and `mtime` byte-identical after refresh. The FSA adapter reads from the actual file, not session state. `mtime` granularity is real: files from the original Windows source have NTFS-precision (`…000` suffix); files pushed via the browser FSA have full ms precision. No zeros, no synthetics.
+- **Stat cost ≈ 6ms wall-clock per call** (28 stats in ~180ms end-to-end). Compare with M5.2 read costs: 349ms for the 137MB deck, 12–60ms for normal decks. **Stat is 5–60× cheaper than read.** The destination-walk shortcut is real.
+- **Bonus observation:** the capture revealed duplicated decks across `Plenary1 PC1` and `Plenary1 PC2` (identical size, near-identical mtimes — `Journey.pptx`, `Pfleger - November 2024.pptx`, `sample-1.pptx`, `sample-3.pptx`, the 137MB `WED 215 1100 …`). These are exactly the M5.3 misfiling-guard candidates — same content shipped to multiple destinations. Cross-referenced under M5.3 below.
+
+Verdict: full design viable. In-memory layer is a session-scoped win unconditionally; IndexedDB tier earns its keep across refresh.
+
+**Cache wrapper — new entrypoint in `src/sync/hash.ts` (or sibling):**
+
+```ts
+export async function hashFileAtUri(
+  fs: SyncFs,
+  uri: Uri,
+  cache?: UriHashCache,
+  opts?: { needBytes?: boolean }
+): Promise<{ sha256: string; size: number; mtime: number; bytes?: Uint8Array }>;
+```
+
+- `cache?` optional so the planner's pure tests keep working without injection.
+- `needBytes` lets the caller opt into the read — viewer/executor pass `true`; destination walk passes `false` and gets the genuine read-skip win.
+- Returns `mtime` alongside so callers that already needed `stat` (e.g. executor's pre-write "did this change between plan and execute" check) don't double-stat.
+
+Lookup protocol: `stat → cache.lookup(uri, size, mtime) → sha256` (fast path), or `→ read → sha256Hex → cache.record → sha256` (slow path). The existing `sha256Hex(bytes)` stays as the bytes-in building block.
+
+**Cache interface — one shape, two implementations:**
+
+```ts
+interface UriHashCache {
+  lookup(uri: Uri, size: number, mtime: number): Promise<string | undefined>;
+  record(uri: Uri, size: number, mtime: number, sha256: string): Promise<void>;
+  forget(uri: Uri): Promise<void>;
+}
+```
+
+- **In-memory `Map<string, {size, mtime, sha256}>`** keyed by `uri.toString()`. Pure module, tsx-testable, used unconditionally.
+- **IndexedDB-backed**, write-through over the in-memory layer. Survives browser refresh / extension reload. Gated behind a tiny "does IDB work in the worker context" probe; no-op fallback if IDB is unavailable.
+
+Size+mtime *both* required for lookup-match (not just mtime): mtime collisions are rare but possible (a tool that preserves mtime across atomic replace); the size delta catches those for free.
+
+**Wire sites:**
+
+| Site | Today | After |
+|---|---|---|
+| `planner.ts` source walk | `read + hash` per file | `stat + lookup` hit → 0 reads; miss → `read + hash + record` |
+| `planner.ts` destination walk | `read + hash` per file | same — and this is the multiplier (network-mounted destinations especially) |
+| `executor.ts` pre-write verify | reads bytes to write anyway | passes `needBytes:true`, cache short-circuits the hash only |
+| `provider.ts` / `pptx.ts` viewer | hash is inside `parsePptx` | leave alone — viewer integration is M5.3 territory |
+
+**IndexedDB adapter:** M5.2.5 includes the small "does the worker context expose IndexedDB" check + a thin async adapter wrapping the open/get/put protocol. This de-risks M5.3 — the same adapter is reused there for the `sha256 → ParseResult` store. If IDB turns out to be unavailable in the web-extension worker, the URI cache silently degrades to in-memory only and M5.3 makes the same trade.
+
+**Probe lifecycle:** `src/sync/probeStat.ts` + the `folderSync.probeStat` command stay in the tree during implementation (same pattern as M4.6's `src/sync/probe.ts`). Removed once the cache lands and is signed off.
+
+**Diagnostics:**
+
+- Activation-time log: `hash-cache: idb=<available|unavailable> in-memory entries=<N>`
+- Per-sync-run log: `hash-cache: <reads saved>/<files walked> on <destination name>`
+- Total saved bytes line per run, so the user can see the win on a 100-file destination directly.
+
+**Done when:**
+
+- `hashFileAtUri` shipped, plugged into planner source + destination walks and executor verify.
+- A second plan build against an unchanged destination performs zero `readFile` calls on hashed-content paths — verifiable in the watcher log + diagnostic line.
+- Cache survives browser refresh via IndexedDB (verify by emptying in-memory, doing one plan build, refresh, repeat — should hit IDB).
+- In-memory cache is bounded (size or count); eviction policy doesn't matter much for v1 — recently-used wins.
+- Output Channel diagnostic surfaces hit/miss counts per session and per sync run.
+- `src/sync/probeStat.ts` + `folderSync.probeStat` command + package.json contribution removed as part of sign-off.
+
+### M5.3 — Content-hashed parse cache + identity store *(planned — paused before start)*
+
+**Status: not started.** Promoted from the post-v1 roadmap into M5 because: (a) the validator pass is now exercised across every embedded preview surface introduced in M5.1, multiplying the cost; (b) the focus-following panel (currently post-v1) needs this as a prerequisite and the user is keen to land that surface; (c) M5.2's timing data will arrive before we start, so the design can be empirically grounded.
+
+**The user explicitly wants to pause and restart before doing this work** — these milestones are locked in here so the scope doesn't drift in the interim.
+
+**Cache shape** — `sha256 → ParseResult` keying (not URI-keyed). `parsePptx` already computes sha256 of the input bytes at the top of the function (`src/pptx.ts:59`) before any other work, so the key is free. Content-addressed means no invalidation: same bytes → same result, forever.
+
+**Three primary consumers:**
+
+1. **Pptx viewer open / ingest / refresh** — the three sites M5.2 just instrumented. Each one currently re-parses on every open; with the cache, repeated opens of the same deck are O(read + hash) instead of O(read + hash + unzip + scan).
+2. **Sync source validator** — `parsePptx` calls inside `planner.ts` during plan builds, fired on every room-editor + admin-editor + viewer-embedded plan render and on every file-tree change. This is the cost that compounds across a 30-deck room.
+3. **Sync destination identity check** — *new use, enabled by content-addressing.* Destinations are walked + hashed but **not parsed** (planner.ts:165-167 leaves `validate: false`; planner.ts:239 hashes only). Today that hash is used solely for collision/identity classification. With the cache populated, the hash lookup can also surface "these bytes already exist at <other path>" — useful as a soft warning on Update (potential misfiling guard: user about to overwrite `Wednesday/talk.pptx` with bytes that match `archive/2024/old-talk.pptx`).
+
+**Two-tier design** (carried forward from the prior post-v1 sketch with empirical adjustments to follow from M5.2 data):
+
+- **In-memory LRU** keyed by sha256 → `ParseResult`. Bounded by total bytes (initial target 64 MB; revisit after M5.2 shows the size distribution). Survives the lifetime of the extension host.
+- **IndexedDB tier** behind the LRU. On cache miss, look up the sha256 in IndexedDB; on hit, hydrate the LRU and return. Survives browser refresh / extension reload — the wins here are the M4.6 silent-restore case (every refresh re-mounts the same folders, the validator pass re-runs against the same bytes) and the user's normal "close tab, come back tomorrow" flow.
+- **Thumbnails as a separate object store.** They're the heaviest field by far. Storing the data URL once per sha256 in its own store lets the LRU optionally drop just the thumbnail under memory pressure, while keeping cheap metadata + validation results hot. Especially relevant because destination-only entries (use case 3 above) don't need the thumbnail at all — they only need the validation + metadata to answer "is this misfiled?"
+- **Identity-only entries.** Destination walks already hash without parsing, so they can populate `sha256 → { knownAt: relPath[] }` entries that are cheap to maintain and back the misfiling guard. Distinct from the full `ParseResult` entries (which require an actual parse to populate).
+- **Write path:** every successful `parsePptx` writes the result back to both tiers. Failures (`parseError` set) cache the failure too — same bytes, same failure, no point re-parsing.
+- **Invalidation:** content-addressed, so there is no invalidation.
+
+**Misfiling guard (new affordance enabled by the cache):**
+
+- At Update time (or in the dry-run plan), if the source bytes hash to a sha256 that the identity store associates with a *different* relPath (in any known location across all destinations), surface a soft warning: "These bytes are already present at <other path>. Are you sure?"
+- Bounded cost: a single sha256 lookup against the identity store, which is already populated as a side-effect of normal destination walks.
+- Strictly opt-in to proceed — same orange-button "override per file" pattern as the validator warnings.
+- **Concrete motivation from M5.2.5 probe data:** the 28-file stat-probe already surfaced duplicated decks across `Plenary1 PC1` and `Plenary1 PC2` (`Journey.pptx`, `Pfleger - November 2024.pptx`, `sample-1.pptx`, `sample-3.pptx`, and the 137MB `WED 215 1100 …`). These are the exact pattern the misfiling guard exists to flag — same content shipped to multiple destinations, with the possibility of a future update going to the wrong one.
+
+**Open questions for when this lands:**
+
+- **Does the web-extension worker context expose IndexedDB?** It's a standard worker global, but the VS Code host has surprised us before (see the `extensionUri` hang dead-end). M5.2.5 includes the IDB availability probe + adapter as a prerequisite (the URI hash cache uses the same adapter), so by the time M5.3 lands the IDB question is settled and the adapter is in the tree. M5.3 reuses it for the `sha256 → ParseResult` store. The IndexedDB tier sits behind a small async adapter that's a no-op if IndexedDB isn't available, keeping the parser usable from tsx tests.
+- **Persistence scope.** IndexedDB is browser-origin scoped, which on vscode.dev is per-host. For the silent-restore case that's exactly right (same origin → same cache after refresh). For multi-workspace users this means the cache is shared across workspaces — usually fine (content-addressed, no privacy leak), but worth documenting.
+- **Cache hit-rate diagnostics.** Activation-time log: `cache: in-memory <hits>/<lookups>, idb <hits>/<lookups>, identity <known files>`. Tells us whether the IndexedDB tier is earning its keep (cold vs warm hit ratio per refresh) and how the identity store is filling up.
+- **`ParseResult` serialisation for IndexedDB.** Most fields are JSON-clean primitives, but the thumbnail data URL is fat and the `parseError` enum needs to round-trip. Should be straightforward — `JSON.stringify`/`parse` with a schema-version stamp so we can evict old shapes on upgrade.
+
+**Slotting:** wait for M5.2 data, then implement. Prerequisite for the focus-following panel (post-v1) — that feature multiplies the validator pass across every focus change and can't ship until the cache lands.
+
+### M6 — Polish + remaining surfaces *(blocked on M5.3)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
@@ -733,34 +869,9 @@ VS Code's built-in UI doesn't expose a friendly way to set a workspace folder's 
 
 A "Sync now" action on the pptx custom editor's metadata page. Resolves the file's source `.sync.jsonc` (nearest-config rule), pushes the single file to each destination immediately (no plan/gate cycle — the user already saw the file open), updates the manifest, and surfaces sync status as a new metadata row (last synced timestamp + destination list, or "not under a sync source"). Skips the collision/validator gate when invoked this way — the user is acting on one known file and has the viewer's validation output in front of them.
 
-### Pptx parse cache (sha256-keyed, IndexedDB-persisted)
+### Pptx parse cache *(promoted to M5.3 — see above)*
 
-`parsePptx` is the hot path for several surfaces and the cost compounds:
-
-- Pptx viewer open / re-open / refresh
-- Compare modal on drag-and-drop or **Update…**
-- M5 validator pass — once per `.pptx` per `.sync.jsonc` plan build, fired on every room-editor + admin-editor open and on every file-tree change
-- Future per-file dry-run on each pptx viewer open
-
-Each call unzips the bytes, walks every slide XML, scans `[Content_Types].xml`, extracts the thumbnail to a data URL, and runs the validation regex set. For a multi-MB pptx with embedded video that's ~tens of ms of real work; multiplied across a room with 30 decks the validator pass alone is the dominant cost of opening `.sync.jsonc`.
-
-`parsePptx` already computes sha256 of the input bytes (`src/pptx.ts:59`) before doing any other work. That hash is a free, content-addressed cache key — same bytes always parse to the same result.
-
-Proposed shape:
-
-- **In-memory LRU** keyed by sha256 → `ParseResult`. Bounded by total bytes (e.g. 64 MB) so big thumbnails don't blow memory. Survives the lifetime of the extension host.
-- **IndexedDB tier** behind the LRU. On cache miss, look up the sha256 in IndexedDB; on hit, hydrate the LRU and return. Survives browser refresh / extension reload — the wins here are the M4.6 silent-restore case (every refresh re-mounts the same folders, the validator pass re-runs against the same bytes) and the user's normal "close tab, come back tomorrow" flow.
-- **Thumbnails as a separate store.** They're the heaviest field by far. Storing the data URL once per sha256 in its own object store lets the LRU tier optionally drop just the thumbnail when memory pressure hits, while keeping the cheap metadata + validation results hot.
-- **Write path:** every successful `parsePptx` call writes the result back to both tiers. Failures (`parseError` set) cache the failure too — same bytes, same failure, no point re-parsing.
-- **Invalidation:** content-addressed, so there is no invalidation. A file's bytes either match a cache entry's key or they don't.
-
-Open questions for when this lands:
-
-- Does the web-extension host expose IndexedDB directly, or does it need to go through `vscode.workspace.fs` / a webview proxy? Worth a 10-line probe before designing around it. Web-extension worker context *should* have IndexedDB (it's a standard worker global), but the VS Code host has been surprising before.
-- The LRU should probably be in `src/pptx.ts` itself — `parsePptx` wraps its own work with a cache check — so every caller benefits transparently. The IndexedDB tier sits behind a small async adapter that's a no-op if IndexedDB isn't available, keeping the parser usable from tsx tests.
-- Cache hit-rate diagnostics in the activation log would tell us whether the IndexedDB tier is earning its keep (cold vs warm hit ratio per refresh).
-
-Slotting target: revisit when M5's validator pass is actually exercised against real-world room sizes. Until then this is a known optimisation, not a current bottleneck. **Now considered a prerequisite for the focus-following panel below** — that feature multiplies the validator pass across every focus change, so it can't ship until the cache lands.
+Originally roadmapped here; promoted into M5 once the validator pass became hot across every embedded preview surface in M5.1. Design detail moved to **M5.3 — Content-hashed parse cache + identity store** above. This entry kept as a back-reference for anyone scanning the post-v1 list.
 
 ### Focus-following dry-run panel
 
@@ -782,8 +893,8 @@ Wiring sketch:
 
 Costs and constraints:
 
-- **Plan rebuilds are not free.** Every focus change re-walks + re-hashes both sides and runs validators. Without the parse cache above, alt-tabbing between pptx files in the same folder re-parses each one — exactly the wrong shape for an always-visible panel. This is why the cache is the prerequisite.
+- **Plan rebuilds are not free.** Every focus change re-walks + re-hashes both sides and runs validators. Without M5.3's parse cache, alt-tabbing between pptx files in the same folder re-parses each one — exactly the wrong shape for an always-visible panel. This is why M5.3 is the prerequisite.
 - **Cache keyed by `(scope, configFile-mtime)`** at the planner level so repeated focuses inside the same folder hit a memoised plan rather than rebuilding. Invalidated by `.sync.jsonc` edits (the existing hot-reload signal) and by destination filesystem changes (M6's destination reverse pass already needs this signal).
 - **Panel area is short and wide** — the current plan layout assumes a tall column with a sticky footer. Re-flow needed: totals on one line, per-pair sections collapsed by default, footer buttons inline-right rather than sticky.
 
-Slotting target: after the parse cache lands and after M5 is signed off, so the cache is proven and the decision UX is stable before it gets a more prominent surface.
+Slotting target: after M5.3 lands and after M5 is signed off, so the cache is proven and the decision UX is stable before it gets a more prominent surface.
