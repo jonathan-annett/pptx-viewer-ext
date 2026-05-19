@@ -110,6 +110,7 @@
     "test:sync-jsonc": "node --import tsx test/sync-jsonc.test.ts",
     "test:sync-glob": "node --import tsx test/sync-glob.test.ts",
     "test:sync-plan": "node --import tsx test/sync-plan.test.ts",
+    "test:sync-scoped-plan": "node --import tsx test/sync-scoped-plan.test.ts",
     "test:sync-planview": "node --import tsx test/sync-planview.test.ts",
     "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
     "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",

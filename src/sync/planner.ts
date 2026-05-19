@@ -21,6 +21,13 @@ import { sha256Hex } from './hash';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
 import { parseSyncConfigText } from './config';
+import {
+  type Scope,
+  filterFilesToScope,
+  filterManifestToScope,
+  relPathFromBase,
+  scopeFromRelPath,
+} from './scopedPlan';
 import { log } from '../log';
 
 export interface PlanForDestination {
@@ -43,67 +50,148 @@ export async function buildDryRunPlan(
   topology: ResolvedTopology,
 ): Promise<PlanForDestination[]> {
   const results: PlanForDestination[] = [];
-
   for (const source of topology.sources) {
-    // The yaml's include/exclude only ever apply to the source tree —
-    // the destination walk uses built-ins plus the same user excludes so
-    // we don't surface destination-only entries the user has chosen to
-    // ignore.
-    const yamlConfig = await loadConfigForSource(source);
-    const sourceExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
-    const sourceInclude = new GlobSet(yamlConfig?.include ?? []);
-    const destExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
-    const destInclude = new GlobSet([]); // include filter only meaningful on source
+    const planned = await planForSource(source, { kind: 'none' });
+    results.push(...planned);
+  }
+  return results;
+}
 
-    let sourceFiles: FileInfo[] = [];
+/**
+ * Options for scoped (single-source, optionally path-filtered) dry-run.
+ *
+ * `pathFilter` is interpreted relative to the source folder root. A directory
+ * filter restricts the plan to files at or below that directory; a file
+ * filter restricts it to that single file. When `pathFilter` is omitted (or
+ * is the source folder itself), the result matches `buildDryRunPlan` for
+ * just that source — useful for the admin editor's "all sources" rendering
+ * which loops over each source independently.
+ *
+ * `pathFilterIsFile` lets the caller skip the stat round-trip when the kind
+ * is already known (e.g. the pptx viewer always passes a regular file URI).
+ */
+export interface ScopedPlanOptions {
+  sourceConfigUri: vscode.Uri;
+  pathFilter?: vscode.Uri;
+  pathFilterIsFile?: boolean;
+}
+
+/**
+ * Build a dry-run plan for a single source, optionally restricted to files
+ * at or below a path filter. Returns an empty list when the source is not
+ * found in the topology; returns a per-destination row with `skippedReason`
+ * when the path filter doesn't fall within the source folder.
+ */
+export async function buildScopedDryRunPlan(
+  topology: ResolvedTopology,
+  opts: ScopedPlanOptions,
+): Promise<PlanForDestination[]> {
+  const source = topology.sources.find(
+    (s) => s.configUri.toString() === opts.sourceConfigUri.toString(),
+  );
+  if (!source) return [];
+
+  let scope: Scope = { kind: 'none' };
+  if (opts.pathFilter) {
+    const rel = relPathFromBase(source.sourceFolderUri.path, opts.pathFilter.path);
+    if (rel === null) {
+      // Path filter is outside the source folder — surface as skipped on
+      // every destination row so the caller can render a clear message.
+      return source.destinations.map((dest) => ({
+        source,
+        destination: dest,
+        items: [],
+        summary: summarisePlan([]),
+        skippedReason: `path filter ${opts.pathFilter!.toString()} is not within source folder`,
+      }));
+    }
+    const isFile = opts.pathFilterIsFile ?? (await pathIsFile(opts.pathFilter));
+    scope = scopeFromRelPath(rel, isFile);
+  }
+
+  return planForSource(source, scope);
+}
+
+/**
+ * Per-source plan body shared by the workspace-wide and scoped entry points.
+ * Walks once for the source, once per destination, then applies the optional
+ * scope filter to source/destination/manifest before classifying.
+ */
+async function planForSource(
+  source: ResolvedSource,
+  scope: Scope,
+): Promise<PlanForDestination[]> {
+  // The yaml's include/exclude only ever apply to the source tree —
+  // the destination walk uses built-ins plus the same user excludes so
+  // we don't surface destination-only entries the user has chosen to
+  // ignore.
+  const yamlConfig = await loadConfigForSource(source);
+  const sourceExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
+  const sourceInclude = new GlobSet(yamlConfig?.include ?? []);
+  const destExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
+  const destInclude = new GlobSet([]); // include filter only meaningful on source
+
+  let sourceFiles: FileInfo[] = [];
+  try {
+    sourceFiles = await walkAndHash(source.sourceFolderUri, {
+      exclude: sourceExclude,
+      include: sourceInclude,
+    });
+  } catch (err) {
+    log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
+  }
+  const scopedSourceFiles = filterFilesToScope(sourceFiles, scope);
+
+  const results: PlanForDestination[] = [];
+  for (const dest of source.destinations) {
+    if (!dest.destRootUri || !dest.workspaceFolderUri) {
+      results.push({
+        source,
+        destination: dest,
+        items: [],
+        summary: summarisePlan([]),
+        skippedReason: `destination '${dest.name}' is not in the workspace`,
+      });
+      continue;
+    }
+
+    let destFiles: FileInfo[] = [];
     try {
-      sourceFiles = await walkAndHash(source.sourceFolderUri, {
-        exclude: sourceExclude,
-        include: sourceInclude,
+      destFiles = await walkAndHash(dest.destRootUri, {
+        exclude: destExclude,
+        include: destInclude,
       });
     } catch (err) {
-      log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
+      log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
     }
+    const scopedDestFiles = filterFilesToScope(destFiles, scope);
 
-    for (const dest of source.destinations) {
-      if (!dest.destRootUri || !dest.workspaceFolderUri) {
-        results.push({
-          source,
-          destination: dest,
-          items: [],
-          summary: summarisePlan([]),
-          skippedReason: `destination '${dest.name}' is not in the workspace`,
-        });
-        continue;
-      }
+    // The manifest lives at the destination workspace folder root, not at
+    // the subpath. A single workspace-folder destination shares one manifest
+    // even when multiple sources write into different subpaths under it.
+    const manifest = await readManifest(dest.workspaceFolderUri);
+    const scopedManifest = filterManifestToScope(manifest, source.workspaceFolderName, scope);
 
-      let destFiles: FileInfo[] = [];
-      try {
-        destFiles = await walkAndHash(dest.destRootUri, {
-          exclude: destExclude,
-          include: destInclude,
-        });
-      } catch (err) {
-        log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
-      }
-
-      // The manifest lives at the destination workspace folder root, not at
-      // the subpath. A single workspace-folder destination shares one manifest
-      // even when multiple sources write into different subpaths under it.
-      const manifest = await readManifest(dest.workspaceFolderUri);
-
-      const items = classifyFiles(
-        source.workspaceFolderName,
-        sourceFiles,
-        destFiles,
-        manifest,
-      );
-      const summary = summarisePlan(items);
-      results.push({ source, destination: dest, items, summary });
-    }
+    const items = classifyFiles(
+      source.workspaceFolderName,
+      scopedSourceFiles,
+      scopedDestFiles,
+      scopedManifest,
+    );
+    const summary = summarisePlan(items);
+    results.push({ source, destination: dest, items, summary });
   }
 
   return results;
+}
+
+async function pathIsFile(uri: vscode.Uri): Promise<boolean> {
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    return !!(stat.type & vscode.FileType.File);
+  } catch {
+    return false;
+  }
 }
 
 /**
