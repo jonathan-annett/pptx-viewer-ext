@@ -503,7 +503,21 @@ M4.7 extends this editor (along with the room editor and pptx preview) with the 
 - *Clear Workspace Snapshot* produces a clean activation next refresh (no restore, no prompt, no file on disk).
 - Snapshot updates on every topology change — verifiable by editing a `.sync.jsonc` to add a destination, refreshing, and seeing the new destination re-attached with its display name intact.
 
-### M4.7 — Embedded + scoped dry-run across all three sync surfaces *(planned)*
+### M4.7 — Embedded + scoped dry-run across all three sync surfaces *(in progress)*
+
+**Status snapshot (2026-05-19, end of session):**
+
+| Phase | What | Status |
+|---|---|---|
+| A | Scope-restricted planner (`buildScopedDryRunPlan` + tests) | ✅ shipped |
+| B | Room-editor embedded plan section | ✅ shipped |
+| C | Admin-editor Full Dry-Run + Run Sync section | ✅ shipped |
+| – | URI-keyed destinations (replaces fragile name-keying) | ✅ shipped (commit `b776671`) |
+| – | Read-only lock seed + cross-source destination uniqueness + source-self filter | ✅ shipped (commit `c3b315c`) |
+| D | Pptx viewer "Sync target" section + classifier | ⏳ pending — spec below intact |
+| D-adj | Pptx viewer UX additions (corrupt-flag hiding, Save As rename, Update button, drag-and-drop) | ⏳ pending — spec in new subsection below |
+
+Phases A–C shipped over 2026-05-18 → 2026-05-19. The URI-key pivot and the three correctness fixes (lock, uniqueness, source-self) landed as follow-ons while testing on the live URL exposed them. Phase D is the natural next step.
 
 **Why this exists:** The product framing is "pushing files to rooms" for a multi-room conference site. Three natural scopes, each with a natural surface:
 
@@ -543,6 +557,55 @@ Tests under tsx mirror `test/sync-plan.test.ts`: empty scope, scope at source ro
   2. File-tree changes inside the source folder. Implement via `vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(sourceFolder, '**/*'))` — covers vscode.dev's file-tree drop-to-add path (drops fire `onDidCreate` on the watcher), explorer-add, external rewrites, and deletes. Debounce ~500ms to coalesce drop bursts.
   3. **Refresh** button — manual. Useful for cases the watcher doesn't see (FSA-granted folders where vscode.dev's watcher coverage is incomplete; verify behaviour during implementation).
 - Existing "Dry run" button at the bottom of the editor (which opens the workspace-wide plan in a separate panel) stays — relabel to **Open workspace-wide plan** so the scope distinction is explicit.
+
+**Per-file — pptx viewer UX additions (bundled with Phase D):**
+
+Four user-facing changes to the pptx viewer panel, agreed during the 2026-05-19 session before Phase D was implemented. All four land in the same patch as Phase D because they touch the same files (`src/provider.ts`, `src/webview.ts`).
+
+1. **Hide validation badges on corrupt input.** When `ParseResult.parseError` is set (zip couldn't be unzipped), the three OK/WARN flags don't apply — drop the *Validation* section entirely so the user isn't reading a meaningless "OK Linked media" against a file we couldn't open. Keep the *Metadata* section (filename, size, sha256 are still meaningful) and the existing red error banner. The "Sync target" section from Phase D still renders (a corrupt file still has a location and a sync context).
+
+2. **Rename `Download` → `Save As…`.** The internal message channel is already `save-as`; the renderer just needs the button label updated to match. The trailing ellipsis is the macOS convention for "opens a dialog".
+
+3. **New `Update…` button** next to Save As. Click → hidden `<input type="file" accept=".pptx">` triggers → user picks a pptx → bytes posted to the extension → parse + hash → outcome:
+   - Invalid pptx (parseError or unzip fail): inline status text *"Not a valid pptx file"*.
+   - Same SHA-256 as current: inline status *"Not updated — identical content"*.
+   - Different SHA-256, parse OK: write to `document.uri`, re-render `panel.webview.html` from the new ParseResult, inline status *"Updated"*.
+   - No confirmation modal on this path — the user has explicitly opted in by clicking the button.
+
+4. **Drag-and-drop ingest.** Drop any file onto the viewer (full-window listener):
+   - If the dropped file isn't `.pptx` (extension or magic-bytes check), silently ignore (let the browser's drag layer reset).
+   - Parse + hash. Invalid → inline status *"Dropped file is not a valid pptx"*.
+   - Same SHA-256: full-overlay info modal *"File dropped matches existing content"* with a single OK button. No write.
+   - Different SHA-256: full-overlay comparison modal showing both files side-by-side (filename, size, mtime, sha256, slide count, hidden count, author, last-modified-by, embedded media, thumbnails) — the same metadata table the main panel renders, in two columns headed *Current* / *Dropped*. Buttons: **Update file** (primary) / **Cancel** (secondary). Update → write + re-render + status *"Updated"*. Cancel → dismiss modal, status cleared.
+
+**Design calls already locked in for implementation:**
+
+- **File picker** uses webview `<input type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation">`, not `vscode.window.showOpenDialog`. Works the same on vscode.dev, desktop, and FSA mounts. We only want bytes, not a URI.
+- **Comparison modal HTML is rendered in the extension and posted to the webview as an HTML string**, then inserted into a fixed container via `innerHTML`. Same pattern as `planView.ts` — no script execution from injected HTML (no nonce). Thumbnails work because the CSP already allows `img-src data:`.
+- **Candidate bytes are cached in the extension under a token**, not re-posted on confirm. `Map<string, Uint8Array>` keyed by a counter ID, cleared on panel dispose or when the next ingest arrives. Avoids sending megabytes twice across the message channel.
+- **Modal style is full overlay** — fixed-position div over the whole panel, dimmed backdrop, can't interact with the content behind it. The binary decision (update / cancel) is weighty enough to warrant blocking the rest of the UI.
+- **Post-update refresh re-renders `panel.webview.html`** from the new ParseResult. Resets state cleanly (modal disposed, status text cleared, new sha256 in metadata). Once Phase D lands, the new render also picks up the fresh per-file sync plan automatically — that satisfies the user's "and the dry run be run again after the update" requirement without extra wiring.
+- **Invalid-pptx detection** for the drop path uses the extension-side parser (we already trust `parsePptx` to set `parseError` on failed unzip). For the magic-bytes pre-filter in the webview, check that the first 4 bytes are `PK\x03\x04` (zip header) — fast, no parser dependency client-side, good enough to silently ignore an image drag without round-tripping the bytes.
+
+**Files touched (proposed):**
+
+- `src/provider.ts` — new message types (`ingest`, `confirm-update`, `cancel-update`), candidate-bytes Map, post-write re-render.
+- `src/webview.ts` — drop the validation section when `parseError` is set; rename button; add Update button; add hidden file input + dragover/drop handlers; add modal container + scripts. Likely grows enough to warrant splitting the inline `<script>` into a separate `viewerScript.ts` module — judge at implementation time.
+- `src/webview.ts` (or sibling pure module) — new `renderCompareModalHtml(current: ParseResult, candidate: ParseResult)` returning the modal HTML string.
+
+**Tests:**
+
+- `test/parse.test.ts` already covers the parser. No new parser cases needed — the corrupt-file path is exercised by `testParseErrorCase` (synthetic non-zip bytes).
+- A new `test/viewer-compare.test.ts` (pure, tsx-runnable) for the compare-modal renderer: assert it includes both file names, both thumbnails when present, the *Different* / *Identical* discriminator, and the Update / Cancel button IDs the script binds to. CSP nonce threading isn't relevant — the modal HTML is inserted into an already-nonced page.
+- Hide-on-corrupt is a small rendering branch; cover it in an existing or new `test/viewer-render.test.ts` that asserts the validation `<ul class="flags">` is absent when `parseError` is truthy. (Currently webview.ts has no test coverage — a smoke test here is overdue regardless.)
+
+**Done when:**
+
+- A corrupt pptx (truncated zip, wrong magic bytes) opens with just the metadata + error banner — no OK/WARN badges shown.
+- Save As button has the new label; flow unchanged.
+- Update button picks a pptx, validates, writes when different, leaves alone when identical, with inline status feedback in all three outcomes (updated / unchanged / invalid).
+- Dropping a pptx anywhere on the panel triggers the overlay comparison modal when content differs, the "matches existing" info modal when it's identical, or silent ignore for a non-pptx file. Confirm-update writes and re-renders; cancel dismisses.
+- Re-render after a successful update shows the new sha256, new metadata, and (once Phase D ships) refreshed Sync target section.
 
 **Per-file — pptx preview implied dry-run:**
 
