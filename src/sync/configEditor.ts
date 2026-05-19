@@ -27,6 +27,7 @@ import {
 } from './planHtml';
 import type { PlanForDestination } from './planner';
 import { buildScopedDryRunPlan } from './planner';
+import { runSync, formatRunSummary } from './runSync';
 import type { SyncManager } from './manager';
 import { log } from '../log';
 
@@ -66,10 +67,16 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     // ───── plan state + scheduler ─────────────────────────────────────
     // Each editor instance owns its own debounced rebuild + in-flight token
     // so two open editors don't fight each other. The token cancels stale
-    // builds when a fresh trigger arrives mid-walk.
+    // builds when a fresh trigger arrives mid-walk. The most recent plan is
+    // stashed so Run Sync can hand it to runSync() without re-walking — same
+    // pattern as the admin editor (which uses the workspace-wide plan).
     let planTimer: ReturnType<typeof setTimeout> | undefined;
     let planRunToken = 0;
+    let lastPlans: PlanForDestination[] = [];
+    let lastPlanBlocking = 0;
+    let lastPlanHasWork = false;
     let disposed = false;
+    let syncInFlight = false;
 
     const rebuildPlan = async (): Promise<void> => {
       if (disposed) return;
@@ -80,7 +87,11 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
           sourceConfigUri: document.uri,
         });
         if (disposed || myToken !== planRunToken) return; // stale
-        void postPlanResult(panel, plans);
+        lastPlans = plans;
+        void postPlanResult(panel, plans, (totals, hasWork) => {
+          lastPlanBlocking = totals.updateCollision + totals.warnings;
+          lastPlanHasWork = hasWork;
+        });
       } catch (err) {
         if (disposed || myToken !== planRunToken) return;
         const message = err instanceof Error ? err.message : String(err);
@@ -236,6 +247,28 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
             document.uri,
             'default',
           );
+        } else if (msg.type === 'runSync') {
+          // Room-scoped Run Sync — same machinery as the admin editor's, but
+          // the stashed `lastPlans` is the room's plan (filtered to this
+          // .sync.jsonc's destinations), so only this room's work runs.
+          if (syncInFlight) return;
+          if (lastPlanBlocking > 0) {
+            log('sync-config-editor: runSync ignored — collisions present');
+            return;
+          }
+          if (!lastPlanHasWork) {
+            log('sync-config-editor: runSync ignored — nothing to do');
+            return;
+          }
+          syncInFlight = true;
+          try {
+            await runSyncFromConfig(panel, lastPlans);
+          } finally {
+            syncInFlight = false;
+            // Refresh the plan post-run — the manifest changes mean the next
+            // plan will show "Skip (unchanged)" for things we just placed.
+            schedulePlan();
+          }
         }
       } catch (err) {
         log(
@@ -269,7 +302,8 @@ type WebviewMessage =
   | { type: 'setConfig'; config: SyncConfig }
   | { type: 'openWorkspacePlan' }
   | { type: 'refreshPlan' }
-  | { type: 'openAsText' };
+  | { type: 'openAsText' }
+  | { type: 'runSync' };
 
 function emptyConfig(): SyncConfig {
   return { destinations: [], include: [], exclude: [] };
@@ -325,8 +359,16 @@ function parentUri(uri: vscode.Uri): vscode.Uri {
  * Build the totals + pairs HTML from the planner output and post it to the
  * webview. The webview side swaps the chip/pair containers' innerHTML — the
  * CSP allows HTML insertion without script execution.
+ *
+ * The `gate` callback receives totals + a hasWork flag so the caller can stash
+ * them for Run Sync's eligibility check — same shape as the admin editor's
+ * postPlanResult so the two stay symmetric.
  */
-function postPlanResult(panel: vscode.WebviewPanel, plans: PlanForDestination[]): Thenable<boolean> {
+function postPlanResult(
+  panel: vscode.WebviewPanel,
+  plans: PlanForDestination[],
+  gate: (totals: PlanTotals, hasWork: boolean) => void,
+): Thenable<boolean> {
   const vm = toViewModel(plans, (plan) => {
     const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
     return rel || plan.source.sourceFolderUri.toString();
@@ -338,6 +380,10 @@ function postPlanResult(panel: vscode.WebviewPanel, plans: PlanForDestination[])
   // an unresolved or unconfigured source produces zero pairs. The webview
   // renders this state with a hint, so let it know explicitly.
   const empty = vm.pairs.length === 0;
+  const hasWork =
+    totals.create + totals.updateTracked + totals.deleteTracked + totals.updateCollision > 0;
+  const blocking = totals.updateCollision + totals.warnings;
+  gate(totals, hasWork);
   return panel.webview.postMessage({
     type: 'planStatus',
     status: 'ready',
@@ -345,6 +391,69 @@ function postPlanResult(panel: vscode.WebviewPanel, plans: PlanForDestination[])
     pairsHtml,
     empty,
     totals,
+    hasWork,
+    blocking,
+  });
+}
+
+/**
+ * Run the green-path sync from inside the room editor. Mirrors the admin
+ * editor's runSyncFromAdmin — same notification UX, same lifecycle messages
+ * to the webview — but scoped to this room's plans only.
+ */
+async function runSyncFromConfig(
+  panel: vscode.WebviewPanel,
+  plans: PlanForDestination[],
+): Promise<void> {
+  log('sync-config-editor: runSync — starting execution');
+  void panel.webview.postMessage({ type: 'syncStatus', status: 'running' });
+
+  let summary;
+  try {
+    summary = await runSync(plans);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`sync-config-editor: sync execution threw — ${message}`);
+    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
+    void panel.webview.postMessage({ type: 'syncStatus', status: 'error', error: message });
+    return;
+  }
+
+  for (const line of formatRunSummary(summary).split('\n')) log(line);
+
+  const total = summary.ok + summary.failed;
+  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
+    if (total === 0) {
+      void vscode.window.showInformationMessage('Folder Sync: nothing to do.');
+    } else {
+      void vscode.window.showInformationMessage(
+        `Folder Sync: ${summary.ok} operation(s) completed.`,
+      );
+    }
+  } else if (summary.failed > 0) {
+    void vscode.window
+      .showWarningMessage(
+        `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
+        'Show details',
+      )
+      .then((choice) => {
+        if (choice === 'Show details') {
+          void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+        }
+      });
+  } else {
+    void vscode.window.showWarningMessage(
+      `Folder Sync: files placed, but ${summary.manifestWriteFailures.length} manifest write(s) failed. ` +
+        `Re-run will re-detect these as already-placed-but-untracked files.`,
+    );
+  }
+
+  void panel.webview.postMessage({
+    type: 'syncStatus',
+    status: 'done',
+    ok: summary.ok,
+    failed: summary.failed,
+    manifestFailures: summary.manifestWriteFailures.length,
   });
 }
 

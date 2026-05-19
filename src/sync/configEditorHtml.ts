@@ -112,6 +112,10 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     <div id="plan-status" class="plan-status plan-scanning">Scanning…</div>
     <div id="plan-totals" class="totals" hidden></div>
     <div id="plan-pairs" class="plan-pairs"></div>
+    <div class="plan-actions">
+      <button id="run-sync" class="btn btn-green" type="button" disabled title="Apply the green-path operations from the plan above — limited to this room's destinations">Run Sync</button>
+      <span id="run-sync-hint" class="hint plan-actions-hint"></span>
+    </div>
   </section>
 
   <section class="actions">
@@ -119,7 +123,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     <button id="open-text" class="btn btn-secondary" type="button">Reopen as text</button>
   </section>
 
-  <p class="hint">Workspace-wide plan opens in a separate panel and covers every <code>.sync.jsonc</code> in the workspace. No files are written until you click Proceed there.</p>
+  <p class="hint">Run Sync above executes this room only. The workspace-wide plan opens in a separate panel and covers every <code>.sync.jsonc</code> in the workspace — use it when you need to coordinate across rooms.</p>
 
   <script id="init-payload" type="application/json" nonce="${nonce}">${initialPayload}</script>
   <script nonce="${nonce}">${CLIENT_JS}</script>
@@ -285,6 +289,26 @@ const EMBEDDED_PLAN_STYLE = `
   /* Tighten the pair card so it sits more naturally inside the section */
   margin: 8px 0;
   padding: 8px 12px;
+}
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.plan-actions-hint { margin: 0; }
+.btn-green {
+  background: var(--vscode-charts-green, #4caf50);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.btn-green:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.btn-green:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 `;
 
@@ -542,11 +566,15 @@ const CLIENT_JS = `
   const planTotalsEl = document.getElementById('plan-totals');
   const planPairsEl = document.getElementById('plan-pairs');
   const planRefreshBtn = document.getElementById('plan-refresh');
+  const runSyncBtn = document.getElementById('run-sync');
+  const runSyncHintEl = document.getElementById('run-sync-hint');
 
   function setPlanScanning() {
     planStatusEl.className = 'plan-status plan-scanning';
     planStatusEl.textContent = 'Scanning…';
     planRefreshBtn.disabled = true;
+    runSyncBtn.disabled = true;
+    runSyncHintEl.textContent = '';
   }
 
   function setPlanReady(msg) {
@@ -558,6 +586,9 @@ const CLIENT_JS = `
       planTotalsEl.innerHTML = '';
       planTotalsEl.hidden = true;
       planPairsEl.innerHTML = '';
+      runSyncBtn.disabled = true;
+      runSyncBtn.textContent = 'Run Sync';
+      runSyncHintEl.textContent = 'Nothing to sync.';
       return;
     }
     planStatusEl.className = 'plan-status';
@@ -575,10 +606,29 @@ const CLIENT_JS = `
     planTotalsEl.innerHTML = msg.chipsHtml || '';
     planTotalsEl.hidden = !msg.chipsHtml;
     planPairsEl.innerHTML = msg.pairsHtml || '';
+
+    // Run Sync gating mirrors the admin editor's: blocking → disabled with
+    // a collision hint; no work → disabled with "Nothing to sync"; otherwise
+    // enabled in green.
+    runSyncBtn.textContent = 'Run Sync';
+    if (msg.blocking > 0) {
+      runSyncBtn.disabled = true;
+      runSyncHintEl.textContent =
+        msg.blocking + ' collision' + (msg.blocking === 1 ? '' : 's') +
+        ' must be resolved before sync. Inline decisions land in M5.';
+    } else if (!msg.hasWork) {
+      runSyncBtn.disabled = true;
+      runSyncHintEl.textContent = 'Nothing to sync — destinations are up to date.';
+    } else {
+      runSyncBtn.disabled = false;
+      runSyncHintEl.textContent = '';
+    }
   }
 
   function setPlanError(errorMsg) {
     planRefreshBtn.disabled = false;
+    runSyncBtn.disabled = true;
+    runSyncHintEl.textContent = '';
     planStatusEl.className = 'plan-status plan-error';
     planStatusEl.innerHTML =
       'Error: ' +
@@ -597,6 +647,15 @@ const CLIENT_JS = `
   planRefreshBtn.addEventListener('click', () => {
     setPlanScanning();
     vscode.postMessage({ type: 'refreshPlan' });
+  });
+
+  runSyncBtn.addEventListener('click', () => {
+    if (runSyncBtn.disabled) return;
+    runSyncBtn.disabled = true;
+    runSyncBtn.textContent = 'Syncing…';
+    planRefreshBtn.disabled = true;
+    runSyncHintEl.textContent = '';
+    vscode.postMessage({ type: 'runSync' });
   });
 
   window.addEventListener('message', (ev) => {
@@ -631,6 +690,20 @@ const CLIENT_JS = `
       if (msg.status === 'scanning') setPlanScanning();
       else if (msg.status === 'ready') setPlanReady(msg);
       else if (msg.status === 'error') setPlanError(msg.error || 'unknown error');
+    } else if (msg.type === 'syncStatus') {
+      if (msg.status === 'running') {
+        runSyncBtn.disabled = true;
+        runSyncBtn.textContent = 'Syncing…';
+      } else if (msg.status === 'done') {
+        // The extension follows up with a fresh planStatus shortly — the
+        // chip strip will reflect the post-sync world. Keep the button
+        // disabled until then so a double-click can't re-fire mid-refresh.
+        runSyncBtn.textContent = 'Run Sync';
+      } else if (msg.status === 'error') {
+        runSyncBtn.textContent = 'Run Sync';
+        runSyncBtn.disabled = false;
+        runSyncHintEl.textContent = 'Sync failed: ' + (msg.error || 'unknown error');
+      }
     }
   });
 

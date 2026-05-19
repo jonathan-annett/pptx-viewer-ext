@@ -197,6 +197,11 @@ function viewerScript(): string {
   const status = document.getElementById('action-status');
   const modalHost = document.getElementById('modal-host');
   const dropOverlay = document.getElementById('drop-overlay');
+  // The Run Sync button + hint live inside the Sync target section, which
+  // may or may not be rendered — both are nullable. Re-resolved each render
+  // because the whole webview HTML is replaced on every renderWithSyncTarget.
+  const syncRunBtn = document.getElementById('sync-run-btn');
+  const syncRunHint = document.getElementById('sync-run-hint');
 
   function vlog(msg){
     try { vscode.postMessage({type:'viewer-log', message: msg}); } catch (_) {}
@@ -334,6 +339,18 @@ function viewerScript(): string {
     }
   });
 
+  // ----- Per-file Run Sync (button lives inside the Sync target section) -----
+  if (syncRunBtn) syncRunBtn.addEventListener('click', function(){
+    if (syncRunBtn.disabled) return;
+    syncRunBtn.disabled = true;
+    syncRunBtn.textContent = 'Syncing\u2026';
+    if (syncRunHint) syncRunHint.textContent = '';
+    setBusy(true);
+    setStatus('Syncing\u2026');
+    vlog('click → run-sync');
+    try { vscode.postMessage({type:'run-sync'}); } catch (_) {}
+  });
+
   // ----- Extension → webview messages -----
   window.addEventListener('message', function(e){
     const m = e.data;
@@ -365,6 +382,36 @@ function viewerScript(): string {
       }
       // outcome='updated' → the extension re-renders the panel; this script
       // is about to be replaced. No status update needed here.
+      return;
+    }
+
+    if (m.type === 'sync-status') {
+      // The typical post-runSync path re-renders the whole webview, replacing
+      // this script entirely. These messages only land if the extension chose
+      // not to re-render (defensive no-currentResult case, or an error before
+      // the re-render fires).
+      if (m.status === 'running') {
+        if (syncRunBtn) {
+          syncRunBtn.disabled = true;
+          syncRunBtn.textContent = 'Syncing\u2026';
+        }
+        setStatus('Syncing\u2026');
+      } else if (m.status === 'done') {
+        setBusy(false);
+        setStatus(m.failed ? 'Sync partially failed' : 'Synced');
+        if (syncRunBtn) {
+          syncRunBtn.disabled = true;
+          syncRunBtn.textContent = 'Run Sync';
+        }
+      } else if (m.status === 'error') {
+        setBusy(false);
+        setStatus('Sync failed: ' + (m.message || 'unknown'));
+        if (syncRunBtn) {
+          syncRunBtn.disabled = false;
+          syncRunBtn.textContent = 'Run Sync';
+        }
+        if (syncRunHint) syncRunHint.textContent = '';
+      }
       return;
     }
 
@@ -604,6 +651,29 @@ function css(): string {
       background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
       padding: 0 4px;
       border-radius: 3px;
+    }
+    /* Per-file Run Sync action row inside the Sync target section. Mirrors
+       the admin/config editor's Run Sync visually so all three surfaces feel
+       like siblings — green button, descriptive hint to its right. */
+    .sync-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .sync-run-btn {
+      background: var(--vscode-charts-green, #4caf50);
+      color: #fff;
+      border-color: transparent;
+    }
+    .sync-run-btn:hover:not(:disabled) {
+      background: var(--vscode-charts-green, #4caf50);
+      filter: brightness(1.1);
+    }
+    .sync-run-btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
     ${syncPlanEmbedCss()}
 

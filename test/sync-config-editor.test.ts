@@ -91,6 +91,16 @@ test('renders the embedded room-scoped plan section', () => {
   assert.match(html, /class="plan-status plan-scanning">Scanning/);
 });
 
+test('renders a room-scoped Run Sync button, initially disabled', () => {
+  // M4.7 follow-up: the room editor mirrors the admin editor's Run Sync
+  // affordance, scoped to this room's plan. Initial state is disabled —
+  // the extension posts a planStatus message with hasWork/blocking to gate.
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.match(html, /id="run-sync"[^>]*class="btn btn-green"/);
+  assert.match(html, /id="run-sync"[^>]*disabled/);
+  assert.match(html, /id="run-sync-hint"/);
+});
+
 test('relabelled action button references the workspace-wide plan, not "dry run"', () => {
   // M4.7 renamed "Open dry-run plan" → "Open workspace-wide plan" so the
   // scope distinction from the embedded plan card is explicit. Regression

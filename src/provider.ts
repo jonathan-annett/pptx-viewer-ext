@@ -26,10 +26,11 @@ import {
   type PreviewSource,
   type PreviewWorkspaceFolder,
 } from './sync/previewContext';
-import { buildScopedDryRunPlan } from './sync/planner';
+import { buildScopedDryRunPlan, type PlanForDestination } from './sync/planner';
 import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
+import { runSync, formatRunSummary } from './sync/runSync';
 
 class PptxDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -79,12 +80,24 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     // sha256 without re-reading and re-parsing the file on disk.
     let currentResult: ParseResult | null = null;
 
+    // Per-render scoped-plan stash. The Sync target section's Run Sync button
+    // dispatches `run-sync` and we feed these plans straight into runSync().
+    // Reset on every render so a button that survives in a stale tab can't
+    // operate on out-of-date plans.
+    let lastPerFilePlans: PlanForDestination[] = [];
+    let lastPerFileBlocking = 0;
+    let lastPerFileHasWork = false;
+    let syncInFlight = false;
+
     const renderWithSyncTarget = async (
       result: ParseResult,
       initialStatus?: string,
     ): Promise<void> => {
-      const syncTargetHtml = await buildSyncTargetHtml(this.manager, document.uri);
-      const opts: RenderOptions = { syncTargetHtml };
+      const syncTarget = await buildSyncTargetHtml(this.manager, document.uri);
+      lastPerFilePlans = syncTarget?.plans ?? [];
+      lastPerFileBlocking = syncTarget?.blocking ?? 0;
+      lastPerFileHasWork = syncTarget?.hasWork ?? false;
+      const opts: RenderOptions = { syncTargetHtml: syncTarget?.html ?? null };
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
       currentResult = result;
@@ -144,6 +157,36 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           log(`update[${fileName}]: cancelled (candidate ${pendingCandidate.fileName} discarded)`);
         }
         pendingCandidate = null;
+        return;
+      }
+
+      if (m.type === 'run-sync') {
+        // Per-file Run Sync — same machinery as the admin editor's, but with
+        // a plan list filtered to a single file by buildScopedDryRunPlan's
+        // pathFilter+pathFilterIsFile options. Block on collisions / warnings
+        // and no-work, same as the other surfaces.
+        if (syncInFlight) return;
+        if (lastPerFileBlocking > 0) {
+          log(`viewer[${fileName}]: run-sync ignored — collisions present`);
+          return;
+        }
+        if (!lastPerFileHasWork) {
+          log(`viewer[${fileName}]: run-sync ignored — nothing to do`);
+          return;
+        }
+        syncInFlight = true;
+        webviewPanel.webview.postMessage({ type: 'sync-status', status: 'running' });
+        try {
+          await runPerFileSync(
+            webviewPanel,
+            fileName,
+            lastPerFilePlans,
+            currentResult,
+            renderWithSyncTarget,
+          );
+        } finally {
+          syncInFlight = false;
+        }
         return;
       }
     });
@@ -410,7 +453,95 @@ function coerceToUint8Array(raw: unknown): Uint8Array {
   throw new Error('Could not interpret bytes payload as Uint8Array');
 }
 
+// ───── per-file Run Sync ────────────────────────────────────────────────
+
+/**
+ * Execute the per-file scoped plan via the shared runSync engine, log a summary,
+ * surface info/warning toasts (same UX as admin + config editors), and re-render
+ * the panel so the Sync target section reflects the post-sync world. The post-
+ * sync re-render is what gives the user immediate feedback that the section's
+ * "to update" line went away.
+ */
+async function runPerFileSync(
+  webviewPanel: vscode.WebviewPanel,
+  fileName: string,
+  plans: PlanForDestination[],
+  currentResult: ParseResult | null,
+  renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
+): Promise<void> {
+  log(`viewer[${fileName}]: run-sync — starting execution`);
+  let summary;
+  try {
+    summary = await runSync(plans);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`viewer[${fileName}]: run-sync threw — ${message}`);
+    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
+    webviewPanel.webview.postMessage({ type: 'sync-status', status: 'error', message });
+    return;
+  }
+
+  for (const line of formatRunSummary(summary).split('\n')) log(line);
+
+  const total = summary.ok + summary.failed;
+  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
+    if (total === 0) {
+      void vscode.window.showInformationMessage('Folder Sync: nothing to do.');
+    } else {
+      void vscode.window.showInformationMessage(
+        `Folder Sync: ${summary.ok} operation(s) completed.`,
+      );
+    }
+  } else if (summary.failed > 0) {
+    void vscode.window
+      .showWarningMessage(
+        `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
+        'Show details',
+      )
+      .then((choice) => {
+        if (choice === 'Show details') {
+          void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+        }
+      });
+  } else {
+    void vscode.window.showWarningMessage(
+      `Folder Sync: files placed, but ${summary.manifestWriteFailures.length} manifest write(s) failed. ` +
+        `Re-run will re-detect these as already-placed-but-untracked files.`,
+    );
+  }
+
+  // Re-render. The whole webview HTML is replaced — the new render's Sync
+  // target section will reflect the updated manifest (typically nothing-to-do
+  // after a green-path apply). initialStatus mirrors what the user just did.
+  if (currentResult) {
+    const status = summary.failed === 0 ? 'Synced' : 'Sync partially failed';
+    await renderWithSyncTarget(currentResult, status);
+  } else {
+    // No current parse on hand (shouldn't happen — the button only renders
+    // after a successful parse), but be defensive: at least notify the page.
+    webviewPanel.webview.postMessage({
+      type: 'sync-status',
+      status: 'done',
+      ok: summary.ok,
+      failed: summary.failed,
+    });
+  }
+}
+
 // ───── sync target section ──────────────────────────────────────────────
+
+/**
+ * Output of buildSyncTargetHtml. `plans` is the raw planner output, kept so
+ * the per-file Run Sync button can hand them straight to runSync() without
+ * a second walk. `blocking` + `hasWork` are the same gating values the admin
+ * + config editors compute.
+ */
+interface SyncTargetResult {
+  html: string;
+  plans: PlanForDestination[];
+  blocking: number;
+  hasWork: boolean;
+}
 
 /**
  * Build the HTML for the viewer's "Sync target" section from current topology
@@ -418,17 +549,18 @@ function coerceToUint8Array(raw: unknown): Uint8Array {
  * the renderer drops the section entirely in that case.
  *
  * Branching:
- *   - source             → scoped dry-run plan + attribution
+ *   - source             → scoped dry-run plan + attribution + Run Sync
  *   - destinationMapped  → scoped dry-run plan against the owning source +
- *                          attribution lines naming source & relPath
- *   - destinationOrphan  → muted banner "unique to destination"
+ *                          attribution lines + Run Sync (re-sync this file
+ *                          from the source's current copy)
+ *   - destinationOrphan  → muted banner "unique to destination" (no plan)
  *   - uncovered          → muted banner "not covered by a .sync.jsonc"
  *   - outsideWorkspace   → null (no section)
  */
 async function buildSyncTargetHtml(
   manager: SyncManager,
   documentUri: vscode.Uri,
-): Promise<string | null> {
+): Promise<SyncTargetResult | null> {
   const topology = manager.getTopology();
   const workspaceFolders = (vscode.workspace.workspaceFolders ?? []).map(toPreviewWorkspaceFolder);
   const sources = topology.sources.map(toPreviewSource);
@@ -452,10 +584,10 @@ async function buildSyncTargetHtml(
       return null;
 
     case 'uncovered':
-      return renderUncoveredBanner(ctx.workspaceFolderName, ctx.relPath);
+      return bannerOnly(renderUncoveredBanner(ctx.workspaceFolderName, ctx.relPath));
 
     case 'destinationOrphan':
-      return renderOrphanBanner(ctx.destinationWorkspaceFolderName, ctx.relPath);
+      return bannerOnly(renderOrphanBanner(ctx.destinationWorkspaceFolderName, ctx.relPath));
 
     case 'source':
       return renderScopedPlan(manager, ctx.sourceConfigUri, documentUri, {
@@ -470,6 +602,10 @@ async function buildSyncTargetHtml(
       // looking up the configUri in topology.
       return renderScopedPlanForDestination(manager, ctx, documentUri);
   }
+}
+
+function bannerOnly(html: string): SyncTargetResult {
+  return { html, plans: [], blocking: 0, hasWork: false };
 }
 
 function renderUncoveredBanner(workspaceFolderName: string, relPath: string): string {
@@ -495,7 +631,7 @@ async function renderScopedPlan(
   sourceConfigUri: string,
   documentUri: vscode.Uri,
   attribution: { kind: 'source'; workspaceFolderName: string; relPath: string },
-): Promise<string> {
+): Promise<SyncTargetResult> {
   try {
     const plans = await buildScopedDryRunPlan(manager.getTopology(), {
       sourceConfigUri: vscode.Uri.parse(sourceConfigUri),
@@ -507,11 +643,16 @@ async function renderScopedPlan(
       return rel || plan.source.sourceFolderUri.toString();
     });
     const head = `<p class="sync-attribution">Source: <code>${escapeHtml(attribution.workspaceFolderName)}</code> · path <code>${escapeHtml(attribution.relPath)}</code></p>`;
-    return `<div class="sync-target">${head}${renderPlanPairs(vm)}</div>`;
+    const blocking = vm.totals.updateCollision + vm.totals.warnings;
+    const hasWork =
+      vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
+    const actions = renderRunSyncRow(hasWork, blocking);
+    const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
+    return { html, plans, blocking, hasWork };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`viewer: scoped-plan failed — ${message}`);
-    return `<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`;
+    return bannerOnly(`<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`);
   }
 }
 
@@ -519,14 +660,14 @@ async function renderScopedPlanForDestination(
   manager: SyncManager,
   ctx: Extract<PreviewContext, { kind: 'destinationMapped' }>,
   _documentUri: vscode.Uri,
-): Promise<string> {
+): Promise<SyncTargetResult> {
   try {
     const topology = manager.getTopology();
     const source = topology.sources.find(
       (s) => s.configUri.toString() === ctx.sourceConfigUri,
     );
     if (!source) {
-      return `<div class="sync-banner muted">Source no longer present in topology — manifest may be stale.</div>`;
+      return bannerOnly(`<div class="sync-banner muted">Source no longer present in topology — manifest may be stale.</div>`);
     }
     // pathFilter is the source-relative path joined onto the source folder URI.
     const pathFilter = source.sourceFolderUri.with({
@@ -542,12 +683,39 @@ async function renderScopedPlanForDestination(
       return rel || plan.source.sourceFolderUri.toString();
     });
     const head = `<p class="sync-attribution">Placed here by source <code>${escapeHtml(ctx.sourceWorkspaceFolderName)}</code> · source path <code>${escapeHtml(ctx.sourceRelPath)}</code></p>`;
-    return `<div class="sync-target">${head}${renderPlanPairs(vm)}</div>`;
+    const blocking = vm.totals.updateCollision + vm.totals.warnings;
+    const hasWork =
+      vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
+    const actions = renderRunSyncRow(hasWork, blocking);
+    const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
+    return { html, plans, blocking, hasWork };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`viewer: dest-mapped scoped-plan failed — ${message}`);
-    return `<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`;
+    return bannerOnly(`<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`);
   }
+}
+
+/**
+ * Render the Run Sync action row appended to a scoped plan section. The button
+ * is disabled (with an explanatory hint) when there's nothing to do or when
+ * collisions would block — same gating as the admin/config editors.
+ */
+function renderRunSyncRow(hasWork: boolean, blocking: number): string {
+  let hint = '';
+  let disabled = '';
+  if (blocking > 0) {
+    disabled = ' disabled';
+    const plural = blocking === 1 ? '' : 's';
+    hint = `${blocking} collision${plural} must be resolved before sync.`;
+  } else if (!hasWork) {
+    disabled = ' disabled';
+    hint = 'Nothing to sync — destination is up to date.';
+  }
+  return `<div class="sync-actions">
+    <button id="sync-run-btn" class="action-btn sync-run-btn" type="button"${disabled} title="Apply the green-path operations from the plan above — limited to this file">Run Sync</button>
+    <span id="sync-run-hint" class="action-status">${escapeHtml(hint)}</span>
+  </div>`;
 }
 
 function joinPath(base: string, sub: string): string {
