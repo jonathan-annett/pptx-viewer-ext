@@ -31,8 +31,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   initLog(context);
   log(`activate: pptx-viewer ${packageVersion(context)} loaded`);
   logBuildInfo();
-  context.subscriptions.push(PptxEditorProvider.register());
-  log('activate: custom editor registered for *.pptx');
 
   // M4.6 — silent restore must run BEFORE SyncManager.create so the
   // manager's initial reload sees the just-restored folders. If the
@@ -62,6 +60,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // discovery, hot-reload, and topology resolution. The status bar and the
   // showTopology command are surface layers over the manager's state.
   const manager = await SyncManager.create(context);
+
+  // pptx viewer registers AFTER the sync manager exists so the viewer's
+  // "Sync target" section (M4.7 Phase D) can read live topology + manifest.
+  // Registration order doesn't otherwise matter — the custom editor isn't
+  // invoked until the user opens a .pptx, which can only happen after
+  // activation returns.
+  context.subscriptions.push(PptxEditorProvider.register(manager));
+  log('activate: custom editor registered for *.pptx');
 
   // Snapshot writer subscribes to topology changes — every config edit or
   // workspace folder add/remove recaptures and rewrites .admin-sync.jsonc

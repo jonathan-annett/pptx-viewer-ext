@@ -14,10 +14,35 @@
 //     3. background tint using a low-opacity error colour
 //   Three signals so the warn/pass distinction survives colour-blindness and
 //   themes where the error colour is muted.
+//
+// Beyond rendering, this module also hosts the inline <script> that powers:
+//   - Save As… (existing — routes through the extension host because the
+//     web-webview iframe drops anchor-driven downloads on vscode.dev).
+//   - Update… (file picker) — user-initiated replace; bytes posted to the
+//     extension which parses + hashes + writes when the sha256 differs.
+//   - Drag-and-drop ingest — drop a .pptx anywhere on the panel; same parse
+//     + hash but with a confirmation modal because the user did not pick
+//     this file from a dialog.
+//
+// The modal HTML is rendered on the extension side (see
+// src/sync/compareModalHtml.ts) and posted to the webview as a string; the
+// host container is a fixed-position overlay that the script toggles.
 
 import type { Flag, MediaEntry, ParseResult } from './pptx';
+import { compareModalCss } from './sync/compareModalHtml';
 
-export function renderHtml(r: ParseResult, nonce: string): string {
+export interface RenderOptions {
+  /** Pre-rendered HTML for the "Sync target" section, or null/undefined for
+   *  none (file is outside any workspace). Passed verbatim — the caller is
+   *  responsible for HTML safety on its inputs. */
+  syncTargetHtml?: string | null;
+  /** Pre-populated status text shown in the action row. Used after a
+   *  successful Update / drop-confirm to surface "Updated" without needing
+   *  the new script to receive a postMessage that may race the re-render. */
+  initialStatus?: string;
+}
+
+export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = {}): string {
   const metadataRows: Array<[string, string]> = [
     ['File name', r.fileName],
     ['Size', `${r.sizeHuman} (${r.size.toLocaleString()} bytes)`],
@@ -34,6 +59,29 @@ export function renderHtml(r: ParseResult, nonce: string): string {
     ? `<div class="banner warn">${escapeHtml(r.parseError)}</div>`
     : '';
 
+  // Validation section is dropped when parsing failed — the three OK/WARN
+  // flags rely on having parsed the deck, so reading "OK Linked media" off
+  // a file we couldn't unzip would just be misleading.
+  const validationSection = r.parseError
+    ? ''
+    : `<section>
+      <h2>Validation</h2>
+      <ul class="flags">
+        ${flagLi(r.flags.linkedMedia)}
+        ${flagLi(r.flags.showType)}
+        ${flagLi(r.flags.showMediaControls)}
+      </ul>
+    </section>`;
+
+  const syncTargetSection = opts.syncTargetHtml
+    ? `<section>
+      <h2>Sync target</h2>
+      ${opts.syncTargetHtml}
+    </section>`
+    : '';
+
+  const initialStatus = opts.initialStatus ? escapeHtml(opts.initialStatus) : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -46,9 +94,11 @@ export function renderHtml(r: ParseResult, nonce: string): string {
   <main>
     <h1>${escapeHtml(r.fileName)}</h1>
     <div class="actions">
-      <button id="download-btn" class="action-btn" type="button">Download</button>
-      <span id="download-status" class="action-status" aria-live="polite"></span>
+      <button id="save-as-btn" class="action-btn" type="button">Save As\u2026</button>
+      <button id="update-btn" class="action-btn action-btn-secondary" type="button">Update\u2026</button>
+      <span id="action-status" class="action-status" aria-live="polite">${initialStatus}</span>
     </div>
+    <input id="update-input" type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" style="display:none">
     ${thumbnailImg(r)}
     ${errorBanner}
 
@@ -59,16 +109,15 @@ export function renderHtml(r: ParseResult, nonce: string): string {
       </dl>
     </section>
 
-    <section>
-      <h2>Validation</h2>
-      <ul class="flags">
-        ${flagLi(r.flags.linkedMedia)}
-        ${flagLi(r.flags.showType)}
-        ${flagLi(r.flags.showMediaControls)}
-      </ul>
-    </section>
+    ${validationSection}
+
+    ${syncTargetSection}
   </main>
-  <script nonce="${nonce}">${downloadScript(r.fileName)}</script>
+  <div id="modal-host" class="modal-host" aria-hidden="true"></div>
+  <div id="drop-overlay" class="drop-overlay" aria-hidden="true">
+    <div class="drop-overlay-inner">Drop a .pptx to compare or update</div>
+  </div>
+  <script nonce="${nonce}">${viewerScript()}</script>
 </body>
 </html>`;
 }
@@ -123,52 +172,224 @@ function formatMedia(media: MediaEntry[]): string {
   return media.map((m) => `${m.mime} × ${m.count}`).join(', ');
 }
 
-// Save button flow:
-//   click → postMessage({type:'save-as'}) to extension
-//   extension shows VS Code's save dialog, writes bytes to chosen URI
-//   extension posts {type:'save-as-result', status:'ok'|'cancelled'|'error', ...}
-//   webview updates the status text
+// Inline script consolidates all webview-side behaviour:
 //
-// We don't do a browser-native blob download from inside the webview —
-// vscode.dev's web-webview iframe silently drops anchor-driven downloads
-// (sandbox/cross-origin policy), even with a live user-activation token.
-// Routing through the extension host bypasses the iframe restriction
-// entirely; the save dialog is VS Code's, and on vscode.dev with a folder
-// mounted via the File System Access API it writes to actual local disk.
-function downloadScript(_fileName: string): string {
+//   - Save As… → postMessage({type:'save-as'}), wait for save-as-result.
+//   - Update… → click hidden <input type="file"> → on change post
+//     {type:'ingest', source:'picker', fileName, bytes}.
+//   - Drag/drop → on full-window drop, post {type:'ingest', source:'drop', …}
+//     if the file passes a quick PK\x03\x04 magic-bytes check.
+//   - Modal driver: when the extension replies with drop-result/different or
+//     drop-result/identical, populate #modal-host via innerHTML (no nonce
+//     needed — the modal HTML carries no scripts), wire the buttons, and
+//     post confirm-update / cancel-update back.
+//
+// The save flow does NOT do a browser-native blob download — vscode.dev's
+// web-webview iframe silently drops anchor-driven downloads (sandbox /
+// cross-origin policy), even with a live user-activation token. Routing
+// through the extension host bypasses the iframe restriction entirely.
+function viewerScript(): string {
   return `(function(){
   const vscode = acquireVsCodeApi();
-  const btn = document.getElementById('download-btn');
-  const status = document.getElementById('download-status');
+  const saveBtn = document.getElementById('save-as-btn');
+  const updateBtn = document.getElementById('update-btn');
+  const updateInput = document.getElementById('update-input');
+  const status = document.getElementById('action-status');
+  const modalHost = document.getElementById('modal-host');
+  const dropOverlay = document.getElementById('drop-overlay');
 
-  function dlog(msg){
-    try { vscode.postMessage({type:'download-log', message: msg}); } catch (_) {}
+  function vlog(msg){
+    try { vscode.postMessage({type:'viewer-log', message: msg}); } catch (_) {}
   }
   window.addEventListener('error', function(ev){
-    dlog('window error: ' + (ev.message || ev.error || 'unknown'));
+    vlog('window error: ' + (ev.message || ev.error || 'unknown'));
   });
 
-  btn.addEventListener('click', function(){
-    btn.disabled = true;
-    status.textContent = 'Saving…';
-    dlog('click → save-as');
-    vscode.postMessage({type: 'save-as'});
+  function setStatus(text){ if (status) status.textContent = text || ''; }
+
+  function setBusy(busy){
+    if (saveBtn) saveBtn.disabled = busy;
+    if (updateBtn) updateBtn.disabled = busy;
+  }
+
+  function openModal(html){
+    if (!modalHost) return;
+    modalHost.innerHTML = html;
+    modalHost.classList.add('open');
+    modalHost.setAttribute('aria-hidden', 'false');
+    // Bind whichever buttons the modal contains. The IDs are stable;
+    // see src/sync/compareModalHtml.ts.
+    const okBtn = document.getElementById('compare-ok-btn');
+    const updateBtnInModal = document.getElementById('compare-update-btn');
+    const cancelBtnInModal = document.getElementById('compare-cancel-btn');
+    if (okBtn) okBtn.addEventListener('click', function(){
+      closeModal(); setStatus('');
+    });
+    if (cancelBtnInModal) cancelBtnInModal.addEventListener('click', function(){
+      closeModal(); setStatus('');
+      try { vscode.postMessage({type:'cancel-update'}); } catch (_) {}
+    });
+    if (updateBtnInModal) updateBtnInModal.addEventListener('click', function(){
+      updateBtnInModal.disabled = true;
+      if (cancelBtnInModal) cancelBtnInModal.disabled = true;
+      setStatus('Updating\u2026');
+      try { vscode.postMessage({type:'confirm-update'}); } catch (_) {}
+    });
+  }
+
+  function closeModal(){
+    if (!modalHost) return;
+    modalHost.classList.remove('open');
+    modalHost.setAttribute('aria-hidden', 'true');
+    modalHost.innerHTML = '';
+  }
+
+  // ----- Save As… -----
+  if (saveBtn) saveBtn.addEventListener('click', function(){
+    setBusy(true);
+    setStatus('Saving\u2026');
+    vlog('click → save-as');
+    try { vscode.postMessage({type: 'save-as'}); } catch (_) {}
   });
 
+  // ----- Update… (file picker) -----
+  if (updateBtn && updateInput) {
+    updateBtn.addEventListener('click', function(){
+      // Reset value first so picking the same filename twice still fires change.
+      try { updateInput.value = ''; } catch (_) {}
+      updateInput.click();
+    });
+    updateInput.addEventListener('change', async function(){
+      const file = updateInput.files && updateInput.files[0];
+      if (!file) return;
+      vlog('picker → ' + file.name + ' (' + file.size + ' bytes)');
+      setBusy(true);
+      setStatus('Checking\u2026');
+      try {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        vscode.postMessage({type:'ingest', source:'picker', fileName: file.name, bytes: buf});
+      } catch (err) {
+        setBusy(false);
+        setStatus('Could not read file');
+        vlog('picker read error: ' + (err && err.message || err));
+      }
+    });
+  }
+
+  // ----- Drag and drop -----
+  // dragenter/dragover need preventDefault to opt into a drop. We toggle a
+  // body class so the overlay shows; dragleave is debounced via a counter
+  // because dragleave fires on every child during a single drag.
+  let dragDepth = 0;
+  function showOverlay(){ if (dropOverlay) dropOverlay.classList.add('open'); }
+  function hideOverlay(){ if (dropOverlay) dropOverlay.classList.remove('open'); }
+
+  window.addEventListener('dragenter', function(e){
+    e.preventDefault();
+    dragDepth++;
+    showOverlay();
+  });
+  window.addEventListener('dragover', function(e){
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('dragleave', function(){
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) hideOverlay();
+  });
+  window.addEventListener('drop', async function(e){
+    e.preventDefault();
+    dragDepth = 0;
+    hideOverlay();
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!file) return;
+    // First gate: extension. Lets us bail on obvious junk (.png, .pdf, …)
+    // without round-tripping bytes through the extension host.
+    if (!/\\.pptx$/i.test(file.name)) {
+      vlog('drop: ignored non-pptx ' + file.name);
+      return;
+    }
+    // Second gate: zip magic bytes PK\\x03\\x04. Tells us the file is at least
+    // structurally a zip; the extension's full parser confirms it's a pptx.
+    try {
+      const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+      if (head[0] !== 0x50 || head[1] !== 0x4B || head[2] !== 0x03 || head[3] !== 0x04) {
+        vlog('drop: ignored bad magic ' + file.name);
+        return;
+      }
+    } catch (err) {
+      vlog('drop: head read error: ' + (err && err.message || err));
+      return;
+    }
+    vlog('drop → ' + file.name + ' (' + file.size + ' bytes)');
+    setBusy(true);
+    setStatus('Checking\u2026');
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      vscode.postMessage({type:'ingest', source:'drop', fileName: file.name, bytes: buf});
+    } catch (err) {
+      setBusy(false);
+      setStatus('Could not read dropped file');
+      vlog('drop read error: ' + (err && err.message || err));
+    }
+  });
+
+  // ----- Extension → webview messages -----
   window.addEventListener('message', function(e){
     const m = e.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type !== 'save-as-result') return;
-    btn.disabled = false;
-    if (m.status === 'ok') {
-      status.textContent = 'Saved.';
-      dlog('saved to ' + (m.target || '(unknown)'));
-    } else if (m.status === 'cancelled') {
-      status.textContent = '';
-      dlog('save cancelled');
-    } else {
-      status.textContent = 'Save failed: ' + (m.message || 'unknown');
-      dlog('save error: ' + (m.message || 'unknown'));
+
+    if (m.type === 'save-as-result') {
+      setBusy(false);
+      if (m.status === 'ok') {
+        setStatus('Saved.');
+        vlog('saved to ' + (m.target || '(unknown)'));
+      } else if (m.status === 'cancelled') {
+        setStatus('');
+        vlog('save cancelled');
+      } else {
+        setStatus('Save failed: ' + (m.message || 'unknown'));
+        vlog('save error: ' + (m.message || 'unknown'));
+      }
+      return;
+    }
+
+    if (m.type === 'picker-result') {
+      setBusy(false);
+      if (m.outcome === 'invalid') {
+        setStatus('Not a valid pptx file');
+      } else if (m.outcome === 'identical') {
+        setStatus('Not updated \u2014 identical content');
+      } else if (m.outcome === 'error') {
+        setStatus('Update failed: ' + (m.message || 'unknown'));
+      }
+      // outcome='updated' → the extension re-renders the panel; this script
+      // is about to be replaced. No status update needed here.
+      return;
+    }
+
+    if (m.type === 'drop-result') {
+      setBusy(false);
+      if (m.outcome === 'invalid') {
+        setStatus('Dropped file is not a valid pptx');
+        return;
+      }
+      if (m.outcome === 'error') {
+        setStatus('Update failed: ' + (m.message || 'unknown'));
+        return;
+      }
+      if (m.outcome === 'identical' && typeof m.modalHtml === 'string') {
+        setStatus('');
+        openModal(m.modalHtml);
+        return;
+      }
+      if (m.outcome === 'different' && typeof m.modalHtml === 'string') {
+        setStatus('');
+        openModal(m.modalHtml);
+        return;
+      }
+      // outcome='updated' → panel re-render; nothing more to do.
+      return;
     }
   });
 })();`;
@@ -239,6 +460,11 @@ function css(): string {
       border-left: 3px solid var(--vscode-errorForeground);
       color: var(--vscode-foreground);
     }
+    .banner.info {
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 10%, transparent);
+      border-left: 3px solid var(--vscode-charts-blue, #3794ff);
+      color: var(--vscode-foreground);
+    }
 
     /* Metadata: 2-col grid (label | value). 'auto 1fr' = label hugs content, value fills. */
     dl.meta {
@@ -305,7 +531,7 @@ function css(): string {
     .label { font-weight: 600; }
     .detail { color: var(--vscode-descriptionForeground); }
 
-    /* Action row (Download button + transient status text).
+    /* Action row (Save As + Update + transient status text).
        - flex with align-items:center keeps the status text vertically centred on the button.
        - --vscode-button-* matches VS Code's primary-button styling across themes,
          so the button looks native rather than bolted on. */
@@ -314,6 +540,7 @@ function css(): string {
       align-items: center;
       gap: 12px;
       margin: 0 0 16px;
+      flex-wrap: wrap;
     }
     .action-btn {
       font-family: inherit;
@@ -336,9 +563,154 @@ function css(): string {
       opacity: 0.6;
       cursor: default;
     }
+    /* Secondary variant for Update — same shape, muted palette so Save As
+       reads as the primary action. */
+    .action-btn-secondary {
+      background: var(--vscode-button-secondaryBackground, transparent);
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      border-color: var(--vscode-panel-border, rgba(128,128,128,0.4));
+    }
+    .action-btn-secondary:hover:not(:disabled) {
+      background: var(--vscode-button-secondaryHoverBackground, color-mix(in srgb, var(--vscode-foreground) 8%, transparent));
+    }
     .action-status {
       color: var(--vscode-descriptionForeground);
       font-size: 0.9em;
     }
+
+    /* ----- Sync target section ------------------------------------------- */
+    /* The section reuses the plan-content selectors emitted by
+       src/sync/planHtml.ts when the file is in a source-covered folder, plus
+       lightweight banners for the uncovered/orphan/error states. */
+    .sync-banner {
+      padding: 10px 12px;
+      border-radius: 4px;
+      border-left: 3px solid var(--vscode-charts-blue, #3794ff);
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 10%, transparent);
+      color: var(--vscode-foreground);
+    }
+    .sync-banner.muted {
+      border-left-color: var(--vscode-panel-border, rgba(128,128,128,0.5));
+      background: color-mix(in srgb, var(--vscode-foreground) 4%, transparent);
+      color: var(--vscode-descriptionForeground);
+    }
+    .sync-attribution {
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.9em;
+      margin: 0 0 8px;
+    }
+    .sync-attribution code {
+      font-family: var(--vscode-editor-font-family, monospace);
+      background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent);
+      padding: 0 4px;
+      border-radius: 3px;
+    }
+    ${syncPlanEmbedCss()}
+
+    /* ----- Drag-and-drop overlay ----------------------------------------- */
+    .drop-overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: color-mix(in srgb, var(--vscode-focusBorder, #0e639c) 18%, transparent);
+      pointer-events: none; /* the drop event still fires on window */
+      z-index: 900;
+    }
+    .drop-overlay.open { display: flex; }
+    .drop-overlay-inner {
+      padding: 16px 24px;
+      border: 2px dashed var(--vscode-focusBorder, #0e639c);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-foreground);
+      font-weight: 600;
+    }
+
+    /* ----- Modal overlay (compare / identical) --------------------------- */
+    ${compareModalCss()}
+  `;
+}
+
+/**
+ * Minimal subset of the plan-view CSS needed when embedding plan markup into
+ * the viewer's Sync target section. Keeps the rules colocated so the viewer
+ * has no runtime import-cycle risk with planHtml.ts (which is otherwise a
+ * sibling pure module). Mirrors `planContentCss()` from planHtml.ts; if the
+ * two drift far apart we can swap to importing `planContentStyles()` from
+ * planHtml directly.
+ */
+function syncPlanEmbedCss(): string {
+  return `
+    .sync-target .pair {
+      margin: 8px 0;
+      padding: 10px 14px;
+      border-left: 3px solid var(--vscode-panel-border, rgba(128,128,128,0.4));
+      background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+      border-radius: 0 4px 4px 0;
+    }
+    .sync-target .pair-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+      margin-bottom: 6px;
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
+    .sync-target .pair-head .src { font-weight: 600; }
+    .sync-target .pair-head .arrow,
+    .sync-target .pair-head .dst { color: var(--vscode-descriptionForeground); }
+    .sync-target .sec {
+      margin: 6px 0;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+      border-radius: 4px;
+      background: var(--vscode-editor-background);
+    }
+    .sync-target .sec summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 5px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      user-select: none;
+    }
+    .sync-target .sec summary::-webkit-details-marker { display: none; }
+    .sync-target .sec summary::before {
+      content: '\u25B6';
+      font-size: 0.75em;
+      color: var(--vscode-descriptionForeground);
+      transition: transform 0.12s ease;
+    }
+    .sync-target .sec[open] summary::before { transform: rotate(90deg); }
+    .sync-target .sec-block summary { color: var(--vscode-errorForeground); }
+    .sync-target .sec-count {
+      margin-left: auto;
+      font-weight: 400;
+      color: var(--vscode-descriptionForeground);
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
+    .sync-target ul.rows {
+      list-style: none;
+      margin: 0;
+      padding: 4px 10px 10px;
+    }
+    .sync-target ul.rows .row {
+      display: grid;
+      grid-template-columns: 1fr max-content max-content;
+      gap: 12px;
+      align-items: baseline;
+      padding: 2px 0;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.92em;
+    }
+    .sync-target ul.rows .path { word-break: break-all; }
+    .sync-target ul.rows .size,
+    .sync-target ul.rows .hashes {
+      color: var(--vscode-descriptionForeground);
+    }
+    .sync-target .banner.ok   { background: color-mix(in srgb, var(--vscode-charts-green, #4caf50) 10%, transparent); border-left-color: var(--vscode-charts-green, #4caf50); }
   `;
 }
