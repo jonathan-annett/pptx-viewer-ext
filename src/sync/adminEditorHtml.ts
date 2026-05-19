@@ -558,14 +558,21 @@ const CLIENT_JS = `
     planPairsEl.innerHTML = msg.pairsHtml || '';
 
     // Run Sync gating mirrors the standalone plan panel's traffic-light.
-    // Blocking > 0 → button disabled with explanatory hint. No work → "Nothing
-    // to do". Otherwise enabled in green.
+    // Blocking > 0 → button disabled with a breakdown hint. No work → "Nothing
+    // to do". Otherwise enabled in green. Per-row decisions for collisions
+    // and the orange "Proceed with safe items only" path live in the
+    // standalone plan webview (folderSync.openPlan); this embedded view is
+    // green-path only by design.
     runSyncBtn.textContent = 'Run Sync';
     if (msg.blocking > 0) {
       runSyncBtn.disabled = true;
+      const collisions = t.updateCollision || 0;
+      const warnings = t.warnings || 0;
+      const parts = [];
+      if (collisions) parts.push(collisions + ' collision' + (collisions === 1 ? '' : 's'));
+      if (warnings) parts.push(warnings + ' warning' + (warnings === 1 ? '' : 's'));
       runSyncHintEl.textContent =
-        msg.blocking + ' collision' + (msg.blocking === 1 ? '' : 's') +
-        ' must be resolved before sync. Inline decisions land in M5.';
+        parts.join(' + ') + ' — open the workspace plan (Folder Sync: Show Plan) to decide per file.';
     } else if (!msg.hasWork) {
       runSyncBtn.disabled = true;
       runSyncHintEl.textContent = 'Nothing to sync — destinations are up to date.';

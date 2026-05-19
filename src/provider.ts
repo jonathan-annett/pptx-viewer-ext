@@ -681,7 +681,7 @@ async function renderScopedPlan(
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =
       vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, blocking);
+    const actions = renderRunSyncRow(hasWork, vm.totals.updateCollision, vm.totals.warnings);
     const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
     return { html, plans, blocking, hasWork };
   } catch (err) {
@@ -728,7 +728,7 @@ async function renderScopedPlanForDestination(
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =
       vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, blocking);
+    const actions = renderRunSyncRow(hasWork, vm.totals.updateCollision, vm.totals.warnings);
     const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
     return { html, plans, blocking, hasWork };
   } catch (err) {
@@ -741,15 +741,21 @@ async function renderScopedPlanForDestination(
 /**
  * Render the Run Sync action row appended to a scoped plan section. The button
  * is disabled (with an explanatory hint) when there's nothing to do or when
- * collisions would block — same gating as the admin/config editors.
+ * collisions/warnings would block — same gating as the admin/config editors.
+ * Per-row decisions for collisions and the orange "Proceed with safe items
+ * only" path live in the standalone plan webview; this per-file Run Sync is
+ * green-path only by design.
  */
-function renderRunSyncRow(hasWork: boolean, blocking: number): string {
+function renderRunSyncRow(hasWork: boolean, collisions: number, warnings: number): string {
   let hint = '';
   let disabled = '';
+  const blocking = collisions + warnings;
   if (blocking > 0) {
     disabled = ' disabled';
-    const plural = blocking === 1 ? '' : 's';
-    hint = `${blocking} collision${plural} must be resolved before sync.`;
+    const parts: string[] = [];
+    if (collisions) parts.push(`${collisions} collision${collisions === 1 ? '' : 's'}`);
+    if (warnings) parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`);
+    hint = `${parts.join(' + ')} — open the workspace plan to decide per file.`;
   } else if (!hasWork) {
     disabled = ' disabled';
     hint = 'Nothing to sync — destination is up to date.';
