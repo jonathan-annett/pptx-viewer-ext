@@ -503,9 +503,9 @@ M4.7 extends this editor (along with the room editor and pptx preview) with the 
 - *Clear Workspace Snapshot* produces a clean activation next refresh (no restore, no prompt, no file on disk).
 - Snapshot updates on every topology change — verifiable by editing a `.sync.jsonc` to add a destination, refreshing, and seeing the new destination re-attached with its display name intact.
 
-### M4.7 — Embedded + scoped dry-run across all three sync surfaces *(in progress)*
+### M4.7 — Embedded + scoped dry-run across all three sync surfaces *(✅ shipped)*
 
-**Status snapshot (2026-05-19, end of session):**
+**Status snapshot (2026-05-19, M4.7 complete):**
 
 | Phase | What | Status |
 |---|---|---|
@@ -514,10 +514,15 @@ M4.7 extends this editor (along with the room editor and pptx preview) with the 
 | C | Admin-editor Full Dry-Run + Run Sync section | ✅ shipped |
 | – | URI-keyed destinations (replaces fragile name-keying) | ✅ shipped (commit `b776671`) |
 | – | Read-only lock seed + cross-source destination uniqueness + source-self filter | ✅ shipped (commit `c3b315c`) |
-| D | Pptx viewer "Sync target" section + classifier | ⏳ pending — spec below intact |
-| D-adj | Pptx viewer UX additions (corrupt-flag hiding, Save As rename, Update button, drag-and-drop) | ⏳ pending — spec in new subsection below |
+| D | Pptx viewer "Sync target" section + classifier | ✅ shipped (commit `e6eb9ca`) |
+| D-adj | Pptx viewer UX additions (corrupt-flag hiding, Save As rename, Update button, drag-and-drop compare modal) | ✅ shipped (commit `e6eb9ca`) |
+| follow-on | Run Sync symmetry: room-scoped button in `.sync.jsonc` editor + per-file button in pptx viewer (mirrors admin editor's gating) | ✅ shipped (commit `f6f0433`) |
+| follow-on | Drop overlay copy clarification — own subtitle explaining Shift-to-drop-into-webview (VS Code's overlay text was inverted vs behaviour) | ✅ shipped (commit `88954c0`) |
+| follow-on | Auto-sync checkbox in compare modal, default persisted in `globalState.pptxViewer.autoSyncAfterDrop` | ✅ shipped (commit `3577103`) |
 
-Phases A–C shipped over 2026-05-18 → 2026-05-19. The URI-key pivot and the three correctness fixes (lock, uniqueness, source-self) landed as follow-ons while testing on the live URL exposed them. Phase D is the natural next step.
+Everything in M4.7 shipped over 2026-05-18 → 2026-05-19. The three follow-ons landed after the user dogfooded Phase D on the live URL and surfaced gaps: Run Sync only existed in the admin editor (felt like a regression once the user had three custom editors visible), the VS Code drop overlay's "hold shift to drop into editor" copy was inverted relative to behaviour, and the compare modal lacked a one-gesture path through to syncing the new file.
+
+**Next milestone is M5** (interactive decisions + validators). The plan is **clean** between M4.7 and M5: no carried-over work, no half-finished follow-ons. M5 was paused for M4.7 and is now unblocked.
 
 **Why this exists:** The product framing is "pushing files to rooms" for a multi-room conference site. Three natural scopes, each with a natural surface:
 
@@ -653,7 +658,7 @@ No watcher needed; the file is whatever it is when previewed. (A future polish i
 - `renderPlanHtml` is unchanged — same renderer, three call sites (admin editor, room editor, file preview).
 - `buildScopedDryRunPlan` is covered by `test/sync-scoped-plan.test.ts` (no scope, sub-directory, single file); `classifyPreviewContext` is covered by `test/sync-preview-context.test.ts` (all four cases).
 
-### M5 — Interactive decisions + validators *(paused until M4.7 ships)*
+### M5 — Interactive decisions + validators *(next — M4.7 is done)*
 
 - Collision detection against the manifest
 - Destination reverse pass to surface destination-only files
