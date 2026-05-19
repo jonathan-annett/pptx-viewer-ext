@@ -1,8 +1,8 @@
 // SyncManager — owns the lifecycle of the resolved topology.
 //
 // Responsibilities:
-// - Discover all .sync.yaml files across the workspace at activation
-// - Watch for create/change/delete of .sync.yaml files
+// - Discover all .sync.jsonc files across the workspace at activation
+// - Watch for create/change/delete of .sync.jsonc files
 // - Watch for workspace-folder changes (add/remove)
 // - Recompute the topology when either kind of change fires
 // - Expose the current topology to commands and UI surfaces
@@ -11,7 +11,7 @@
 // fast bursts of edits don't queue redundant work.
 
 import * as vscode from 'vscode';
-import { loadSyncYaml, type SourceLoad } from './config';
+import { loadSyncConfig, type SourceLoad } from './config';
 import {
   resolveTopology,
   formatTopology,
@@ -20,6 +20,8 @@ import {
 import { log } from '../log';
 
 type Listener = (topology: ResolvedTopology) => void;
+
+const CONFIG_GLOB = '**/.sync.jsonc';
 
 export class SyncManager implements vscode.Disposable {
   private topology: ResolvedTopology = {
@@ -42,14 +44,14 @@ export class SyncManager implements vscode.Disposable {
   }
 
   private start(context: vscode.ExtensionContext): void {
-    this.watcher = vscode.workspace.createFileSystemWatcher('**/.sync.yaml');
+    this.watcher = vscode.workspace.createFileSystemWatcher(CONFIG_GLOB);
     const trigger = (uri: vscode.Uri, kind: string): void => {
       log(`sync: ${kind} ${uri.toString()} — scheduling topology reload`);
       void this.reload();
     };
-    this.watcher.onDidCreate((u) => trigger(u, 'yaml created'));
-    this.watcher.onDidChange((u) => trigger(u, 'yaml changed'));
-    this.watcher.onDidDelete((u) => trigger(u, 'yaml deleted'));
+    this.watcher.onDidCreate((u) => trigger(u, 'config created'));
+    this.watcher.onDidChange((u) => trigger(u, 'config changed'));
+    this.watcher.onDidDelete((u) => trigger(u, 'config deleted'));
 
     this.folderListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
       log('sync: workspace folders changed — scheduling topology reload');
@@ -85,19 +87,19 @@ export class SyncManager implements vscode.Disposable {
       return;
     }
 
-    // Find all .sync.yaml files. findFiles respects the user's files.exclude
+    // Find all .sync.jsonc files. findFiles respects the user's files.exclude
     // settings but ignores .gitignore by default — fine for our purposes.
-    const yamlUris = await vscode.workspace.findFiles('**/.sync.yaml');
+    const configUris = await vscode.workspace.findFiles(CONFIG_GLOB);
     const loads: SourceLoad[] = [];
-    for (const yamlUri of yamlUris) {
-      const owner = workspaceFolderOf(yamlUri, folders);
+    for (const configUri of configUris) {
+      const owner = workspaceFolderOf(configUri, folders);
       if (!owner) {
         // Shouldn't happen — findFiles searches within workspace folders.
         // Guard anyway so an oddly-scoped result doesn't crash the load.
-        log(`sync: ignoring yaml outside any workspace folder: ${yamlUri.toString()}`);
+        log(`sync: ignoring config outside any workspace folder: ${configUri.toString()}`);
         continue;
       }
-      loads.push(await loadSyncYaml(yamlUri, owner.uri));
+      loads.push(await loadSyncConfig(configUri, owner.uri));
     }
 
     this.topology = resolveTopology(loads, folders);
@@ -148,7 +150,7 @@ function workspaceFolderOf(
   uri: vscode.Uri,
   folders: readonly vscode.WorkspaceFolder[],
 ): vscode.WorkspaceFolder | undefined {
-  // A yaml belongs to the workspace folder whose URI is a prefix of its URI.
+  // A config belongs to the workspace folder whose URI is a prefix of its URI.
   // Compare on `toString()` of the folder URI with a trailing slash to avoid
   // false matches between e.g. /work/foo and /work/foobar.
   const target = uri.toString();

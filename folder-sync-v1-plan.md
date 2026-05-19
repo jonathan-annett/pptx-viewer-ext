@@ -342,9 +342,25 @@ The v1 scope is sequenced into milestones. Each milestone is a single coherent d
 
 **Done when:** a clean sync (no collisions, no validation warnings) runs end-to-end and the manifest reflects what was placed. ✅
 
-### M4.5 — JSON pivot + minimal authoring UI
+### M4.5 — JSON pivot + minimal authoring UI ✅ shipped
 
-**Why this exists:** After M4 shipped working, the user decided in-depth testing should wait until there's a UI for editing settings, and standardised the project on JSON over YAML because VS Code's settings/tasks/launch ecosystem is JSONC. M5 and M6 are paused until M4.5 ships.
+**Why this exists:** After M4 shipped working, the user decided in-depth testing should wait until there's a UI for editing settings, and standardised the project on JSON over YAML because VS Code's settings/tasks/launch ecosystem is JSONC. M5 and M6 were paused until M4.5 shipped.
+
+**What shipped:**
+
+- Format pivot complete — `.sync.yaml`/`yaml-mini.ts` gone; `.sync.jsonc` parsed via `jsonc-parser` package.
+- Pure parser in `src/sync/configParse.ts` (tsx-testable) + vscode-wired loader in `src/sync/config.ts`. Field `yamlUri` renamed to `configUri` everywhere.
+- JSON Schema at `schemas/sync.schema.json` registered via `contributes.jsonValidation` against `**/.sync.jsonc`. Schema is included in the .vsix (not in `.vscodeignore`). The user gets IntelliSense + red squiggles when editing as text.
+- Minimal `CustomTextEditor` for `.sync.jsonc` (`folderSync.configEditor`, priority `default`):
+  - Destination rows with `<select>` populated from current workspace folders, subpath input, add/remove rows
+  - Plain textareas for include/exclude (one glob per line)
+  - Form edits flow back into the document via `jsonc-parser`'s `modify()` API so comments + formatting on other keys are preserved
+  - **Dry run** button opens the existing M3 plan webview (workspace-wide) in a separate panel — the "embedded plan in the lower half" was descoped to keep this milestone minimal; embedding is a polish item in the post-v1 roadmap
+  - **Reopen as text** button delegates to `vscode.openWith` with the default text editor
+  - CSP + per-render nonce same as plan webview and pptx viewer
+  - Pure renderer in `configEditorHtml.ts` (with smoke tests under tsx) + vscode-wired `configEditor.ts`
+
+**Below: the original plan; preserved for reference.**
 
 **Part A — format pivot (mechanical)**
 
@@ -405,7 +421,7 @@ A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user ca
 
 ### M6 — Polish + remaining surfaces *(paused until M4.5 ships)*
 
-- Explorer context menu entries with grey-out rules (no `.sync.yaml` at/above selection; selection inside a destination)
+- Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
 - Status bar button as alternate workspace-wide invocation
 - Orphan `.tmp` cleanup at the start of each run's destination reverse pass
@@ -418,7 +434,7 @@ A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user ca
 
 ## Definition of done (v1)
 
-- User can author a `.sync.yaml` in a source folder, add destinations to the workspace, and convene a sync from Explorer context menu, status bar, or command palette
+- User can author a `.sync.jsonc` in a source folder, add destinations to the workspace, and convene a sync from Explorer context menu, status bar, or command palette
 - Workspace-wide and folder-scoped invocations both produce a categorized plan
 - Plan webview shows all operation categories with counts, per-file detail, and the traffic-light decision pattern
 - Green proceeds silently for clean syncs; orange proceeds with non-blocked operations only; red cancels everything

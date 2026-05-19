@@ -90,8 +90,8 @@ test('built-in ignores catch Office lock files anywhere', () => {
 
 test('built-in ignores catch the sync config and manifest', () => {
   const set = new GlobSet(BUILT_IN_IGNORES);
-  assert.equal(set.matches('.sync.yaml'), true);
-  assert.equal(set.matches('sub/.sync.yaml'), true);
+  assert.equal(set.matches('.sync.jsonc'), true);
+  assert.equal(set.matches('sub/.sync.jsonc'), true);
   assert.equal(set.matches('.foldersync-manifest.json'), true);
 });
 

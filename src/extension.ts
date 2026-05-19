@@ -7,6 +7,7 @@ import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
+import { SyncConfigEditorProvider } from './sync/configEditor';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -23,11 +24,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(PptxEditorProvider.register());
   log('activate: custom editor registered for *.pptx');
 
-  // Sync feature — M1: config layer + diagnostics. The manager owns yaml
+  // Sync feature — M1: config layer + diagnostics. The manager owns config
   // discovery, hot-reload, and topology resolution. The status bar and the
   // showTopology command are surface layers over the manager's state.
   const manager = await SyncManager.create(context);
   createStatusBarItem(context, manager);
+  context.subscriptions.push(SyncConfigEditorProvider.register());
+  log('activate: .sync.jsonc custom editor registered');
   context.subscriptions.push(
     vscode.commands.registerCommand('folderSync.showTopology', () => {
       log('sync: showTopology invoked');

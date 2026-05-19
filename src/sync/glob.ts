@@ -1,4 +1,4 @@
-// Glob matcher for include/exclude patterns in .sync.yaml.
+// Glob matcher for include/exclude patterns in .sync.jsonc.
 //
 // What's supported:
 //   *       → any sequence of non-slash characters
@@ -90,11 +90,11 @@ export class GlobSet {
 
 /**
  * Built-in ignore patterns — applied to every source walk regardless of
- * what the .sync.yaml says. Mirrors the list in folder-sync-v1-plan.md.
+ * what the .sync.jsonc says. Mirrors the list in folder-sync-v1-plan.md.
  *
- * The yaml file itself and the manifest file are *not* baked in here: those
+ * The config file itself and the manifest file are *not* baked in here: those
  * are matched by basename anywhere in the tree by the walker, so a deeply
- * nested .sync.yaml (e.g. for a nested source) is still excluded from its
+ * nested .sync.jsonc (e.g. for a nested source) is still excluded from its
  * parent's sync correctly.
  */
 export const BUILT_IN_IGNORES: readonly string[] = [
@@ -103,6 +103,6 @@ export const BUILT_IN_IGNORES: readonly string[] = [
   '**/.DS_Store',
   '**/Thumbs.db',
   '**/~$*',
-  '**/.sync.yaml',
+  '**/.sync.jsonc',
   '**/.foldersync-manifest.json',
 ];

@@ -38,9 +38,14 @@ src/
   webview.ts     ParseResult → HTML string (theme-aware CSS, inline)
   log.ts         OutputChannel + DevTools console mirror
   sync/          folder-sync feature — see below for the pure/wired split
+schemas/
+  sync.schema.json  JSON Schema for .sync.jsonc — registered via
+                    contributes.jsonValidation; powers IntelliSense in the
+                    raw-text editor
 test/
   parse.test.ts  Node-runnable smoke tests via tsx — `npm run test:parse`
-  sync-*.test.ts pure-module sync tests, one per concern (yaml, glob, plan, planview)
+  sync-*.test.ts pure-module sync tests, one per concern (jsonc, glob, plan,
+                 planview, executor, config-editor)
 scripts/
   fix-cpus.cjs        Termux compat shim (clamps os.cpus() for vsce)
   fix-platform.cjs    Termux compat shim (spoofs process.platform for playwright)
@@ -54,7 +59,7 @@ ecosystem.config.cjs  pm2 process layout (used on the VPS).
 
 `package.json` uses the `"browser"` entry (web-extension target), no `"main"` field. The esbuild build uses `platform: 'browser'`, format CJS (VS Code's web loader uses CommonJS-style `require`).
 
-Runtime dependencies are kept minimal: `fflate` for zip handling, browser-native `crypto.subtle` for hashing. No frameworks. Bundle size matters — this is a web extension and load time is part of the user experience.
+Runtime dependencies are kept minimal: `fflate` for zip handling, `jsonc-parser` for `.sync.jsonc` config + modification (the same parser VS Code ships internally), and browser-native `crypto.subtle` for hashing. No frameworks. Bundle size matters — this is a web extension and load time is part of the user experience.
 
 ---
 
@@ -171,7 +176,9 @@ Things tried and found wrong. Don't propose them again without new evidence:
 - **Build-info logged at activation.** `[pptx-viewer] build: <ISO timestamp> sha=<short git SHA>` printed to the Pptx Info output channel and DevTools console. Implemented by an esbuild `onEnd` plugin that text-replaces a placeholder string in the emitted bundle on every (re)build; the runtime side reads the inlined JSON. Lets the user instantly tell whether a stale browser cache is serving an old bundle.
 - **Per-file parse log.** `[pptx-viewer] parsed: <name> — <bytes> bytes, <N> slides (<M> hidden), <W> warning(s), thumbnail: <mime+size | none>` printed per file open. Diagnostic only — no behavioural effect.
 - **Download button.** Primary-styled button under the filename. Click → webview posts `{type:'download'}` to the extension → extension re-reads bytes from `document.uri` via `vscode.workspace.fs.readFile` (not retained after parse) → posts them back as `Uint8Array` → webview wraps in a `Blob` and triggers a hidden `<a download>` click. Browser handles the save dialog. A `download:` line is logged per click.
-- **Folder Sync — M1 + M2 + M3 shipped.** `.sync.yaml` discovery, topology resolution with hot reload, status bar item, and a categorised plan webview (`folderSync.openPlan` — palette only for now). The webview renders all six operation categories as collapsible `<details>` sections, with a traffic-light footer: green Proceed (disabled, lands in M4) for clean plans; orange + red Cancel when collisions are present. Cancel is the only wired action. The Output Channel still has `folderSync.dryRunPlan` for text-form debugging. Execution (writes + manifest persistence) is M4.
+- **Folder Sync — M1 through M4.5 shipped.** `.sync.jsonc` (post-M4.5 pivot from `.sync.yaml`) discovery, topology resolution with hot reload, status bar item, and a categorised plan webview (`folderSync.openPlan` — palette only for now). The webview renders all six operation categories as collapsible `<details>` sections, with a traffic-light footer: green Proceed wired (clean plans), orange + red on collisions (orange not yet wired — lands in M5). The Output Channel still has `folderSync.dryRunPlan` for text-form debugging. Execution (writes + manifest persistence) shipped in M4.
+
+  M4.5 added a custom text editor for `.sync.jsonc` (`folderSync.configEditor`): form fields for destinations (dropdowns of workspace folder names), subpath, include/exclude textareas, with form↔text two-way sync via `jsonc-parser`'s `modify()` API. A bundled JSON Schema at `schemas/sync.schema.json` provides IntelliSense + red squiggles in the raw-text editor. "Dry run" from the editor opens the workspace-wide plan webview in a separate panel.
 
 ---
 

@@ -1,7 +1,7 @@
 // Status bar item showing the current sync topology at a glance.
 //
 // States:
-//   - No workspace folders or no .sync.yaml found → "No sync configuration"
+//   - No workspace folders or no .sync.jsonc found → "No sync configuration"
 //   - N sources, M destinations → "$(sync) Folder Sync: N src · M dest"
 //   - Any error-severity diagnostic → "$(warning) Folder Sync: <count> issue(s)"
 //
@@ -36,7 +36,7 @@ function render(item: vscode.StatusBarItem, topology: ResolvedTopology): void {
 
   if (topology.sources.length === 0 && topology.failed.length === 0) {
     item.text = 'No sync configuration';
-    item.tooltip = 'No .sync.yaml files in the workspace. Click for details.';
+    item.tooltip = 'No .sync.jsonc files in the workspace. Click for details.';
     item.backgroundColor = undefined;
     return;
   }

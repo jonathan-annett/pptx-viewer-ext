@@ -290,7 +290,7 @@ function renderRow(row: PlanRowView): string {
 
 function renderEmpty(): string {
   return `<section class="pair">
-  <div class="banner info">No source/destination pairs to plan. Author a <code>.sync.yaml</code> file in a source folder and add the named destination to the workspace.</div>
+  <div class="banner info">No source/destination pairs to plan. Author a <code>.sync.jsonc</code> file in a source folder and add the named destination to the workspace.</div>
 </section>`;
 }
 

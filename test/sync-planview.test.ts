@@ -200,7 +200,7 @@ test('renderPlanHtml: empty plan renders the empty-state banner', () => {
   const vm = toViewModel([], FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
   assert.ok(html.includes('No source/destination pairs to plan'), 'empty banner missing');
-  assert.ok(html.includes('.sync.yaml'), 'authoring hint missing');
+  assert.ok(html.includes('.sync.jsonc'), 'authoring hint missing');
 });
 
 test('renderPlanHtml: hostile path is HTML-escaped', () => {

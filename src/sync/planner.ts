@@ -20,6 +20,7 @@ import { walkTree } from './walker';
 import { sha256Hex } from './hash';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
+import { parseSyncConfigText } from './config';
 import { log } from '../log';
 
 export interface PlanForDestination {
@@ -61,7 +62,7 @@ export async function buildDryRunPlan(
         include: sourceInclude,
       });
     } catch (err) {
-      log(`sync: source walk failed for ${source.yamlUri.toString()} — ${errMsg(err)}`);
+      log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
     }
 
     for (const dest of source.destinations) {
@@ -106,7 +107,7 @@ export async function buildDryRunPlan(
 }
 
 /**
- * Re-read the yaml so the planner can apply include/exclude. The manager
+ * Re-read the config so the planner can apply include/exclude. The manager
  * already validated it; here we just need the filter lists. Keeping this
  * inline avoids threading the parsed config through the topology type — the
  * source folder URI is stable and the file is small.
@@ -115,21 +116,11 @@ async function loadConfigForSource(
   source: ResolvedSource,
 ): Promise<{ include: string[]; exclude: string[] } | null> {
   try {
-    const bytes = await vscode.workspace.fs.readFile(source.yamlUri);
+    const bytes = await vscode.workspace.fs.readFile(source.configUri);
     const text = new TextDecoder().decode(bytes);
-    // Dynamic import keeps the yaml-mini code path out of the cold start;
-    // the import resolves to the bundled module at build time.
-    const { parseYamlMini } = await import('./yaml-mini');
-    const parsed = parseYamlMini(text);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const p = parsed as Record<string, unknown>;
-    const include = Array.isArray(p.include)
-      ? (p.include.filter((x): x is string => typeof x === 'string'))
-      : [];
-    const exclude = Array.isArray(p.exclude)
-      ? (p.exclude.filter((x): x is string => typeof x === 'string'))
-      : [];
-    return { include, exclude };
+    const parsed = parseSyncConfigText(text);
+    if (parsed.kind !== 'ok') return null;
+    return { include: parsed.config.include, exclude: parsed.config.exclude };
   } catch {
     return null;
   }

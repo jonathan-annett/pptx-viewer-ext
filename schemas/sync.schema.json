@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/jonathan-annett/pptx-viewer-ext/schemas/sync.schema.json",
+  "title": "Folder Sync configuration",
+  "description": "Configuration for a folder treated as a sync source. The folder containing this file is the source root; each entry in `destinations` names a workspace folder to sync into.",
+  "type": "object",
+  "required": ["destinations"],
+  "additionalProperties": false,
+  "properties": {
+    "destinations": {
+      "type": "array",
+      "description": "One or more destinations to sync this folder into. Each name must match a workspace folder currently open in vscode.dev.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name of a workspace folder open in vscode.dev. Unresolved names are skipped at sync time with a warning.",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "description": "Optional subpath within the destination workspace folder. Sync writes into `<workspaceFolder>/<path>`. Leave empty to write at the destination root."
+          }
+        }
+      }
+    },
+    "exclude": {
+      "type": "array",
+      "description": "Glob patterns to exclude, in addition to the built-in ignore list (.git, .DS_Store, ~$*, .sync.jsonc, .foldersync-manifest.json).",
+      "items": {
+        "type": "string",
+        "description": "Glob pattern. Supports *, ?, **, and trailing /** to match a directory and its contents."
+      }
+    },
+    "include": {
+      "type": "array",
+      "description": "Glob patterns to include. Omit (or leave empty) to include everything not excluded.",
+      "items": {
+        "type": "string",
+        "description": "Glob pattern. Supports *, ?, **, and trailing /** to match a directory and its contents."
+      }
+    }
+  }
+}

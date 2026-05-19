@@ -13,7 +13,7 @@ import * as vscode from 'vscode';
 import type { SourceLoad } from './config';
 
 export interface ResolvedDestination {
-  /** Original name as written in the yaml. */
+  /** Original name as written in the config. */
   name: string;
   /** Subpath within the destination workspace folder (already normalised). */
   subpath: string;
@@ -24,7 +24,7 @@ export interface ResolvedDestination {
 }
 
 export interface ResolvedSource {
-  yamlUri: vscode.Uri;
+  configUri: vscode.Uri;
   sourceFolderUri: vscode.Uri;
   workspaceFolderUri: vscode.Uri;
   /** Name of the source's enclosing workspace folder. Used as the source
@@ -36,8 +36,8 @@ export interface ResolvedSource {
 export interface Diagnostic {
   severity: 'error' | 'warning';
   message: string;
-  /** Yaml file the diagnostic is attached to, when applicable. */
-  yamlUri?: vscode.Uri;
+  /** Config file the diagnostic is attached to, when applicable. */
+  configUri?: vscode.Uri;
 }
 
 export interface ResolvedTopology {
@@ -67,8 +67,8 @@ export function resolveTopology(
       failed.push(load);
       diagnostics.push({
         severity: 'error',
-        message: `${displayUri(load.yamlUri)}: ${load.error ?? 'unknown error'}`,
-        yamlUri: load.yamlUri,
+        message: `${displayUri(load.configUri)}: ${load.error ?? 'unknown error'}`,
+        configUri: load.configUri,
       });
       continue;
     }
@@ -82,8 +82,8 @@ export function resolveTopology(
       if (seenSubpaths.has(dupeKey)) {
         diagnostics.push({
           severity: 'error',
-          message: `${displayUri(load.yamlUri)}: duplicate destination '${dest.name}'${subpath ? ` at '${subpath}'` : ''}`,
-          yamlUri: load.yamlUri,
+          message: `${displayUri(load.configUri)}: duplicate destination '${dest.name}'${subpath ? ` at '${subpath}'` : ''}`,
+          configUri: load.configUri,
         });
         continue;
       }
@@ -92,8 +92,8 @@ export function resolveTopology(
       if (!folder) {
         diagnostics.push({
           severity: 'warning',
-          message: `${displayUri(load.yamlUri)}: destination '${dest.name}' is not currently in the workspace`,
-          yamlUri: load.yamlUri,
+          message: `${displayUri(load.configUri)}: destination '${dest.name}' is not currently in the workspace`,
+          configUri: load.configUri,
         });
         resolved.push({
           name: dest.name,
@@ -114,7 +114,7 @@ export function resolveTopology(
 
     const sourceWsFolder = byUri.get(load.workspaceFolderUri.toString());
     sources.push({
-      yamlUri: load.yamlUri,
+      configUri: load.configUri,
       sourceFolderUri: load.sourceFolderUri,
       workspaceFolderUri: load.workspaceFolderUri,
       workspaceFolderName: sourceWsFolder?.name ?? '<unknown>',
@@ -136,7 +136,7 @@ export function resolveTopology(
   }
   for (const [key, list] of claimants) {
     if (list.length > 1) {
-      const where = list.map((s) => displayUri(s.yamlUri)).join(', ');
+      const where = list.map((s) => displayUri(s.configUri)).join(', ');
       diagnostics.push({
         severity: 'error',
         message: `subpath collision at ${key}: claimed by multiple sources (${where})`,
@@ -152,7 +152,7 @@ export function formatTopology(topology: ResolvedTopology): string {
   const lines: string[] = [];
   lines.push(`Sources: ${topology.sources.length}, failed: ${topology.failed.length}`);
   for (const src of topology.sources) {
-    lines.push(`  ${displayUri(src.yamlUri)}`);
+    lines.push(`  ${displayUri(src.configUri)}`);
     if (src.destinations.length === 0) {
       lines.push('    (no destinations)');
     }
@@ -167,7 +167,7 @@ export function formatTopology(topology: ResolvedTopology): string {
   if (topology.failed.length > 0) {
     lines.push('Failed sources:');
     for (const f of topology.failed) {
-      lines.push(`  ${displayUri(f.yamlUri)}: ${f.error ?? '?'}`);
+      lines.push(`  ${displayUri(f.configUri)}: ${f.error ?? '?'}`);
     }
   }
   if (topology.diagnostics.length > 0) {

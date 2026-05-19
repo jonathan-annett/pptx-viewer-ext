@@ -34,55 +34,57 @@ Once installed, activation and per-file events are logged in two places:
 ## Folder sync (in development)
 
 The folder-sync feature is being shipped incrementally. Currently landed
-(milestone M1):
+(milestones M1 through M4.5):
 
-- `.sync.yaml` discovery across all workspace folders
+- `.sync.jsonc` discovery across all workspace folders (JSON with comments
+  + trailing commas, same dialect as VS Code's `settings.json`)
 - Schema validation and topology resolution (matching destination names to
   open workspace folders, detecting subpath collisions)
-- Hot-reload via `FileSystemWatcher` — edit a yaml and the topology
+- Hot-reload via `FileSystemWatcher` — edit a config and the topology
   re-resolves
+- Bundled JSON Schema → IntelliSense + red squiggles when editing as text
+- Custom editor for `.sync.jsonc` with form-style destination/path/glob
+  controls and a Dry run button
+- Plan engine + categorised plan webview + executor with manifest writes
 - Status bar item showing source/destination counts and any issues
-- Command palette: **Folder Sync: Show Topology** — dumps the resolved view
-  to the Output Channel
+- Commands: **Folder Sync: Show Topology**, **Show Plan**, **Dry-Run Plan**
 
-No filesystem writes happen yet — the plan engine, plan webview, executor,
-and manifest layer ship in later milestones (M2–M6). See
-`folder-sync-v1-plan.md` at the repo root for the full spec.
+Interactive decision UI (collisions, destination-only, validator warnings,
+"don't ask again" persistence) ships in M5. See `folder-sync-v1-plan.md` at
+the repo root for the full spec.
 
-### `.sync.yaml` example
+### `.sync.jsonc` example
 
-```yaml
-# .sync.yaml at the root of any folder you want treated as a source.
-# This file itself is implicitly excluded from sync.
+```jsonc
+// .sync.jsonc at the root of any folder you want treated as a source.
+// This file itself is implicitly excluded from sync.
+{
+  "destinations": [
+    // Minimal: just a workspace folder name. Whole source goes to the
+    // destination's root.
+    { "name": "usb-backup" },
 
-destinations:
-  # Minimal: just a workspace folder name. Whole source goes to the
-  # destination's root.
-  - name: usb-backup
+    // With a subpath — the source maps into a nested location.
+    { "name": "nas-archive", "path": "projects/alpha/2026" },
 
-  # With a subpath — the source maps into a nested location.
-  - name: nas-archive
-    path: projects/alpha/2026
+    // Multiple destinations are independent; each gets the full source
+    // (filtered by the include/exclude rules below).
+    { "name": "dropbox-mirror", "path": "work/alpha" }
+  ],
 
-  # Multiple destinations are independent; each gets the full source
-  # (filtered by the include/exclude rules below).
-  - name: dropbox-mirror
-    path: work/alpha
+  // Glob patterns excluded in addition to the built-in ignores
+  // (.git/, .DS_Store, Thumbs.db, ~$*, .sync.jsonc itself,
+  // .foldersync-manifest.json).
+  "exclude": [
+    "node_modules/**",
+    "*.tmp",
+    "build/**",
+    ".vscode/**",
+    "**/*.log"
+  ]
 
-# Glob patterns excluded in addition to the built-in ignores
-# (.git/, .DS_Store, Thumbs.db, ~$*, .sync.yaml itself,
-# .foldersync-manifest.json).
-exclude:
-  - "node_modules/**"
-  - "*.tmp"
-  - "build/**"
-  - ".vscode/**"
-  - "**/*.log"
-
-# Optional. Default is everything not excluded — only set this if you
-# want to whitelist specific patterns.
-include:
-  - "**/*"
+  // include is optional. Default is everything not excluded.
+}
 ```
 
 ### Field meanings
@@ -92,18 +94,17 @@ include:
   at sync time.
 - `destinations[].path` — optional subpath under the destination. Normalised
   (no leading or trailing slashes, no doubled separators).
-- `exclude` / `include` — glob patterns. The parser accepts them today;
-  enforcement lands with the plan engine in M2.
+- `exclude` / `include` — glob patterns. Built-in ignores are always applied.
 
-### What to look for when testing M1
+### What to look for when testing
 
 - Workspace folder names in vscode.dev come from whatever you add via
   *Add Folder to Workspace*. Pick simple, distinctive names — collisions
   across destinations are detected and reported.
-- Two sources writing to the same destination subpath (e.g. both `.sync.yaml`
-  files declaring `name: usb-backup` with no `path`) trigger the collision
-  diagnostic.
-- An invalid yaml gets a `yaml parse error: line N:` message in the Output
+- Two sources writing to the same destination subpath (e.g. both
+  `.sync.jsonc` files declaring `name: usb-backup` with no `path`) trigger
+  the collision diagnostic.
+- An invalid config gets a `jsonc parse error: ...` message in the Output
   Channel, the affected source is skipped, and the rest of the topology
   still loads.
 
@@ -211,17 +212,37 @@ src/
   pptx.ts          parse pptx bytes -> ParseResult
   webview.ts       ParseResult -> HTML string
   log.ts           OutputChannel + console mirror
-  sync/            folder sync feature (in development)
-    yaml-mini.ts     minimal YAML subset parser (no runtime deps)
-    config.ts        .sync.yaml loader + schema validation
-    topology.ts      destination resolution + collision detection
-    manager.ts       discovery, hot-reload, topology lifecycle
-    statusBar.ts     status bar item
+  sync/            folder sync feature
+    configParse.ts     pure jsonc parse + schema validation (tsx-testable)
+    config.ts          vscode-wired loader
+    topology.ts        destination resolution + collision detection
+    manager.ts         discovery, hot-reload, topology lifecycle
+    statusBar.ts       status bar item
+    plan.ts            pure classifier (six operation categories)
+    planner.ts         vscode-wired walk + hash + plan assembly
+    planHtml.ts        pure plan webview renderer
+    planView.ts        vscode-wired plan webview panel
+    walker.ts          tree walk respecting includes/excludes
+    glob.ts            glob → regex compiler + built-in ignore list
+    hash.ts            SHA-256 via crypto.subtle
+    manifest-types.ts  pure manifest schema
+    manifest.ts        vscode-wired manifest I/O
+    executor.ts        pure executor (injected SyncFs)
+    runSync.ts         vscode-wired orchestrator
+    configEditorHtml.ts  pure renderer for the .sync.jsonc form editor
+    configEditor.ts      vscode-wired CustomTextEditorProvider
+schemas/
+  sync.schema.json   JSON Schema for .sync.jsonc; powers IntelliSense
 scripts/
   fix-cpus.cjs       Termux workaround for vsce
   fix-platform.cjs   Termux workaround for vscode-test-web
   publish-web.cjs    atomic GitHub Pages deploy
 test/
-  parse.test.ts    Node-runnable pptx parser smoke test
-  sync-yaml.test.ts  Node-runnable mini YAML parser test
+  parse.test.ts             pptx parser smoke test
+  sync-jsonc.test.ts        jsonc parse + schema validation
+  sync-glob.test.ts         glob matcher
+  sync-plan.test.ts         operation classifier
+  sync-planview.test.ts     plan webview HTML renderer
+  sync-executor.test.ts     pure executor
+  sync-config-editor.test.ts form editor HTML renderer
 ```

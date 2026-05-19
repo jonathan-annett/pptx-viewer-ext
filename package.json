@@ -32,6 +32,22 @@
           }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "folderSync.configEditor",
+        "displayName": "Folder Sync configuration",
+        "selector": [
+          {
+            "filenamePattern": ".sync.jsonc"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.sync.jsonc",
+        "url": "./schemas/sync.schema.json"
       }
     ],
     "commands": [
@@ -59,11 +75,12 @@
     "watch": "node esbuild.config.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
-    "test:sync-yaml": "node --import tsx test/sync-yaml.test.ts",
+    "test:sync-jsonc": "node --import tsx test/sync-jsonc.test.ts",
     "test:sync-glob": "node --import tsx test/sync-glob.test.ts",
     "test:sync-plan": "node --import tsx test/sync-plan.test.ts",
     "test:sync-planview": "node --import tsx test/sync-planview.test.ts",
     "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
+    "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
@@ -74,7 +91,8 @@
     "folder": "vscode-ext-dev/pptx-viewer-ext"
   },
   "dependencies": {
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
