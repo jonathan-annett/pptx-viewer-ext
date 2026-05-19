@@ -218,6 +218,16 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         if (syncInFlight) return;
         if (!lastPerFileHasWork && countAccepted(lastPerFileDecisions) === 0) {
           log(`viewer[${fileName}]: run-sync ignored — nothing to do`);
+          // Defensive: the webview has locked its buttons into "Syncing…"
+          // on click. Post a terminal status so it unlocks even though we
+          // never started execution. Without this the orange button stays
+          // pinned in its locked label forever.
+          webviewPanel.webview.postMessage({
+            type: 'sync-status',
+            status: 'done',
+            ok: 0,
+            failed: 0,
+          });
           return;
         }
         syncInFlight = true;
@@ -789,11 +799,18 @@ function renderRunSyncRow(
     create: number;
     updateTracked: number;
     deleteTracked: number;
+    destinationOnly: number;
   },
 ): string {
   const collisions = totals.updateCollision;
   const blocking = collisions + totals.warnings;
   const safeUpper = totals.create + totals.updateTracked + totals.deleteTracked;
+  // Items the orange "safe items only" button can actually ship when armed:
+  // collisions (overwrite decision), destination-only (delete decision), and
+  // create/update-tracked rows that may carry an overridable warning. A
+  // skip-row with an overridable warning has nothing to ship — the file is
+  // already in sync — so it doesn't count.
+  const shippable = collisions + totals.destinationOnly + safeUpper;
 
   let hint = '';
   let greenDisabled = '';
@@ -811,9 +828,14 @@ function renderRunSyncRow(
         `${totals.overridableWarnings} file${totals.overridableWarnings === 1 ? '' : 's'} needing override`,
       );
     }
-    if (safeUpper > 0 || collisions > 0 || totals.overridableWarnings > 0) {
+    if (shippable > 0) {
       orangeAttrs = '';
       hint = `${parts.join(' + ')} — orange ships armed overrides or skips the rest.`;
+    } else if (totals.overridableWarnings > 0 && !hasWork) {
+      // Skip-row(s) carry an overridable warning, but there's nothing to
+      // ship — destination already matches source. The warning is purely
+      // informational in this case.
+      hint = 'Destination already matches source — validator warning is informational.';
     } else {
       hint = `${parts.join(' + ')} — cannot ship; fix the source file and re-open.`;
     }
