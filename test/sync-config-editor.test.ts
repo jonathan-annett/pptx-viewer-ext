@@ -67,8 +67,31 @@ test('renders the standard form sections', () => {
   assert.match(html, /<h2>Include<\/h2>/);
   assert.match(html, /<h2>Exclude<\/h2>/);
   assert.match(html, /id="add-dest"/);
-  assert.match(html, /id="dry-run"/);
+  assert.match(html, /id="open-workspace-plan"/);
   assert.match(html, /id="open-text"/);
+});
+
+test('renders the embedded room-scoped plan section', () => {
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  // The plan card hosts the auto-running scoped dry-run. Initial state is
+  // "Scanning…" — the extension posts a `planStatus` message once the
+  // walk + classify finish (or fails).
+  assert.match(html, /<h2>Dry-run plan — this room<\/h2>/);
+  assert.match(html, /id="plan-status"/);
+  assert.match(html, /id="plan-totals"/);
+  assert.match(html, /id="plan-pairs"/);
+  assert.match(html, /id="plan-refresh"/);
+  // The initial banner is the scanning indicator — the page-load state.
+  assert.match(html, /class="plan-status plan-scanning">Scanning/);
+});
+
+test('relabelled action button references the workspace-wide plan, not "dry run"', () => {
+  // M4.7 renamed "Open dry-run plan" → "Open workspace-wide plan" so the
+  // scope distinction from the embedded plan card is explicit. Regression
+  // guard against accidentally reverting the label.
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.match(html, /Open workspace-wide plan/);
+  assert.ok(!/>Open dry-run plan</.test(html), 'old "Open dry-run plan" label should not appear');
 });
 
 test('payload escapes </ to prevent script-tag breakout', () => {

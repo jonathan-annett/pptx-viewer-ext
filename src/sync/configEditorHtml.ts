@@ -9,6 +9,7 @@
 // jsonc-parser's modification API so comments + formatting are preserved.
 
 import type { SyncConfig } from './configParse';
+import { planContentStyles } from './planHtml';
 
 export interface ConfigEditorViewModel {
   /** Initial config to pre-fill the form. */
@@ -44,7 +45,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';">
 <title>Folder Sync configuration</title>
-<style>${STYLE}</style>
+<style>${STYLE}${planContentStyles()}${EMBEDDED_PLAN_STYLE}</style>
 </head>
 <body>
   <header class="page-header">
@@ -73,12 +74,23 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     <textarea id="exclude" rows="4" spellcheck="false"></textarea>
   </section>
 
+  <section class="card plan-card">
+    <div class="plan-card-head">
+      <h2>Dry-run plan — this room</h2>
+      <button id="plan-refresh" class="btn btn-secondary btn-sm" type="button" title="Re-scan the source folder and rebuild the plan">Refresh</button>
+    </div>
+    <p class="hint">Auto-runs whenever this file or the source folder changes. Limited to the destinations declared above — use <em>Open workspace-wide plan</em> below for the whole workspace.</p>
+    <div id="plan-status" class="plan-status plan-scanning">Scanning…</div>
+    <div id="plan-totals" class="totals" hidden></div>
+    <div id="plan-pairs" class="plan-pairs"></div>
+  </section>
+
   <section class="actions">
-    <button id="dry-run" class="btn btn-primary" type="button">Open dry-run plan</button>
+    <button id="open-workspace-plan" class="btn btn-secondary" type="button">Open workspace-wide plan</button>
     <button id="open-text" class="btn btn-secondary" type="button">Reopen as text</button>
   </section>
 
-  <p class="hint">Dry run opens the workspace-wide plan in a separate panel. No files are written.</p>
+  <p class="hint">Workspace-wide plan opens in a separate panel and covers every <code>.sync.jsonc</code> in the workspace. No files are written until you click Proceed there.</p>
 
   <script id="init-payload" type="application/json" nonce="${nonce}">${initialPayload}</script>
   <script nonce="${nonce}">${CLIENT_JS}</script>
@@ -184,6 +196,54 @@ textarea { resize: vertical; min-height: 60px; }
   cursor: pointer;
 }
 .actions { display: flex; gap: 8px; margin: 16px 0 8px; }
+`;
+
+// Styles that complement planContentStyles() inside the embedded plan card.
+// planContentStyles supplies `.totals`/`.pair`/`.sec`/`.rows`/`.banner` —
+// these rules add the host-side framing (card header row, status pill,
+// scanning shimmer) and tighten spacing so the section reads as one unit.
+const EMBEDDED_PLAN_STYLE = `
+.plan-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.plan-card-head h2 { margin: 0; }
+.btn-sm { padding: 3px 10px; font-size: 0.9em; }
+.plan-status {
+  font-size: 0.9em;
+  margin: 6px 0 10px;
+  color: var(--vscode-descriptionForeground);
+}
+.plan-scanning::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--vscode-progressBar-background, var(--vscode-foreground));
+  opacity: 0.55;
+  animation: plan-pulse 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+@keyframes plan-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.85; }
+}
+.plan-error {
+  color: var(--vscode-errorForeground);
+}
+.plan-error .plan-retry {
+  margin-left: 8px;
+}
+.plan-card .totals { margin-bottom: 8px; }
+.plan-card .pair {
+  /* Tighten the pair card so it sits more naturally inside the section */
+  margin: 8px 0;
+  padding: 8px 12px;
+}
 `;
 
 // ───── client-side JS ──────────────────────────────────────────────────
@@ -325,12 +385,74 @@ const CLIENT_JS = `
     });
   }
 
-  document.getElementById('dry-run').addEventListener('click', () => {
-    vscode.postMessage({ type: 'requestDryRun' });
+  document.getElementById('open-workspace-plan').addEventListener('click', () => {
+    vscode.postMessage({ type: 'openWorkspacePlan' });
   });
 
   document.getElementById('open-text').addEventListener('click', () => {
     vscode.postMessage({ type: 'openAsText' });
+  });
+
+  // ───── embedded plan section ──────────────────────────────────────
+  const planStatusEl = document.getElementById('plan-status');
+  const planTotalsEl = document.getElementById('plan-totals');
+  const planPairsEl = document.getElementById('plan-pairs');
+  const planRefreshBtn = document.getElementById('plan-refresh');
+
+  function setPlanScanning() {
+    planStatusEl.className = 'plan-status plan-scanning';
+    planStatusEl.textContent = 'Scanning…';
+    planRefreshBtn.disabled = true;
+  }
+
+  function setPlanReady(msg) {
+    planRefreshBtn.disabled = false;
+    if (msg.empty) {
+      planStatusEl.className = 'plan-status';
+      planStatusEl.textContent =
+        'No destinations to plan — add one above (the dropdown values come from your open workspace folders).';
+      planTotalsEl.innerHTML = '';
+      planTotalsEl.hidden = true;
+      planPairsEl.innerHTML = '';
+      return;
+    }
+    planStatusEl.className = 'plan-status';
+    // Compact summary line so the user gets a one-glance read even before
+    // expanding sections. The chip strip below gives the colour-coded counts.
+    const t = msg.totals || {};
+    const parts = [];
+    if (t.create) parts.push(t.create + ' to create');
+    if (t.updateTracked) parts.push(t.updateTracked + ' to update');
+    if (t.updateCollision) parts.push(t.updateCollision + ' collision' + (t.updateCollision === 1 ? '' : 's'));
+    if (t.deleteTracked) parts.push(t.deleteTracked + ' to delete');
+    if (t.destinationOnly) parts.push(t.destinationOnly + ' destination-only');
+    if (parts.length === 0) parts.push('in sync');
+    planStatusEl.textContent = 'Plan: ' + parts.join(', ') + '.';
+    planTotalsEl.innerHTML = msg.chipsHtml || '';
+    planTotalsEl.hidden = !msg.chipsHtml;
+    planPairsEl.innerHTML = msg.pairsHtml || '';
+  }
+
+  function setPlanError(errorMsg) {
+    planRefreshBtn.disabled = false;
+    planStatusEl.className = 'plan-status plan-error';
+    planStatusEl.innerHTML =
+      'Error: ' +
+      String(errorMsg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') +
+      ' <button type="button" class="btn btn-secondary btn-sm plan-retry">Retry</button>';
+    const retry = planStatusEl.querySelector('.plan-retry');
+    if (retry) retry.addEventListener('click', () => {
+      setPlanScanning();
+      vscode.postMessage({ type: 'refreshPlan' });
+    });
+    planTotalsEl.innerHTML = '';
+    planTotalsEl.hidden = true;
+    planPairsEl.innerHTML = '';
+  }
+
+  planRefreshBtn.addEventListener('click', () => {
+    setPlanScanning();
+    vscode.postMessage({ type: 'refreshPlan' });
   });
 
   window.addEventListener('message', (ev) => {
@@ -355,6 +477,10 @@ const CLIENT_JS = `
     } else if (msg.type === 'folderNamesChanged') {
       state.folderNames = msg.workspaceFolderNames || [];
       renderDestList();
+    } else if (msg.type === 'planStatus') {
+      if (msg.status === 'scanning') setPlanScanning();
+      else if (msg.status === 'ready') setPlanReady(msg);
+      else if (msg.status === 'error') setPlanError(msg.error || 'unknown error');
     }
   });
 

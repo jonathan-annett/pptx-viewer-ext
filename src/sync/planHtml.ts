@@ -188,7 +188,7 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
       <div class="totals">${renderTotals(t)}</div>
     </header>
 
-    ${vm.pairs.length === 0 ? renderEmpty() : vm.pairs.map(renderPair).join('\n')}
+    ${renderPlanPairs(vm)}
 
     <footer class="plan-foot" role="group" aria-label="Plan actions">
       ${renderFooter(blocking, hasWork)}
@@ -197,6 +197,35 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
   <script nonce="${nonce}">${footerScript()}</script>
 </body>
 </html>`;
+}
+
+/**
+ * Pure: render the totals chips strip as the inner HTML of a `.totals`
+ * container. The standalone plan webview wraps it; the embedded callers
+ * (config editor, admin editor) post just this string back into the page.
+ */
+export function renderPlanChips(t: PlanTotals): string {
+  return renderTotals(t);
+}
+
+/**
+ * Pure: render the per-pair sections (or the empty-state banner). Embedded
+ * callers slot this into their own page chrome. Pairs and rows use the
+ * `.pair`/`.sec`/`.rows` selectors emitted by `planContentStyles()`.
+ */
+export function renderPlanPairs(vm: PlanViewModel): string {
+  return vm.pairs.length === 0
+    ? renderEmpty()
+    : vm.pairs.map(renderPair).join('\n');
+}
+
+/**
+ * Pure: the subset of plan-view CSS needed when embedding into a host
+ * webview. Excludes page-level resets (body/main/h1/code) and the standalone
+ * footer/action buttons — the host already owns those concerns.
+ */
+export function planContentStyles(): string {
+  return planContentCss();
 }
 
 function renderTotals(t: PlanTotals): string {
@@ -378,6 +407,13 @@ function css(): string {
   // - The footer is `position: sticky; bottom: 0;` so it stays visible while
   //   the user scrolls through a long plan. Sticky is the lightweight cousin
   //   of position:fixed — it stays in flow until it hits its anchor edge.
+  return planPageCss() + planContentCss() + planFooterCss();
+}
+
+function planPageCss(): string {
+  // Page-level chrome only used by the standalone plan webview. Embedded
+  // callers (config/admin editor) own their own body/main/h1/code styles
+  // and would collide with these rules.
   return `
     :root { color-scheme: light dark; }
     body {
@@ -403,7 +439,11 @@ function css(): string {
       padding: 0 4px;
       border-radius: 3px;
     }
+  `;
+}
 
+function planContentCss(): string {
+  return `
     .plan-head { margin-bottom: 16px; }
 
     /* Totals strip: small inline chips. Flex with wrap so the strip reflows
@@ -519,7 +559,14 @@ function css(): string {
       color: var(--vscode-descriptionForeground);
       opacity: 0.8;
     }
+  `;
+}
 
+function planFooterCss(): string {
+  // Sticky footer + action button styles. The embedded plan sections don't
+  // ship their own Proceed/Cancel — they delegate to the host editor (or
+  // to the standalone "Open workspace-wide plan" button).
+  return `
     /* Sticky footer = traffic-light controls. Stays put while you scroll.
        The blur background keeps text legible over the page content behind. */
     .plan-foot {

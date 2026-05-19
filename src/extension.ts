@@ -57,7 +57,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     startSnapshotWriter(snapshotStore, (listener) => manager.onDidChange(listener)),
   );
   createStatusBarItem(context, manager);
-  context.subscriptions.push(SyncConfigEditorProvider.register());
+  context.subscriptions.push(SyncConfigEditorProvider.register(manager));
   log('activate: .sync.jsonc custom editor registered');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore));
   log('activate: .admin-sync.jsonc custom editor registered');
