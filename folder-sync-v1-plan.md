@@ -745,4 +745,30 @@ Open questions for when this lands:
 - The LRU should probably be in `src/pptx.ts` itself — `parsePptx` wraps its own work with a cache check — so every caller benefits transparently. The IndexedDB tier sits behind a small async adapter that's a no-op if IndexedDB isn't available, keeping the parser usable from tsx tests.
 - Cache hit-rate diagnostics in the activation log would tell us whether the IndexedDB tier is earning its keep (cold vs warm hit ratio per refresh).
 
-Slotting target: revisit when M5's validator pass is actually exercised against real-world room sizes. Until then this is a known optimisation, not a current bottleneck.
+Slotting target: revisit when M5's validator pass is actually exercised against real-world room sizes. Until then this is a known optimisation, not a current bottleneck. **Now considered a prerequisite for the focus-following panel below** — that feature multiplies the validator pass across every focus change, so it can't ship until the cache lands.
+
+### Focus-following dry-run panel
+
+A `WebviewView` contributed to the `panel` view container (alongside Problems / Output / Terminal) that auto-renders the dry-run plan most relevant to whatever the user is currently looking at. Keeps the pptx viewer's embedded per-file dry-run exactly as it is today; this is an additional surface, not a replacement.
+
+Focus → plan mapping:
+
+- **Active editor is a file under a sync source** → scoped dry-run for that file's containing folder (nearest `.sync.jsonc` walking up).
+- **Active editor is the workspace root, empty, or outside any source** → workspace-wide plan (the same one `folderSync.openPlan` currently produces).
+- **User wants to peek at a specific folder without opening a file in it** → Explorer context-menu entry `Folder Sync: Show plan for this folder` that retargets the panel. VS Code has no public "Explorer selection changed" event, so this can't be made automatic; the menu command is the conventional substitute.
+- **Optional in-panel breadcrumb / scope picker** if context-menu discoverability proves weak.
+
+Wiring sketch:
+
+- `viewsContainers.panel` + `views.webview` contribution; `registerWebviewViewProvider` on activation.
+- `window.onDidChangeActiveTextEditor` + `window.tabGroups.onDidChangeTabs` (for custom editors like the pptx viewer) → debounced ~150ms → recompute scope → re-render.
+- Reuses `renderPlanHtml` / `toViewModel` unchanged; the existing decision + Proceed wiring carries over because the message protocol is identical.
+- `retainContextWhenHidden: true` so the user's in-progress decision toggles survive when they switch to Terminal and back. Decisions still don't persist across VS Code reloads — that's still the manifest's `decisions` block's job.
+
+Costs and constraints:
+
+- **Plan rebuilds are not free.** Every focus change re-walks + re-hashes both sides and runs validators. Without the parse cache above, alt-tabbing between pptx files in the same folder re-parses each one — exactly the wrong shape for an always-visible panel. This is why the cache is the prerequisite.
+- **Cache keyed by `(scope, configFile-mtime)`** at the planner level so repeated focuses inside the same folder hit a memoised plan rather than rebuilding. Invalidated by `.sync.jsonc` edits (the existing hot-reload signal) and by destination filesystem changes (M6's destination reverse pass already needs this signal).
+- **Panel area is short and wide** — the current plan layout assumes a tall column with a sticky footer. Re-flow needed: totals on one line, per-pair sections collapsed by default, footer buttons inline-right rather than sticky.
+
+Slotting target: after the parse cache lands and after M5 is signed off, so the cache is proven and the decision UX is stable before it gets a more prominent surface.
