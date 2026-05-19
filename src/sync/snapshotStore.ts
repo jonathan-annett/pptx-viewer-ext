@@ -83,14 +83,47 @@ export class SnapshotStore {
   }
 
   /**
-   * Atomic write: tmp + rename. Mirrors `writeManifest` exactly so the two
-   * paths share a failure model. Returns the final URI on success; throws
-   * on failure so the caller can decide whether to surface or swallow.
+   * Write the snapshot to disk. Two paths:
+   *
+   * 1. If a TextDocument is currently open on the target URI (typically
+   *    because the admin custom editor is showing the file), route the
+   *    write through `vscode.workspace.applyEdit` + `TextDocument.save()`.
+   *    The atomic tmp+rename pattern below replaces the file on disk,
+   *    which VS Code surfaces as a delete-and-recreate — the backing
+   *    document is disposed and any custom editor bound to it closes.
+   *    applyEdit goes through the document model, so the editor stays
+   *    alive and receives `onDidChangeTextDocument`.
+   *
+   * 2. Otherwise, atomic write: tmp + rename. Mirrors `writeManifest`
+   *    exactly so the two paths share a failure model.
+   *
+   * Returns the final URI on success; throws on failure so the caller
+   * can decide whether to surface or swallow.
    */
   async writeSnapshot(folderUri: vscode.Uri, snapshot: Snapshot): Promise<vscode.Uri> {
     const finalUri = snapshotUri(folderUri);
+    const text = marshalSnapshot(snapshot);
+
+    const openDoc = vscode.workspace.textDocuments.find(
+      (d) => d.uri.toString() === finalUri.toString(),
+    );
+    if (openDoc) {
+      const edit = new vscode.WorkspaceEdit();
+      const fullRange = new vscode.Range(
+        openDoc.positionAt(0),
+        openDoc.positionAt(openDoc.getText().length),
+      );
+      edit.replace(finalUri, fullRange, text);
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) throw new Error('applyEdit rejected for snapshot file');
+      // Persist to disk so a cold-start activation can read it without
+      // depending on the document still being open.
+      await openDoc.save();
+      return finalUri;
+    }
+
     const tmpUri = folderUri.with({ path: `${finalUri.path}.tmp` });
-    const bytes = new TextEncoder().encode(marshalSnapshot(snapshot));
+    const bytes = new TextEncoder().encode(text);
     await vscode.workspace.fs.writeFile(tmpUri, bytes);
     try {
       await vscode.workspace.fs.rename(tmpUri, finalUri, { overwrite: true });
