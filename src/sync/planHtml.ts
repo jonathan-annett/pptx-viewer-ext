@@ -31,11 +31,34 @@ export interface PlanRowView {
    * a warning" view, deduplicated from the primary category sections.
    */
   warnings?: PlanWarningView[];
+  /**
+   * Interactive decision attached at view-model time for collision and
+   * destination-only rows. The webview emits a `<input type=checkbox>`
+   * keyed to `id`; the webview script tracks the state, posts toggles to
+   * the extension, and recomputes the "all blocks decided" flag that drives
+   * the footer's traffic-light state. Other rows (creates, skips, updates,
+   * delete-tracked) have no decision affordance — they're either always
+   * safe (greens) or already accounted for by the manifest.
+   */
+  decision?: PlanRowDecisionView;
 }
 
 export interface PlanWarningView {
   code: string;
   message: string;
+}
+
+export interface PlanRowDecisionView {
+  /**
+   * Stable across renders within the same plan view, so the webview script
+   * can persist toggle state across DOM updates if it ever rebuilds the
+   * row list. Format: `${pairIndex}:${kind}:${relPath}`.
+   */
+  id: string;
+  /** Which user-intent this row collects. */
+  kind: 'overwrite' | 'delete';
+  /** Checkbox-adjacent label, e.g. "Overwrite" or "Delete from destination". */
+  label: string;
 }
 
 export interface PlanPairView {
@@ -75,6 +98,18 @@ export interface PlanViewModel {
   totals: PlanTotals;
 }
 
+export interface ToViewModelOpts {
+  /**
+   * When `true` (default), collision rows get an Overwrite checkbox and
+   * destination-only rows get a Delete checkbox — wired up by the
+   * standalone plan webview's footer script. Embedded callers (config
+   * editor preview, admin editor, viewer sync-target preview) pass
+   * `false`: they show the same row data read-only, with no decision UI,
+   * because they have no message channel back to the plan controller.
+   */
+  interactive?: boolean;
+}
+
 /**
  * Turn the planner's output into a serializable view model. The `labelSource`
  * callback resolves a source's display label — supplied by the caller so
@@ -83,7 +118,9 @@ export interface PlanViewModel {
 export function toViewModel(
   plans: readonly PlanForDestination[],
   labelSource: (plan: PlanForDestination) => string,
+  opts: ToViewModelOpts = {},
 ): PlanViewModel {
+  const interactive = opts.interactive !== false;
   const pairs: PlanPairView[] = [];
   const totals: PlanTotals = {
     create: 0,
@@ -99,7 +136,9 @@ export function toViewModel(
   let destCount = 0;
   const seenSources = new Set<string>();
 
+  let pairIndex = -1;
   for (const plan of plans) {
+    pairIndex++;
     const srcKey = labelSource(plan);
     seenSources.add(srcKey);
     destCount++;
@@ -128,16 +167,37 @@ export function toViewModel(
     totals.destinationOnly += s.destinationOnly.length;
     totals.warnings += s.warnings.length;
 
+    // Collision rows offer an "Overwrite" decision; destination-only rows
+    // offer a "Delete from destination" decision. Both default unchecked —
+    // the user has to actively opt in. Suppressed entirely when the caller
+    // requested a non-interactive view (no message channel back).
+    const overwriteDecision = (item: PlanItem): PlanRowView =>
+      interactive
+        ? withDecision(toRow(item), {
+            id: `${pairIndex}:overwrite:${item.relPath}`,
+            kind: 'overwrite',
+            label: 'Overwrite',
+          })
+        : toRow(item);
+    const deleteDecision = (item: PlanItem): PlanRowView =>
+      interactive
+        ? withDecision(toRow(item), {
+            id: `${pairIndex}:delete:${item.relPath}`,
+            kind: 'delete',
+            label: 'Delete from destination',
+          })
+        : toRow(item);
+
     pairs.push({
       sourceLabel: srcKey,
       destLabel,
       sections: {
         create: s.create.map(toRow),
         updateTracked: s.updateTracked.map(toRow),
-        updateCollision: s.updateCollision.map(toRow),
+        updateCollision: s.updateCollision.map(overwriteDecision),
         skip: s.skip.map(toRow),
         deleteTracked: s.deleteTracked.map(toRow),
-        destinationOnly: s.destinationOnly.map(toRow),
+        destinationOnly: s.destinationOnly.map(deleteDecision),
         warnings: s.warnings.map(toRow),
       },
     });
@@ -179,6 +239,10 @@ function toRow(item: PlanItem): PlanRowView {
 
 function toWarningView(w: PlanWarning): PlanWarningView {
   return { code: w.code, message: w.message };
+}
+
+function withDecision(row: PlanRowView, decision: PlanRowDecisionView): PlanRowView {
+  return { ...row, decision };
 }
 
 // ───── rendering ─────────────────────────────────────────────────────────
@@ -372,10 +436,25 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
           .join('')}</ul>`
       : '';
 
-  return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}">
+  // Decision checkbox lands in the right-most grid cell, after hashes/badge.
+  // The `data-decision-*` attributes carry everything the webview script
+  // needs without parsing the id back into parts. Unchecked by default —
+  // user opt-in is the entire point of the toggle.
+  const decision = row.decision;
+  const decisionHtml = decision
+    ? ` <label class="decision decision-${escapeHtml(decision.kind)}">
+          <input type="checkbox" class="decision-input"
+            data-decision-id="${escapeHtml(decision.id)}"
+            data-decision-kind="${escapeHtml(decision.kind)}"
+            data-decision-rel-path="${escapeHtml(row.relPath)}">
+          <span class="decision-label">${escapeHtml(decision.label)}</span>
+        </label>`
+    : '';
+
+  return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}${decision ? ' row-decide' : ''}">
         <div class="row-main">
           <span class="path">${escapeHtml(row.relPath)}</span>
-          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}
+          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}${decisionHtml}
         </div>${messages}
       </li>`;
 }
@@ -396,8 +475,9 @@ function renderEmpty(): string {
 function renderFooter(blocking: number, hasWork: boolean): string {
   // Traffic-light per folder-sync-v1-plan.md:
   // - No blocks: single green Proceed (wired in M4).
-  // - Blocks present: orange "Proceed with OK only" + red Cancel, no default.
-  // The orange button stays disabled until inline decisions land in M5.
+  // - Blocks present: orange Proceed (label reflects override count, updated
+  //   live by footerScript) + red Cancel. Phase B keeps orange disabled and
+  //   carries an explanatory tooltip; Phase C wires execution.
   if (blocking === 0) {
     if (!hasWork) {
       // No-op plan: nothing to do, only Cancel is meaningful.
@@ -407,20 +487,24 @@ function renderFooter(blocking: number, hasWork: boolean): string {
     return `<button type="button" class="btn btn-cancel" id="cancel-btn">Cancel</button>
       <button type="button" class="btn btn-green" id="proceed-btn">Proceed</button>`;
   }
-  return `<button type="button" class="btn btn-orange" disabled title="Inline decisions land in M5">Proceed with OK only</button>
+  return `<button type="button" class="btn btn-orange" id="proceed-orange-btn" disabled title="Decisions captured — execution lands in Phase C">Proceed with safe items only</button>
       <button type="button" class="btn btn-cancel btn-red" id="cancel-btn">Cancel</button>`;
 }
 
 function footerScript(): string {
-  // M3 wired Cancel; M4 adds Proceed. Both post a typed message and disable
-  // both buttons immediately to prevent double-clicks during the in-flight
-  // operation. The extension host listens, disposes on cancel, runs sync on
-  // proceed, then disposes. Status messages from the extension during sync
-  // land in the proceed button's label so the user sees progress.
+  // M3 wired Cancel; M4 added Proceed; M5 Phase B adds per-row decision
+  // checkboxes. Each .decision-input checkbox carries `data-decision-*`
+  // attributes that identify the row + intent ('overwrite' for collisions,
+  // 'delete' for destination-only). On change we post the toggle to the
+  // extension (it stores them in-memory for Phase C to consume) and
+  // recompute the orange Proceed button label so the user sees a live
+  // override count as they tick boxes.
   return `(function(){
     const vscode = acquireVsCodeApi();
     const cancelBtn = document.getElementById('cancel-btn');
     const proceedBtn = document.getElementById('proceed-btn');
+    const orangeBtn = document.getElementById('proceed-orange-btn');
+    const checkboxes = Array.from(document.querySelectorAll('.decision-input'));
 
     function lock(label){
       if (cancelBtn) cancelBtn.disabled = true;
@@ -428,6 +512,24 @@ function footerScript(): string {
         proceedBtn.disabled = true;
         if (label) proceedBtn.textContent = label;
       }
+      if (orangeBtn) {
+        orangeBtn.disabled = true;
+        if (label) orangeBtn.textContent = label;
+      }
+    }
+
+    function overrideCount(){
+      let n = 0;
+      for (let i = 0; i < checkboxes.length; i++) if (checkboxes[i].checked) n++;
+      return n;
+    }
+
+    function refreshOrangeLabel(){
+      if (!orangeBtn) return;
+      const n = overrideCount();
+      orangeBtn.textContent = n === 0
+        ? 'Proceed with safe items only'
+        : 'Proceed with overrides (' + n + ')';
     }
 
     if (cancelBtn) cancelBtn.addEventListener('click', function(){
@@ -437,6 +539,23 @@ function footerScript(): string {
       lock('Syncing\\u2026');
       try { vscode.postMessage({type:'proceed'}); } catch (_) {}
     });
+
+    for (let i = 0; i < checkboxes.length; i++) {
+      const cb = checkboxes[i];
+      cb.addEventListener('change', function(){
+        try {
+          vscode.postMessage({
+            type: 'decision',
+            id: cb.dataset.decisionId,
+            kind: cb.dataset.decisionKind,
+            relPath: cb.dataset.decisionRelPath,
+            accepted: cb.checked,
+          });
+        } catch (_) {}
+        refreshOrangeLabel();
+      });
+    }
+    refreshOrangeLabel();
 
     window.addEventListener('message', function(e){
       const m = e.data;
@@ -622,12 +741,17 @@ function planContentCss(): string {
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 0.92em;
     }
+    /* Flex (not grid) so the row scales gracefully to any number of trailing
+       cells — size, hashes, warning badge, decision checkbox — without us
+       maintaining a column count as the row vocabulary grows. The path
+       takes the slack via flex: 1, everything else is intrinsic-width and
+       sits flush to the right. */
     ul.rows .row-main {
-      display: grid;
-      grid-template-columns: 1fr max-content max-content max-content;
-      gap: 12px;
+      display: flex;
       align-items: baseline;
+      gap: 12px;
     }
+    ul.rows .row-main .path { flex: 1 1 auto; min-width: 0; }
     ul.rows .path { word-break: break-all; }
     ul.rows .size { color: var(--vscode-descriptionForeground); }
     ul.rows .hashes {
@@ -664,6 +788,42 @@ function planContentCss(): string {
       position: absolute;
       left: -2px;
       font-size: 0.85em;
+    }
+
+    /* Per-row decision checkbox. The label wraps the input + text so a click
+       anywhere on the affordance toggles the box. Colour palette tracks the
+       row's intent: collision rows get the error/red accent (overwrite is a
+       destructive choice); destination-only rows get a muted accent (delete
+       is also destructive but the row is in the info section, so we lean
+       a bit warmer). */
+    ul.rows .decision {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+      padding: 0 4px;
+      border-radius: 3px;
+    }
+    ul.rows .decision:hover {
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    }
+    ul.rows .decision-input {
+      margin: 0;
+      cursor: pointer;
+    }
+    ul.rows .decision-overwrite .decision-label {
+      color: var(--vscode-errorForeground);
+    }
+    ul.rows .decision-delete .decision-label {
+      color: var(--vscode-editorWarning-foreground, #cca700);
+    }
+    /* When the checkbox is checked we promote the label to full strength to
+       reinforce that the row is now armed for action. */
+    ul.rows .decision-input:checked + .decision-label {
+      font-weight: 600;
     }
   `;
 }

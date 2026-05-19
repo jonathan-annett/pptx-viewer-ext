@@ -341,6 +341,178 @@ test('renderPlanHtml: warning messages are HTML-escaped', () => {
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'), 'escaped warning message missing');
 });
 
+// ───── decision checkboxes (M5 Phase B) ─────────────────────────────────
+//
+// Phase B adds an inline checkbox on collision rows ("Overwrite") and
+// destination-only rows ("Delete from destination"). Other categories
+// (create / update-tracked / skip / delete-tracked / warnings) get no
+// checkbox — they're either always-safe or already accounted for by the
+// manifest.
+
+test('toViewModel: collision rows carry an overwrite decision', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.updateCollision[0];
+  assert.equal(row.decision?.kind, 'overwrite');
+  assert.equal(row.decision?.label, 'Overwrite');
+  // ID format is `${pairIndex}:${kind}:${relPath}` — stable across re-renders.
+  assert.equal(row.decision?.id, '0:overwrite:a.txt');
+});
+
+test('toViewModel: destination-only rows carry a delete decision', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('destination-only', 'user.txt', { destSize: 100, destHash: 'h' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.destinationOnly[0];
+  assert.equal(row.decision?.kind, 'delete');
+  assert.equal(row.decision?.label, 'Delete from destination');
+  assert.equal(row.decision?.id, '0:delete:user.txt');
+});
+
+test('toViewModel: pairIndex is unique across multiple pairs', () => {
+  const plans = [
+    fakePlan({
+      destName: 'first',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h', destHash: 'd' })],
+    }),
+    fakePlan({
+      destName: 'second',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h', destHash: 'd' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  // Same relPath in two different pairs → distinct decision ids.
+  assert.equal(vm.pairs[0].sections.updateCollision[0].decision?.id, '0:overwrite:a.txt');
+  assert.equal(vm.pairs[1].sections.updateCollision[0].decision?.id, '1:overwrite:a.txt');
+});
+
+test('toViewModel: non-decisional rows have no decision attached', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' }),
+        item('skip', 'b.txt', { sourceSize: 1, sourceHash: 'h', destHash: 'h' }),
+        item('update-tracked', 'c.txt', { sourceSize: 1, sourceHash: 'h2', destHash: 'h1', manifestHash: 'h1' }),
+        item('delete-tracked', 'd.txt', { destSize: 1, destHash: 'h', manifestHash: 'h' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const s = vm.pairs[0].sections;
+  assert.equal(s.create[0].decision, undefined);
+  assert.equal(s.skip[0].decision, undefined);
+  assert.equal(s.updateTracked[0].decision, undefined);
+  assert.equal(s.deleteTracked[0].decision, undefined);
+});
+
+test('renderPlanHtml: collision row emits an Overwrite checkbox with data attributes', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('class="decision-input"'), 'decision-input class missing');
+  assert.ok(html.includes('data-decision-id="0:overwrite:a.txt"'), 'data-decision-id missing');
+  assert.ok(html.includes('data-decision-kind="overwrite"'), 'data-decision-kind missing');
+  assert.ok(html.includes('data-decision-rel-path="a.txt"'), 'data-decision-rel-path missing');
+  assert.ok(/decision decision-overwrite/.test(html), 'decision wrapper class missing');
+});
+
+test('renderPlanHtml: destination-only row emits a Delete checkbox', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('destination-only', 'user.txt', { destSize: 1, destHash: 'h' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('data-decision-kind="delete"'), 'delete data-decision-kind missing');
+  assert.ok(/decision decision-delete/.test(html), 'decision wrapper class missing');
+  assert.ok(html.includes('Delete from destination'), 'delete label missing');
+});
+
+test('renderPlanHtml: clean row has no decision checkbox', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(!html.includes('class="decision-input"'), 'decision-input leaked onto clean row');
+});
+
+test('renderPlanHtml: orange button carries proceed-orange-btn id for live label updates', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('id="proceed-orange-btn"'), 'orange button id missing — script can\'t update label');
+  assert.ok(html.includes('Proceed with safe items only'), 'initial orange label missing');
+  assert.ok(/title="Decisions captured/.test(html), 'Phase B explanatory tooltip missing');
+});
+
+test('toViewModel: interactive=false suppresses all decision affordances', () => {
+  // Embedded read-only callers (viewer sync-target, config editor preview,
+  // admin editor) pass this — they have no message channel back, so a
+  // visible-but-inert checkbox would be confusing.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' }),
+        item('destination-only', 'b.txt', { destSize: 1, destHash: 'h' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL, { interactive: false });
+  assert.equal(vm.pairs[0].sections.updateCollision[0].decision, undefined);
+  assert.equal(vm.pairs[0].sections.destinationOnly[0].decision, undefined);
+
+  const html = renderPlanHtml(vm, 'n');
+  assert.ok(!html.includes('class="decision-input"'), 'inert checkbox leaked into non-interactive view');
+});
+
+test('renderPlanHtml: hostile relPath in decision attributes is HTML-escaped', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', '"><script>x</script>.txt', {
+          sourceSize: 1,
+          sourceHash: 'h1',
+          destHash: 'h2',
+        }),
+      ],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  // Unescaped relPath in the data attribute would break out of the
+  // attribute quoting and inject a tag. Escape must survive into the
+  // attribute value.
+  assert.ok(!/data-decision-rel-path="[^"]*"><script/.test(html), 'attribute escape failed — script injection possible');
+  assert.ok(html.includes('&quot;&gt;&lt;script&gt;x&lt;/script&gt;.txt'), 'expected escaped relPath missing');
+});
+
 // ───── humanSize sanity ──────────────────────────────────────────────────
 
 test('humanSize formats B / KB / MB', () => {

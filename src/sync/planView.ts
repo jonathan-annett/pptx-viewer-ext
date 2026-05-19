@@ -10,6 +10,7 @@ import { buildDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary } from './runSync';
+import { applyDecision, parseDecisionMessage, type RowDecision } from './decisions';
 import { log } from '../log';
 
 /**
@@ -51,6 +52,13 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
   // misbehaves. Once a proceed is in flight, we ignore subsequent messages.
   let inFlight = false;
 
+  // M5 Phase B: per-row decisions captured in-memory as the user toggles
+  // checkboxes. The key is the decision id emitted by the renderer
+  // (`${pairIndex}:${kind}:${relPath}`), which is stable for the lifetime
+  // of this panel — exactly what we need for an in-memory map. Phase C
+  // reads from here when wiring decisions into the executor + manifest.
+  const decisions = new Map<string, RowDecision>();
+
   panel.webview.onDidReceiveMessage(async (msg: unknown) => {
     if (!msg || typeof msg !== 'object') return;
     const m = msg as { type?: unknown };
@@ -64,6 +72,11 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
       if (inFlight) return;
       inFlight = true;
       await runProceed(panel, plans);
+      return;
+    }
+    if (m.type === 'decision') {
+      handleDecisionMessage(msg, decisions);
+      return;
     }
   });
 
@@ -82,6 +95,24 @@ function makeNonce(): string {
   const arr = new Uint8Array(16);
   crypto.getRandomValues(arr);
   return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Wired handler: validate the message via the pure parser, apply to the
+ * in-memory map, log the outcome. Pure work lives in `decisions.ts` so
+ * tsx tests can exercise the parser/applier directly.
+ */
+function handleDecisionMessage(
+  msg: unknown,
+  decisions: Map<string, RowDecision>,
+): void {
+  const decision = parseDecisionMessage(msg);
+  if (!decision) {
+    log(`sync: decision message rejected (malformed)`);
+    return;
+  }
+  applyDecision(decisions, decision);
+  log(`sync: decision ${decision.accepted ? 'set' : 'cleared'} — ${decision.kind} ${decision.relPath} (total accepted: ${decisions.size})`);
 }
 
 /**

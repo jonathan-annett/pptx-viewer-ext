@@ -666,10 +666,17 @@ async function renderScopedPlan(
       pathFilter: documentUri,
       pathFilterIsFile: true,
     });
-    const vm = toViewModel(plans, (plan) => {
-      const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
-      return rel || plan.source.sourceFolderUri.toString();
-    });
+    // Embedded read-only preview: the viewer panel has no message channel
+    // back to a plan controller, so suppress the decision checkboxes that
+    // the standalone plan webview emits.
+    const vm = toViewModel(
+      plans,
+      (plan) => {
+        const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
+        return rel || plan.source.sourceFolderUri.toString();
+      },
+      { interactive: false },
+    );
     const head = `<p class="sync-attribution">Source: <code>${escapeHtml(attribution.workspaceFolderName)}</code> · path <code>${escapeHtml(attribution.relPath)}</code></p>`;
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =
@@ -706,10 +713,17 @@ async function renderScopedPlanForDestination(
       pathFilter,
       pathFilterIsFile: true,
     });
-    const vm = toViewModel(plans, (plan) => {
-      const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
-      return rel || plan.source.sourceFolderUri.toString();
-    });
+    // Embedded read-only preview: the viewer panel has no message channel
+    // back to a plan controller, so suppress the decision checkboxes that
+    // the standalone plan webview emits.
+    const vm = toViewModel(
+      plans,
+      (plan) => {
+        const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
+        return rel || plan.source.sourceFolderUri.toString();
+      },
+      { interactive: false },
+    );
     const head = `<p class="sync-attribution">Placed here by source <code>${escapeHtml(ctx.sourceWorkspaceFolderName)}</code> · source path <code>${escapeHtml(ctx.sourceRelPath)}</code></p>`;
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =

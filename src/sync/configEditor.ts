@@ -369,10 +369,17 @@ function postPlanResult(
   plans: PlanForDestination[],
   gate: (totals: PlanTotals, hasWork: boolean) => void,
 ): Thenable<boolean> {
-  const vm = toViewModel(plans, (plan) => {
-    const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
-    return rel || plan.source.sourceFolderUri.toString();
-  });
+  // Embedded read-only view: no message channel back from this panel to
+  // collect per-row decisions, so suppress the decision checkboxes that
+  // the standalone plan webview emits.
+  const vm = toViewModel(
+    plans,
+    (plan) => {
+      const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
+      return rel || plan.source.sourceFolderUri.toString();
+    },
+    { interactive: false },
+  );
   const totals: PlanTotals = vm.totals;
   const chipsHtml = renderPlanChips(totals);
   const pairsHtml = renderPlanPairs(vm);
