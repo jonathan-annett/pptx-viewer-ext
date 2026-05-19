@@ -273,11 +273,13 @@ function withDecision(row: PlanRowView, decision: PlanRowDecisionView): PlanRowV
  */
 export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
   const t = vm.totals;
-  // M5 Phase A: warnings render but don't yet block green. Phase B adds
-  // inline decision toggles and Phase D wires warnings into the orange-only
-  // proceed path; at that point this line becomes
-  //   `t.updateCollision + t.warnings`.
-  const blocking = t.updateCollision;
+  // M5 Phase D: warnings now block green alongside collisions. Validator
+  // findings on a file (linked external media, kiosk show mode, media-controls
+  // + embedded video) flip the footer to orange + red — there's no per-row
+  // override for warnings (the user must fix the file and re-plan), so the
+  // orange "Proceed with safe items only" path skips warned items in the
+  // executor (see `resolveDispatch` in executor.ts).
+  const blocking = t.updateCollision + t.warnings;
   const hasWork =
     t.create + t.updateTracked + t.deleteTracked + t.updateCollision > 0;
 

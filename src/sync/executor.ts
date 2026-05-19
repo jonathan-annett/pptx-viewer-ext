@@ -148,11 +148,21 @@ export async function executePlan<U>(opts: ExecuteOptions<U>): Promise<ExecuteRe
  * record in results, or `undefined` to skip. Green-path items pass through;
  * orange-path items (`update-collision`, `destination-only`) only act when
  * the caller explicitly armed them via `decidedOverwrites` / `decidedDeletes`.
+ *
+ * M5 Phase D: items carrying validator warnings are blocked unconditionally —
+ * the plan webview shows them with a ⚠ badge and flips the footer to orange,
+ * and the orange "Proceed with safe items only" button means exactly that.
+ * There is no per-row override for warnings (the user must fix the file and
+ * re-plan), so an armed overwrite on a warned collision still skips here.
+ * `delete-tracked` and `destination-only` items never carry warnings (no
+ * source bytes to validate), so this filter only affects `create`,
+ * `update-tracked`, and armed `update-collision` items in practice.
  */
 function resolveDispatch<U>(
   item: PlanItem,
   opts: ExecuteOptions<U>,
 ): OperationResult['kind'] | undefined {
+  if (item.warnings && item.warnings.length > 0) return undefined;
   if (GREEN_KINDS.has(item.kind)) return item.kind as OperationResult['kind'];
   if (item.kind === 'update-collision' && opts.decidedOverwrites?.has(item.relPath)) {
     return 'update-collision';

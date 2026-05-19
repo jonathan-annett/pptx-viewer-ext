@@ -216,12 +216,12 @@ test('renderPlanHtml: hostile path is HTML-escaped', () => {
   assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;.txt'), 'expected escaped path missing');
 });
 
-// ───── validator warnings (M5 Phase A) ──────────────────────────────────
+// ───── validator warnings (M5 Phase A → D) ──────────────────────────────
 //
 // Phase A renders warnings as totals, an inline ⚠ badge on primary-category
 // rows, and a dedicated "Validation warnings" section listing full messages.
-// It explicitly does NOT change the footer — green proceeds even when
-// warnings are present. That gate moves in Phase B/D.
+// Phase D flips the footer state when warnings are present — see the Phase D
+// canary test below for the gating assertion.
 
 const WARN_KIOSK: PlanWarning = {
   severity: 'warn',
@@ -304,10 +304,12 @@ test('renderPlanHtml: row without warnings has no badge', () => {
   assert.ok(!html.includes('Validation warnings'), 'empty Validation warnings section rendered');
 });
 
-test('renderPlanHtml: Phase A — warnings do NOT block green Proceed', () => {
-  // Crucial Phase A invariant: warnings alone keep the footer green. The
-  // orange-only proceed path lands in Phase B/D, so this assertion is the
-  // canary that prevents premature gating.
+test('renderPlanHtml: Phase D — warnings flip footer to orange + red', () => {
+  // Phase D inverts the Phase A invariant: warnings now block green. A plan
+  // with only validator warnings present (no collisions) still flips the
+  // footer to the orange "Proceed with safe items only" + red Cancel pair.
+  // The orange button stays enabled because the user can still proceed with
+  // non-warned items; warned items are dropped server-side by the executor.
   const plans = [
     fakePlan({
       destName: 'backup',
@@ -317,10 +319,11 @@ test('renderPlanHtml: Phase A — warnings do NOT block green Proceed', () => {
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
 
-  assert.ok(/<button[^>]*class="btn btn-green"/.test(html), 'green proceed button missing despite warnings');
-  assert.ok(html.includes('id="proceed-btn"'), 'proceed-btn id missing despite warnings');
-  assert.ok(!/<button[^>]*id="proceed-btn"[^>]*disabled/.test(html), 'proceed-btn should not be disabled on warnings alone');
-  assert.ok(!/<button[^>]*btn-orange/.test(html), 'orange button leaked when only warnings present');
+  assert.ok(/<button[^>]*btn-orange/.test(html), 'orange Proceed button missing on warning-only plan');
+  assert.ok(html.includes('id="proceed-orange-btn"'), 'proceed-orange-btn id missing on warning-only plan');
+  assert.ok(/<button[^>]*btn-red/.test(html), 'red Cancel button missing on warning-only plan');
+  assert.ok(!/<button[^>]*class="btn btn-green"/.test(html), 'green Proceed leaked when warnings present');
+  assert.ok(!html.includes('id="proceed-btn"'), 'green proceed-btn id leaked when warnings present');
 });
 
 test('renderPlanHtml: warning messages are HTML-escaped', () => {

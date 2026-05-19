@@ -498,6 +498,107 @@ test('decidedOverwrites only acts on the listed relPaths', async () => {
   assert.deepEqual(fs.files.get('dst://b.txt'), bytesOf('yb'));
 });
 
+// ───── warnings block execution (M5 Phase D) ────────────────────────────
+//
+// Phase D wires validator warnings into the orange "Proceed with safe items
+// only" path. The renderer flips the footer to orange + red when warnings
+// are present; the executor enforces "safe items only" by skipping any item
+// that carries warnings, regardless of its kind or any armed decision.
+
+const WARN: import('../src/sync/plan').PlanWarning = {
+  severity: 'warn',
+  code: 'show-type',
+  message: 'Show type is kiosk',
+};
+
+test('Phase D: create item with warnings is skipped', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://kiosk.pptx', bytesOf('K'));
+  fs.files.set('src://clean.txt', bytesOf('C'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'create', relPath: 'kiosk.pptx', sourceSize: 1, sourceHash: tagHashOf('K'), warnings: [WARN] },
+      { kind: 'create', relPath: 'clean.txt', sourceSize: 1, sourceHash: tagHashOf('C') },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  // Only the clean item executed; the warned item is silently skipped.
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].relPath, 'clean.txt');
+  assert.equal(result.counts.create.ok, 1);
+
+  // No bytes placed for the warned item; no manifest entry either.
+  assert.equal(fs.files.has('dst://kiosk.pptx'), false);
+  assert.equal(manifest.entries[manifestKey(SOURCE_NAME, 'kiosk.pptx')], undefined);
+  // The warned file's source was never even read — the dispatch filter runs
+  // before any FS work.
+  assert.ok(!fs.ops.some((o) => o.includes('kiosk.pptx')), 'warned file should not have been touched');
+});
+
+test('Phase D: update-tracked item with warnings is skipped', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('NEW'));
+  fs.files.set('dst://a.pptx', bytesOf('OLD'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-tracked', relPath: 'a.pptx', sourceHash: tagHashOf('NEW'), warnings: [WARN] },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+  });
+
+  assert.equal(result.results.length, 0);
+  // Destination bytes untouched.
+  assert.deepEqual(fs.files.get('dst://a.pptx'), bytesOf('OLD'));
+});
+
+test('Phase D: armed overwrite on a warned collision still skips', async () => {
+  // The user can't override a warning via the decision checkbox — warnings
+  // have no per-row affordance. Even when the matching decidedOverwrites
+  // entry is present (e.g. the row carried a remembered decision before the
+  // warning surfaced), the warning takes precedence and the item is skipped.
+  const fs = makeFakeFs();
+  fs.files.set('src://a.pptx', bytesOf('x'));
+  fs.files.set('dst://a.pptx', bytesOf('y'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-collision', relPath: 'a.pptx', sourceHash: tagHashOf('x'), warnings: [WARN] },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedOverwrites: new Set(['a.pptx']),
+  });
+
+  assert.equal(result.results.length, 0);
+  assert.deepEqual(fs.files.get('dst://a.pptx'), bytesOf('y'));
+});
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 (async (): Promise<void> => {
