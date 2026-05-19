@@ -351,6 +351,84 @@ test('summarisePlan: warnings list is path-sorted independently of insertion ord
   );
 });
 
+// ───── M5 Phase C: remembered decisions ──────────────────────────────────
+
+test('update-collision: manifest.decisions.collisionOverwrite=true → item.remembered.accepted=true', () => {
+  const manifest = emptyManifest();
+  manifest.decisions[manifestKey(SOURCE, 'a.txt')] = {
+    destOnlyDelete: false,
+    collisionOverwrite: true,
+    decidedAt: '2026-05-19T00:00:00Z',
+  };
+  const items = classifyFiles(
+    SOURCE,
+    [file('a.txt', 'h1')],
+    [file('a.txt', 'h2')],
+    manifest,
+  );
+  const it = find(items, 'a.txt');
+  assert.equal(it?.kind, 'update-collision');
+  assert.deepEqual(it?.remembered, { accepted: true });
+});
+
+test('update-collision: no decision entry → no remembered field', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [file('a.txt', 'h1')],
+    [file('a.txt', 'h2')],
+    emptyManifest(),
+  );
+  const it = find(items, 'a.txt');
+  assert.equal(it?.kind, 'update-collision');
+  assert.equal(it?.remembered, undefined);
+});
+
+test('destination-only: manifest.decisions.destOnlyDelete=true → item.remembered.accepted=true', () => {
+  const manifest = emptyManifest();
+  manifest.decisions[manifestKey(SOURCE, 'orphan.txt')] = {
+    destOnlyDelete: true,
+    collisionOverwrite: false,
+    decidedAt: '2026-05-19T00:00:00Z',
+  };
+  const items = classifyFiles(SOURCE, [], [file('orphan.txt', 'h')], manifest);
+  const it = find(items, 'orphan.txt');
+  assert.equal(it?.kind, 'destination-only');
+  assert.deepEqual(it?.remembered, { accepted: true });
+});
+
+test('destination-only: matching decision belongs to a different source → no remembered', () => {
+  // A foreign source's decision must not pre-arm a delete on our side.
+  const manifest = emptyManifest();
+  manifest.decisions[manifestKey('other-source', 'orphan.txt')] = {
+    destOnlyDelete: true,
+    collisionOverwrite: false,
+    decidedAt: '2026-05-19T00:00:00Z',
+  };
+  const items = classifyFiles(SOURCE, [], [file('orphan.txt', 'h')], manifest);
+  assert.equal(find(items, 'orphan.txt')?.remembered, undefined);
+});
+
+test('update-tracked: ignores manifest.decisions (only collisions consult it)', () => {
+  // The classifier shouldn't apply a remembered overwrite to a tracked-update
+  // row — those write unconditionally without user opt-in.
+  const manifest = emptyManifest();
+  manifest.entries[manifestKey(SOURCE, 'a.txt')] = entry('h2', 'a.txt');
+  manifest.decisions[manifestKey(SOURCE, 'a.txt')] = {
+    destOnlyDelete: false,
+    collisionOverwrite: true,
+    decidedAt: '2026-05-19T00:00:00Z',
+  };
+  const items = classifyFiles(
+    SOURCE,
+    [file('a.txt', 'h1')],
+    [file('a.txt', 'h2')],
+    manifest,
+  );
+  const it = find(items, 'a.txt');
+  assert.equal(it?.kind, 'update-tracked');
+  assert.equal(it?.remembered, undefined);
+});
+
 // ───── run ────────────────────────────────────────────────────────────────
 
 let failed = 0;

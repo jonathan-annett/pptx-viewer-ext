@@ -14,8 +14,11 @@
 
 import * as vscode from 'vscode';
 import type { PlanForDestination } from './planner';
+import type { PlanItem } from './plan';
 import { readManifest, writeManifest } from './manifest';
 import { executePlan, type ExecuteResult, type OperationResult, type SyncFs } from './executor';
+import type { RowDecision } from './decisions';
+import { manifestKey } from './manifest-types';
 import { sha256Hex } from './hash';
 import { log } from '../log';
 
@@ -34,12 +37,26 @@ export interface PlanSummary {
 }
 
 /**
- * Execute the green-path subset (create / update-tracked / delete-tracked)
- * across all plans. Plans that were already skipped at plan time
- * (unresolved destination, etc.) are dropped silently — they had no
- * operations to begin with.
+ * Execute the green-path subset (create / update-tracked / delete-tracked),
+ * plus any orange-path rows (update-collision / destination-only) the user
+ * armed via the plan webview's per-row checkboxes.
+ *
+ * `decisions` carries the in-memory map from the plan panel — id → RowDecision
+ * where the id is `${pairIndex}:${kind}:${relPath}` matching the order of
+ * `plans` (the panel built its decision ids from the same iteration that
+ * produced this list). Items in the map with `accepted: true` get dispatched
+ * to the executor; `remember: true` additions are persisted to the manifest's
+ * `decisions` block; rows that had `remembered.accepted` on the original
+ * PlanItem but no current map entry are treated as "user unticked" and the
+ * matching manifest decision is cleared.
+ *
+ * Plans that were already skipped at plan time (unresolved destination, etc.)
+ * are dropped silently — they had no operations to begin with.
  */
-export async function runSync(plans: readonly PlanForDestination[]): Promise<RunSummary> {
+export async function runSync(
+  plans: readonly PlanForDestination[],
+  decisions?: ReadonlyMap<string, RowDecision>,
+): Promise<RunSummary> {
   const fs = vscodeFs();
   const summary: RunSummary = { ok: 0, failed: 0, perPlan: [], manifestWriteFailures: [] };
 
@@ -47,6 +64,10 @@ export async function runSync(plans: readonly PlanForDestination[]): Promise<Run
   // across all sources writing into the same workspace folder; reading and
   // writing it once per group keeps the I/O bounded.
   const groups = groupByDestWorkspaceFolder(plans);
+  // pairIndex matches the renderer's iteration over `plans` (same input
+  // array), so decision ids are interpretable here without re-deriving them.
+  const pairIndices = new Map<PlanForDestination, number>();
+  plans.forEach((p, i) => pairIndices.set(p, i));
 
   for (const group of groups) {
     const manifest = await readManifest(group.destWorkspaceFolderUri);
@@ -57,6 +78,9 @@ export async function runSync(plans: readonly PlanForDestination[]): Promise<Run
         continue;
       }
 
+      const pairIndex = pairIndices.get(plan) ?? 0;
+      const armed = pickArmedDecisions(decisions, pairIndex);
+
       const result = await executePlan({
         sourceWorkspaceFolderName: plan.source.workspaceFolderName,
         sourceRootUri: plan.source.sourceFolderUri,
@@ -66,12 +90,22 @@ export async function runSync(plans: readonly PlanForDestination[]): Promise<Run
         manifest,
         fs,
         hash: sha256Hex,
+        decidedOverwrites: armed.decidedOverwrites,
+        decidedDeletes: armed.decidedDeletes,
       });
 
       for (const r of result.results) {
         if (r.status === 'ok') summary.ok++;
         else summary.failed++;
       }
+
+      // Persist the manifest-level decision diffs for this plan. Successful
+      // ops only: a failed overwrite shouldn't leave behind a "remember yes"
+      // for a file that didn't actually get written.
+      const okPaths = new Set(
+        result.results.filter((r) => r.status === 'ok').map((r) => r.relPath),
+      );
+      applyDecisionPersistence(plan, decisions, manifest, okPaths);
 
       summary.perPlan.push({
         sourceLabel: relPath(plan.source.sourceFolderUri),
@@ -95,6 +129,94 @@ export async function runSync(plans: readonly PlanForDestination[]): Promise<Run
   }
 
   return summary;
+}
+
+// ───── decisions ─────────────────────────────────────────────────────────
+
+interface ArmedDecisions {
+  decidedOverwrites: Set<string>;
+  decidedDeletes: Set<string>;
+}
+
+/**
+ * Filter the panel's decision map down to the rows armed for one plan pair.
+ * Decision ids are formed as `${pairIndex}:${kind}:${relPath}` by the
+ * renderer, which keeps the partitioning trivial here.
+ */
+function pickArmedDecisions(
+  decisions: ReadonlyMap<string, RowDecision> | undefined,
+  pairIndex: number,
+): ArmedDecisions {
+  const out: ArmedDecisions = {
+    decidedOverwrites: new Set<string>(),
+    decidedDeletes: new Set<string>(),
+  };
+  if (!decisions) return out;
+  const prefix = `${pairIndex}:`;
+  for (const [id, d] of decisions) {
+    if (!id.startsWith(prefix)) continue;
+    if (!d.accepted) continue;
+    if (d.kind === 'overwrite') out.decidedOverwrites.add(d.relPath);
+    else out.decidedDeletes.add(d.relPath);
+  }
+  return out;
+}
+
+/**
+ * Mutate `manifest.decisions` in place to reflect this run's persistence
+ * intents:
+ *
+ *  - Successful armed rows with `remember: true` → write a ManifestDecision.
+ *  - Original PlanItems that carried `remembered.accepted: true` but had no
+ *    current armed entry → user unticked. Delete the manifest decision so
+ *    the next run renders the row fresh.
+ *
+ * `okPaths` filters to rows that actually completed — a failed overwrite
+ * shouldn't pretend the user's "remember" applied. Manifest decisions for
+ * the cleared (unticked) case are pruned regardless of the operation result
+ * because the user's intent is explicit.
+ */
+function applyDecisionPersistence(
+  plan: PlanForDestination,
+  decisions: ReadonlyMap<string, RowDecision> | undefined,
+  manifest: { decisions: { [key: string]: { destOnlyDelete: boolean; collisionOverwrite: boolean; decidedAt: string } } },
+  okPaths: ReadonlySet<string>,
+): void {
+  const source = plan.source.workspaceFolderName;
+  // Build a quick lookup of plan items keyed by (kind, relPath) for the
+  // user-untoggle pass below.
+  for (const item of plan.items) {
+    if (item.kind !== 'update-collision' && item.kind !== 'destination-only') continue;
+    if (!item.remembered?.accepted) continue;
+    const key = manifestKey(source, item.relPath);
+    // We'll re-add below if the user kept it ticked; clear unconditionally
+    // first so an opted-out row is forgotten.
+    delete manifest.decisions[key];
+  }
+
+  if (!decisions) return;
+  const now = new Date().toISOString();
+  for (const d of decisions.values()) {
+    if (!d.accepted || !d.remember) continue;
+    if (!okPaths.has(d.relPath)) continue;
+    // The decision map is panel-wide; only persist entries that belong to
+    // this plan. We can tell by checking whether the plan has an item that
+    // matches the decision's kind + relPath.
+    const matches = plan.items.find((it) => decisionMatchesItem(d, it));
+    if (!matches) continue;
+    const key = manifestKey(source, d.relPath);
+    manifest.decisions[key] = {
+      destOnlyDelete: d.kind === 'delete',
+      collisionOverwrite: d.kind === 'overwrite',
+      decidedAt: now,
+    };
+  }
+}
+
+function decisionMatchesItem(d: RowDecision, it: PlanItem): boolean {
+  if (d.relPath !== it.relPath) return false;
+  if (d.kind === 'overwrite') return it.kind === 'update-collision';
+  return it.kind === 'destination-only';
 }
 
 // ───── adapters ──────────────────────────────────────────────────────────
@@ -156,7 +278,9 @@ export function formatRunSummary(summary: RunSummary): string {
     lines.push(
       `  create ${c.create.ok}/${c.create.ok + c.create.failed} • ` +
         `update ${c.updateTracked.ok}/${c.updateTracked.ok + c.updateTracked.failed} • ` +
-        `delete ${c.deleteTracked.ok}/${c.deleteTracked.ok + c.deleteTracked.failed}`,
+        `delete ${c.deleteTracked.ok}/${c.deleteTracked.ok + c.deleteTracked.failed} • ` +
+        `overwrite ${c.updateCollision.ok}/${c.updateCollision.ok + c.updateCollision.failed} • ` +
+        `dest-delete ${c.destinationOnly.ok}/${c.destinationOnly.ok + c.destinationOnly.failed}`,
     );
     const failures = plan.results.filter((r) => r.status === 'failed');
     for (const f of failures) {

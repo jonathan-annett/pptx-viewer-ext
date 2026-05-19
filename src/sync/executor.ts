@@ -52,12 +52,39 @@ export interface ExecuteOptions<U> {
   hash: (bytes: Uint8Array) => Promise<string>;
   /** ISO-8601 timestamp factory; injected so tests get deterministic output. */
   now?: () => string;
+  /**
+   * Per-relPath user decisions for the orange path. Items in `overwrite` are
+   * `update-collision` rows the user armed for execution this run; items in
+   * `deleteDestOnly` are `destination-only` rows the user armed for deletion.
+   * The executor treats armed collisions exactly like update-tracked writes
+   * (with one wrinkle: the manifest may not have an entry, so the destination
+   * hash isn't checked against it) and armed destination-only deletes like
+   * delete-tracked.
+   *
+   * Both default empty — when M5 Phase C isn't relevant (workspace-wide
+   * Proceed with no blocks) the runner just doesn't pass them.
+   */
+  decidedOverwrites?: ReadonlySet<string>;
+  decidedDeletes?: ReadonlySet<string>;
 }
 
 export interface OperationResult {
   relPath: string;
-  /** The op that was attempted. 'skip' never lands here (filtered out). */
-  kind: Extract<OpKind, 'create' | 'update-tracked' | 'delete-tracked'>;
+  /**
+   * The op that was attempted. 'skip' never lands here (filtered out). The
+   * two collision-derived ops mirror the green-path equivalents: an armed
+   * `update-collision` executes as `update-collision` so the summary can
+   * distinguish overrides from clean updates without losing the row's
+   * provenance.
+   */
+  kind: Extract<
+    OpKind,
+    | 'create'
+    | 'update-tracked'
+    | 'delete-tracked'
+    | 'update-collision'
+    | 'destination-only'
+  >;
   status: 'ok' | 'failed';
   /** Present iff status='failed'. */
   error?: string;
@@ -70,10 +97,12 @@ export interface ExecuteResult {
     create: { ok: number; failed: number };
     updateTracked: { ok: number; failed: number };
     deleteTracked: { ok: number; failed: number };
+    updateCollision: { ok: number; failed: number };
+    destinationOnly: { ok: number; failed: number };
   };
 }
 
-const HANDLED: ReadonlySet<OpKind> = new Set<OpKind>([
+const GREEN_KINDS: ReadonlySet<OpKind> = new Set<OpKind>([
   'create',
   'update-tracked',
   'delete-tracked',
@@ -92,11 +121,12 @@ export async function executePlan<U>(opts: ExecuteOptions<U>): Promise<ExecuteRe
   const counts = freshCounts();
 
   for (const item of opts.items) {
-    if (!HANDLED.has(item.kind)) continue;
-    const kind = item.kind as OperationResult['kind'];
+    const dispatch = resolveDispatch(item, opts);
+    if (!dispatch) continue;
+    const kind = dispatch;
 
     try {
-      if (kind === 'delete-tracked') {
+      if (kind === 'delete-tracked' || kind === 'destination-only') {
         await executeDelete(opts, item);
       } else {
         await executeWrite(opts, item, kind, now);
@@ -113,12 +143,32 @@ export async function executePlan<U>(opts: ExecuteOptions<U>): Promise<ExecuteRe
   return { results, counts };
 }
 
+/**
+ * Decide whether and how to act on a plan item. Returns the operation kind to
+ * record in results, or `undefined` to skip. Green-path items pass through;
+ * orange-path items (`update-collision`, `destination-only`) only act when
+ * the caller explicitly armed them via `decidedOverwrites` / `decidedDeletes`.
+ */
+function resolveDispatch<U>(
+  item: PlanItem,
+  opts: ExecuteOptions<U>,
+): OperationResult['kind'] | undefined {
+  if (GREEN_KINDS.has(item.kind)) return item.kind as OperationResult['kind'];
+  if (item.kind === 'update-collision' && opts.decidedOverwrites?.has(item.relPath)) {
+    return 'update-collision';
+  }
+  if (item.kind === 'destination-only' && opts.decidedDeletes?.has(item.relPath)) {
+    return 'destination-only';
+  }
+  return undefined;
+}
+
 // ───── per-op handlers ───────────────────────────────────────────────────
 
 async function executeWrite<U>(
   opts: ExecuteOptions<U>,
   item: PlanItem,
-  kind: 'create' | 'update-tracked',
+  kind: 'create' | 'update-tracked' | 'update-collision',
   now: () => string,
 ): Promise<void> {
   const { fs, sourceRootUri, destRootUri } = opts;
@@ -193,6 +243,8 @@ function freshCounts(): ExecuteResult['counts'] {
     create: { ok: 0, failed: 0 },
     updateTracked: { ok: 0, failed: 0 },
     deleteTracked: { ok: 0, failed: 0 },
+    updateCollision: { ok: 0, failed: 0 },
+    destinationOnly: { ok: 0, failed: 0 },
   };
 }
 
@@ -203,7 +255,9 @@ function bump(
 ): void {
   if (kind === 'create') counts.create[outcome]++;
   else if (kind === 'update-tracked') counts.updateTracked[outcome]++;
-  else counts.deleteTracked[outcome]++;
+  else if (kind === 'delete-tracked') counts.deleteTracked[outcome]++;
+  else if (kind === 'update-collision') counts.updateCollision[outcome]++;
+  else counts.destinationOnly[outcome]++;
 }
 
 function isFileNotFound(err: unknown): boolean {

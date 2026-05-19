@@ -21,6 +21,13 @@ export interface RowDecision {
    * `false` when they unchecked it (back to the safe default).
    */
   accepted: boolean;
+  /**
+   * `true` when the companion "Don't ask again" box is ticked alongside the
+   * primary accept. Only meaningful when `accepted` is also true — the
+   * webview script disables the companion box when the primary is unticked.
+   * Phase C uses this flag to persist a `ManifestDecision` for the row.
+   */
+  remember: boolean;
 }
 
 /**
@@ -37,7 +44,11 @@ export function parseDecisionMessage(msg: unknown): RowDecision | undefined {
   const relPath = typeof m.relPath === 'string' ? m.relPath : undefined;
   const accepted = typeof m.accepted === 'boolean' ? m.accepted : undefined;
   if (!id || !kind || !relPath || accepted === undefined) return undefined;
-  return { id, kind, relPath, accepted };
+  // `remember` is optional in the message — pre-Phase-C webviews never sent
+  // it. Treat missing/non-boolean as `false`, and ignore the flag entirely
+  // when `accepted` is false (remember-without-accept is not a thing).
+  const remember = typeof m.remember === 'boolean' ? m.remember : false;
+  return { id, kind, relPath, accepted, remember: accepted ? remember : false };
 }
 
 /**

@@ -28,12 +28,14 @@ test('parseDecisionMessage: well-formed accept message → RowDecision', () => {
     kind: 'overwrite',
     relPath: 'a.txt',
     accepted: true,
+    remember: false,
   });
   assert.deepEqual(out, {
     id: '0:overwrite:a.txt',
     kind: 'overwrite',
     relPath: 'a.txt',
     accepted: true,
+    remember: false,
   });
 });
 
@@ -44,9 +46,45 @@ test('parseDecisionMessage: well-formed reject message → RowDecision', () => {
     kind: 'delete',
     relPath: 'gone.txt',
     accepted: false,
+    remember: false,
   });
   assert.equal(out?.accepted, false);
   assert.equal(out?.kind, 'delete');
+});
+
+test('parseDecisionMessage: remember=true on accept → preserved', () => {
+  const out = parseDecisionMessage({
+    type: 'decision',
+    id: 'a',
+    kind: 'overwrite',
+    relPath: 'a.txt',
+    accepted: true,
+    remember: true,
+  });
+  assert.equal(out?.remember, true);
+});
+
+test('parseDecisionMessage: remember=true on reject → forced false (no remember-without-accept)', () => {
+  const out = parseDecisionMessage({
+    type: 'decision',
+    id: 'a',
+    kind: 'overwrite',
+    relPath: 'a.txt',
+    accepted: false,
+    remember: true,
+  });
+  assert.equal(out?.remember, false);
+});
+
+test('parseDecisionMessage: missing remember field → defaults false (pre-Phase-C messages)', () => {
+  const out = parseDecisionMessage({
+    type: 'decision',
+    id: 'a',
+    kind: 'overwrite',
+    relPath: 'a.txt',
+    accepted: true,
+  });
+  assert.equal(out?.remember, false);
 });
 
 test('parseDecisionMessage: rejects wrong type', () => {
@@ -106,7 +144,8 @@ const dec = (
   kind: 'overwrite' | 'delete',
   relPath: string,
   accepted: boolean,
-): RowDecision => ({ id, kind, relPath, accepted });
+  remember = false,
+): RowDecision => ({ id, kind, relPath, accepted, remember });
 
 test('applyDecision: accepted true → stored, returns new size', () => {
   const map = new Map<string, RowDecision>();
@@ -140,8 +179,15 @@ test('applyDecision: re-accepting an existing id overwrites prior record', () =>
   const map = new Map<string, RowDecision>();
   applyDecision(map, dec('a', 'overwrite', 'a.txt', true));
   // Caller posts a second message — applier last-write-wins.
-  applyDecision(map, { id: 'a', kind: 'overwrite', relPath: 'a.txt', accepted: true });
+  applyDecision(map, {
+    id: 'a',
+    kind: 'overwrite',
+    relPath: 'a.txt',
+    accepted: true,
+    remember: true,
+  });
   assert.equal(map.size, 1);
+  assert.equal(map.get('a')?.remember, true);
 });
 
 // ───── runner ────────────────────────────────────────────────────────────

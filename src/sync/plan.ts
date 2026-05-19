@@ -67,6 +67,15 @@ export interface PlanItem {
    * (create / update-tracked / update-collision / skip).
    */
   warnings?: PlanWarning[];
+  /**
+   * Set when the manifest already records a "don't ask again" decision for
+   * this file. Only attached to `update-collision` and `destination-only`
+   * items — the two categories that show the interactive decision affordance.
+   * The plan webview renders the checkbox pre-checked when this is present
+   * with `accepted: true`, and `runSync` consults the same field to dispatch
+   * remembered rows into the executor without requiring a fresh user toggle.
+   */
+  remembered?: { accepted: boolean };
 }
 
 /**
@@ -134,6 +143,9 @@ export function classifyFiles(
       });
     } else {
       // Manifest absent, or it disagrees — could be user-edited destination.
+      const remembered = manifest.decisions[key]?.collisionOverwrite
+        ? { remembered: { accepted: true as const } }
+        : {};
       items.push({
         kind: 'update-collision',
         relPath: sourceFile.relPath,
@@ -143,6 +155,7 @@ export function classifyFiles(
         destHash: destFile.sha256,
         ...(entry ? { manifestHash: entry.sha256 } : {}),
         ...carry,
+        ...remembered,
       });
     }
   }
@@ -171,11 +184,16 @@ export function classifyFiles(
   for (const destFile of destFiles) {
     if (sourceMap.has(destFile.relPath)) continue;
     if (trackedRelPaths.has(destFile.relPath)) continue;
+    const key = manifestKey(sourceWorkspaceFolderName, destFile.relPath);
+    const remembered = manifest.decisions[key]?.destOnlyDelete
+      ? { remembered: { accepted: true as const } }
+      : {};
     items.push({
       kind: 'destination-only',
       relPath: destFile.relPath,
       destSize: destFile.size,
       destHash: destFile.sha256,
+      ...remembered,
     });
   }
 

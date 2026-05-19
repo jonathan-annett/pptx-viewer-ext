@@ -468,7 +468,102 @@ test('renderPlanHtml: orange button carries proceed-orange-btn id for live label
   const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
   assert.ok(html.includes('id="proceed-orange-btn"'), 'orange button id missing — script can\'t update label');
   assert.ok(html.includes('Proceed with safe items only'), 'initial orange label missing');
-  assert.ok(/title="Decisions captured/.test(html), 'Phase B explanatory tooltip missing');
+  // Phase C: orange button is enabled (no `disabled` attribute) and no longer
+  // carries the Phase B "decisions captured but execution is pending" tooltip.
+  assert.ok(
+    !/id="proceed-orange-btn"[^>]*\bdisabled\b/.test(html),
+    'orange button should be enabled now that Phase C wires execution',
+  );
+  assert.ok(
+    !/title="Decisions captured/.test(html),
+    'Phase B explanatory tooltip should be gone',
+  );
+});
+
+test('toViewModel: PlanItem.remembered.accepted threads through to decision.checked + remembered', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.txt', {
+          sourceSize: 1,
+          sourceHash: 'h1',
+          destHash: 'h2',
+          remembered: { accepted: true },
+        }),
+        item('destination-only', 'b.txt', {
+          destSize: 1,
+          destHash: 'h',
+          remembered: { accepted: true },
+        }),
+        // Control row — no remembered → decision starts unchecked.
+        item('update-collision', 'c.txt', {
+          sourceSize: 1,
+          sourceHash: 'h3',
+          destHash: 'h4',
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const collisionA = vm.pairs[0].sections.updateCollision.find((r) => r.relPath === 'a.txt');
+  const destB = vm.pairs[0].sections.destinationOnly[0];
+  const collisionC = vm.pairs[0].sections.updateCollision.find((r) => r.relPath === 'c.txt');
+  assert.equal(collisionA?.decision?.checked, true);
+  assert.equal(collisionA?.decision?.remembered, true);
+  assert.equal(destB.decision?.checked, true);
+  assert.equal(destB.decision?.remembered, true);
+  assert.equal(collisionC?.decision?.checked, undefined);
+  assert.equal(collisionC?.decision?.remembered, undefined);
+});
+
+test('renderPlanHtml: remembered row emits checked primary + checked Remember', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.txt', {
+          sourceSize: 1,
+          sourceHash: 'h1',
+          destHash: 'h2',
+          remembered: { accepted: true },
+        }),
+      ],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(
+    /class="decision-input"[^>]*\bchecked\b/.test(html),
+    'remembered decision should render the primary checkbox pre-checked',
+  );
+  assert.ok(
+    /class="decision-remember-input"[^>]*\bchecked\b/.test(html),
+    'remembered decision should render the Don\'t-ask-again box pre-checked',
+  );
+  assert.ok(
+    !/class="decision-remember-input"[^>]*\bdisabled\b/.test(html),
+    'remember should not be disabled when primary is checked',
+  );
+});
+
+test('renderPlanHtml: fresh (un-remembered) row emits Remember box disabled', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  // Primary unchecked → Remember companion starts disabled so the user can't
+  // tick a "remember unaccept" the manifest schema doesn't model.
+  assert.ok(
+    /class="decision-remember-input"[^>]*\bdisabled\b/.test(html),
+    'Remember box should be disabled when primary is unchecked',
+  );
+  assert.ok(
+    !/class="decision-input"[^>]*\bchecked\b/.test(html),
+    'primary checkbox should not be pre-checked for a fresh row',
+  );
 });
 
 test('toViewModel: interactive=false suppresses all decision affordances', () => {

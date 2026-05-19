@@ -71,7 +71,7 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
     if (m.type === 'proceed') {
       if (inFlight) return;
       inFlight = true;
-      await runProceed(panel, plans);
+      await runProceed(panel, plans, decisions);
       return;
     }
     if (m.type === 'decision') {
@@ -112,7 +112,17 @@ function handleDecisionMessage(
     return;
   }
   applyDecision(decisions, decision);
-  log(`sync: decision ${decision.accepted ? 'set' : 'cleared'} — ${decision.kind} ${decision.relPath} (total accepted: ${decisions.size})`);
+  const rememberBit = decision.accepted && decision.remember ? ' (remember)' : '';
+  log(
+    `sync: decision ${decision.accepted ? 'set' : 'cleared'}${rememberBit} — ` +
+      `${decision.kind} ${decision.relPath} (total accepted: ${decisions.size})`,
+  );
+}
+
+function countAccepted(decisions: ReadonlyMap<string, RowDecision>): number {
+  let n = 0;
+  for (const d of decisions.values()) if (d.accepted) n++;
+  return n;
 }
 
 /**
@@ -124,13 +134,15 @@ function handleDecisionMessage(
 async function runProceed(
   panel: vscode.WebviewPanel,
   plans: PlanForDestination[],
+  decisions: ReadonlyMap<string, RowDecision>,
 ): Promise<void> {
-  log('sync: proceed — starting execution');
+  const armedCount = countAccepted(decisions);
+  log(`sync: proceed — starting execution (${armedCount} armed override(s))`);
   void panel.webview.postMessage({ type: 'status', label: 'Syncing\u2026' });
 
   let summary;
   try {
-    summary = await runSync(plans);
+    summary = await runSync(plans, decisions);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync: execution threw — ${message}`);

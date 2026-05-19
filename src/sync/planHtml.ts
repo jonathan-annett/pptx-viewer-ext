@@ -59,6 +59,18 @@ export interface PlanRowDecisionView {
   kind: 'overwrite' | 'delete';
   /** Checkbox-adjacent label, e.g. "Overwrite" or "Delete from destination". */
   label: string;
+  /**
+   * Initial checked state for the input. Set to `true` when the manifest
+   * already records a "don't ask again" decision for this file — the user
+   * can still untick to opt out for this run, but the box starts armed.
+   */
+  checked?: boolean;
+  /**
+   * Initial state for the companion "Don't ask again" checkbox. Only ever
+   * `true` for rows whose remembered decision came from the manifest — a
+   * fresh row never starts with Remember pre-armed.
+   */
+  remembered?: boolean;
 }
 
 export interface PlanPairView {
@@ -171,12 +183,18 @@ export function toViewModel(
     // offer a "Delete from destination" decision. Both default unchecked —
     // the user has to actively opt in. Suppressed entirely when the caller
     // requested a non-interactive view (no message channel back).
+    //
+    // When the manifest already records a "don't ask again" decision for a
+    // file (item.remembered), both the primary and the Remember checkboxes
+    // start armed. The user can still untick to opt out of this run; Phase C
+    // persists the new state on Proceed.
     const overwriteDecision = (item: PlanItem): PlanRowView =>
       interactive
         ? withDecision(toRow(item), {
             id: `${pairIndex}:overwrite:${item.relPath}`,
             kind: 'overwrite',
             label: 'Overwrite',
+            ...(item.remembered?.accepted ? { checked: true, remembered: true } : {}),
           })
         : toRow(item);
     const deleteDecision = (item: PlanItem): PlanRowView =>
@@ -185,6 +203,7 @@ export function toViewModel(
             id: `${pairIndex}:delete:${item.relPath}`,
             kind: 'delete',
             label: 'Delete from destination',
+            ...(item.remembered?.accepted ? { checked: true, remembered: true } : {}),
           })
         : toRow(item);
 
@@ -438,16 +457,26 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
 
   // Decision checkbox lands in the right-most grid cell, after hashes/badge.
   // The `data-decision-*` attributes carry everything the webview script
-  // needs without parsing the id back into parts. Unchecked by default —
-  // user opt-in is the entire point of the toggle.
+  // needs without parsing the id back into parts. Unchecked by default for
+  // fresh rows; pre-checked when the manifest carries a remembered decision.
+  //
+  // The companion "Remember" checkbox only does work when the primary is
+  // checked — the footer script enables/disables it on each toggle. It exists
+  // as a sibling so a single click anywhere on the label flips just the box
+  // the user pointed at.
   const decision = row.decision;
   const decisionHtml = decision
     ? ` <label class="decision decision-${escapeHtml(decision.kind)}">
           <input type="checkbox" class="decision-input"
             data-decision-id="${escapeHtml(decision.id)}"
             data-decision-kind="${escapeHtml(decision.kind)}"
-            data-decision-rel-path="${escapeHtml(row.relPath)}">
+            data-decision-rel-path="${escapeHtml(row.relPath)}"${decision.checked ? ' checked' : ''}>
           <span class="decision-label">${escapeHtml(decision.label)}</span>
+        </label>
+        <label class="decision-remember" title="Remember this choice across syncs (persisted to the manifest)">
+          <input type="checkbox" class="decision-remember-input"
+            data-remember-for="${escapeHtml(decision.id)}"${decision.remembered ? ' checked' : ''}${decision.checked ? '' : ' disabled'}>
+          <span class="decision-remember-label">Don't ask again</span>
         </label>`
     : '';
 
@@ -487,24 +516,32 @@ function renderFooter(blocking: number, hasWork: boolean): string {
     return `<button type="button" class="btn btn-cancel" id="cancel-btn">Cancel</button>
       <button type="button" class="btn btn-green" id="proceed-btn">Proceed</button>`;
   }
-  return `<button type="button" class="btn btn-orange" id="proceed-orange-btn" disabled title="Decisions captured — execution lands in Phase C">Proceed with safe items only</button>
+  return `<button type="button" class="btn btn-orange" id="proceed-orange-btn">Proceed with safe items only</button>
       <button type="button" class="btn btn-cancel btn-red" id="cancel-btn">Cancel</button>`;
 }
 
 function footerScript(): string {
-  // M3 wired Cancel; M4 added Proceed; M5 Phase B adds per-row decision
-  // checkboxes. Each .decision-input checkbox carries `data-decision-*`
-  // attributes that identify the row + intent ('overwrite' for collisions,
-  // 'delete' for destination-only). On change we post the toggle to the
-  // extension (it stores them in-memory for Phase C to consume) and
-  // recompute the orange Proceed button label so the user sees a live
-  // override count as they tick boxes.
+  // M3 wired Cancel; M4 added Proceed; M5 Phase B added per-row decision
+  // checkboxes; Phase C adds the "Don't ask again" companion + orange Proceed.
+  //
+  // Each .decision-input carries `data-decision-*` attributes identifying
+  // the row + intent ('overwrite' for collisions, 'delete' for destination-
+  // only). Its sibling .decision-remember-input shares the same id via
+  // `data-remember-for` so a single change handler updates both.
+  //
+  // Posted message shape: {type:'decision', id, kind, relPath, accepted, remember}.
+  // The extension stores accepted+remember in-memory; on Proceed it dispatches
+  // the accepted rows into the executor and persists the remember subset.
   return `(function(){
     const vscode = acquireVsCodeApi();
     const cancelBtn = document.getElementById('cancel-btn');
     const proceedBtn = document.getElementById('proceed-btn');
     const orangeBtn = document.getElementById('proceed-orange-btn');
     const checkboxes = Array.from(document.querySelectorAll('.decision-input'));
+
+    function rememberFor(id){
+      return document.querySelector('.decision-remember-input[data-remember-for="' + id + '"]');
+    }
 
     function lock(label){
       if (cancelBtn) cancelBtn.disabled = true;
@@ -515,6 +552,11 @@ function footerScript(): string {
       if (orangeBtn) {
         orangeBtn.disabled = true;
         if (label) orangeBtn.textContent = label;
+      }
+      for (let i = 0; i < checkboxes.length; i++) {
+        checkboxes[i].disabled = true;
+        const r = rememberFor(checkboxes[i].dataset.decisionId);
+        if (r) r.disabled = true;
       }
     }
 
@@ -530,6 +572,25 @@ function footerScript(): string {
       orangeBtn.textContent = n === 0
         ? 'Proceed with safe items only'
         : 'Proceed with overrides (' + n + ')';
+      // Phase C: orange is enabled whenever there are blocks; the user can
+      // proceed with zero overrides to take the safe subset.
+      orangeBtn.disabled = false;
+      orangeBtn.removeAttribute('title');
+    }
+
+    function postDecision(cb){
+      const id = cb.dataset.decisionId;
+      const remember = rememberFor(id);
+      try {
+        vscode.postMessage({
+          type: 'decision',
+          id: id,
+          kind: cb.dataset.decisionKind,
+          relPath: cb.dataset.decisionRelPath,
+          accepted: cb.checked,
+          remember: !!(remember && remember.checked && cb.checked),
+        });
+      } catch (_) {}
     }
 
     if (cancelBtn) cancelBtn.addEventListener('click', function(){
@@ -539,21 +600,31 @@ function footerScript(): string {
       lock('Syncing\\u2026');
       try { vscode.postMessage({type:'proceed'}); } catch (_) {}
     });
+    if (orangeBtn) orangeBtn.addEventListener('click', function(){
+      lock('Syncing\\u2026');
+      try { vscode.postMessage({type:'proceed'}); } catch (_) {}
+    });
 
     for (let i = 0; i < checkboxes.length; i++) {
       const cb = checkboxes[i];
       cb.addEventListener('change', function(){
-        try {
-          vscode.postMessage({
-            type: 'decision',
-            id: cb.dataset.decisionId,
-            kind: cb.dataset.decisionKind,
-            relPath: cb.dataset.decisionRelPath,
-            accepted: cb.checked,
-          });
-        } catch (_) {}
+        // Remember is only meaningful when primary is checked. Untick + disable
+        // the companion box on opt-out so the user can't accidentally persist
+        // a "no, never overwrite" the manifest schema doesn't model.
+        const remember = rememberFor(cb.dataset.decisionId);
+        if (remember) {
+          if (!cb.checked) remember.checked = false;
+          remember.disabled = !cb.checked;
+        }
+        postDecision(cb);
         refreshOrangeLabel();
       });
+      const remember = rememberFor(cb.dataset.decisionId);
+      if (remember) {
+        remember.addEventListener('change', function(){
+          postDecision(cb);
+        });
+      }
     }
     refreshOrangeLabel();
 
@@ -824,6 +895,30 @@ function planContentCss(): string {
        reinforce that the row is now armed for action. */
     ul.rows .decision-input:checked + .decision-label {
       font-weight: 600;
+    }
+    /* Companion "Don't ask again" affordance sits next to the primary
+       checkbox; mutes its text colour to keep the primary intent visually
+       dominant. Disabled state (no primary checked) softens further so the
+       row reads as "this control is inert right now". */
+    ul.rows .decision-remember {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      padding: 0 4px;
+      border-radius: 3px;
+    }
+    ul.rows .decision-remember:hover {
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    }
+    ul.rows .decision-remember-input { margin: 0; cursor: pointer; }
+    ul.rows .decision-remember-input:disabled,
+    ul.rows .decision-remember-input:disabled + .decision-remember-label {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
   `;
 }

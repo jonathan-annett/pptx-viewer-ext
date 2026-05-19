@@ -115,6 +115,16 @@ function bytesOf(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
 
+// Synchronous tag-hash mirror so tests can pre-compute the hash a PlanItem
+// would carry without awaiting. Must stay in lockstep with `tagHash` above.
+function tagHashOf(s: string): string {
+  const b = bytesOf(s);
+  const len = b.byteLength;
+  const first = len > 0 ? b[0] : 0;
+  const last = len > 0 ? b[len - 1] : 0;
+  return `len${len}-f${first}-l${last}`;
+}
+
 const FIXED_NOW = (): string => '2026-05-18T12:00:00Z';
 
 // ───── happy paths ───────────────────────────────────────────────────────
@@ -371,7 +381,7 @@ test('skip items are no-ops — no FS calls, no manifest mutation', async () => 
   assert.equal(manifest.lastSync, null);
 });
 
-test('update-collision and destination-only items are ignored in M4', async () => {
+test('update-collision and destination-only items are ignored without explicit decisions', async () => {
   const fs = makeFakeFs();
   fs.files.set('src://a.txt', bytesOf('x'));
   fs.files.set('dst://a.txt', bytesOf('y'));
@@ -384,7 +394,7 @@ test('update-collision and destination-only items are ignored in M4', async () =
     destRootUri: DEST_ROOT,
     destSubpath: '',
     items: [
-      { kind: 'update-collision', relPath: 'a.txt' },
+      { kind: 'update-collision', relPath: 'a.txt', sourceHash: tagHashOf('x') },
       { kind: 'destination-only', relPath: 'orphan.txt' },
     ],
     manifest,
@@ -397,6 +407,95 @@ test('update-collision and destination-only items are ignored in M4', async () =
   assert.equal(result.results.length, 0);
   assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('y'));
   assert.deepEqual(fs.files.get('dst://orphan.txt'), bytesOf('z'));
+});
+
+test('update-collision in decidedOverwrites → overwrites destination via tmp+rename', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('x'));
+  fs.files.set('dst://a.txt', bytesOf('y'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-collision', relPath: 'a.txt', sourceHash: tagHashOf('x') },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedOverwrites: new Set(['a.txt']),
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].kind, 'update-collision');
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.counts.updateCollision.ok, 1);
+  assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('x'));
+  // Atomic write path used; manifest entry added.
+  assert.ok(fs.ops.some((o) => o.startsWith('write dst://a.txt.tmp')));
+  assert.ok(fs.ops.some((o) => o.startsWith('rename dst://a.txt.tmp dst://a.txt')));
+  assert.ok(manifest.entries[manifestKey(SOURCE_NAME, 'a.txt')]);
+});
+
+test('destination-only in decidedDeletes → deletes file, leaves no manifest entry', async () => {
+  const fs = makeFakeFs();
+  fs.files.set('dst://orphan.txt', bytesOf('z'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [{ kind: 'destination-only', relPath: 'orphan.txt' }],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedDeletes: new Set(['orphan.txt']),
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].kind, 'destination-only');
+  assert.equal(result.results[0].status, 'ok');
+  assert.equal(result.counts.destinationOnly.ok, 1);
+  assert.equal(fs.files.has('dst://orphan.txt'), false);
+  assert.equal(manifest.entries[manifestKey(SOURCE_NAME, 'orphan.txt')], undefined);
+});
+
+test('decidedOverwrites only acts on the listed relPaths', async () => {
+  // Two collision items; only one is in the decided set. The other stays put.
+  const fs = makeFakeFs();
+  fs.files.set('src://a.txt', bytesOf('xa'));
+  fs.files.set('dst://a.txt', bytesOf('ya'));
+  fs.files.set('src://b.txt', bytesOf('xb'));
+  fs.files.set('dst://b.txt', bytesOf('yb'));
+  const manifest = emptyManifest();
+
+  const result = await executePlan({
+    sourceWorkspaceFolderName: SOURCE_NAME,
+    sourceRootUri: SOURCE_ROOT,
+    destRootUri: DEST_ROOT,
+    destSubpath: '',
+    items: [
+      { kind: 'update-collision', relPath: 'a.txt', sourceHash: tagHashOf('xa') },
+      { kind: 'update-collision', relPath: 'b.txt', sourceHash: tagHashOf('xb') },
+    ],
+    manifest,
+    fs,
+    hash: tagHash,
+    now: FIXED_NOW,
+    decidedOverwrites: new Set(['a.txt']),
+  });
+
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].relPath, 'a.txt');
+  assert.deepEqual(fs.files.get('dst://a.txt'), bytesOf('xa'));
+  assert.deepEqual(fs.files.get('dst://b.txt'), bytesOf('yb'));
 });
 
 // ───── runner ────────────────────────────────────────────────────────────
