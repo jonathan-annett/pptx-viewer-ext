@@ -31,6 +31,7 @@ import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
 import { runSync, formatRunSummary } from './sync/runSync';
+import { countAccepted, handleDecisionMessage, type RowDecision } from './sync/decisions';
 
 class PptxDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -94,6 +95,10 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     let lastPerFileBlocking = 0;
     let lastPerFileHasWork = false;
     let syncInFlight = false;
+    // M5.1: per-row decisions for the embedded scoped plan. Reset on each
+    // render alongside `lastPerFilePlans` — IDs are positional and the plan
+    // is recomputed on every render (drop, save-as, topology change).
+    let lastPerFileDecisions = new Map<string, RowDecision>();
 
     const renderWithSyncTarget = async (
       result: ParseResult,
@@ -103,6 +108,10 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       lastPerFilePlans = syncTarget?.plans ?? [];
       lastPerFileBlocking = syncTarget?.blocking ?? 0;
       lastPerFileHasWork = syncTarget?.hasWork ?? false;
+      // The webview HTML is rebuilt on every render, so any decisions the
+      // user armed before are gone from the DOM. Reset the stash to match —
+      // remembered rows will come back pre-checked via the renderer.
+      lastPerFileDecisions = new Map();
       const opts: RenderOptions = { syncTargetHtml: syncTarget?.html ?? null };
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
@@ -125,6 +134,13 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
       if (m.type === 'viewer-log' && typeof m.message === 'string') {
         log(`viewer[${fileName}]: ${m.message}`);
+        return;
+      }
+
+      if (m.type === 'decision') {
+        handleDecisionMessage(msg, lastPerFileDecisions, (line) =>
+          log(`viewer[${fileName}]: ${line}`),
+        );
         return;
       }
 
@@ -169,6 +185,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
               webviewPanel,
               fileName,
               lastPerFilePlans,
+              lastPerFileDecisions,
               currentResult,
               renderWithSyncTarget,
             );
@@ -190,14 +207,16 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       if (m.type === 'run-sync') {
         // Per-file Run Sync — same machinery as the admin editor's, but with
         // a plan list filtered to a single file by buildScopedDryRunPlan's
-        // pathFilter+pathFilterIsFile options. Block on collisions / warnings
-        // and no-work, same as the other surfaces.
+        // pathFilter+pathFilterIsFile options.
+        //
+        // M5.1: orange Run Sync (safe items only) posts the same message;
+        // the difference is what's in `lastPerFileDecisions`. The executor
+        // honours whatever's armed; un-armed collisions, blocked warnings,
+        // and destination-only files skip naturally. So we only gate on the
+        // truly no-op case (no work AND no armed decisions). Mirrors the
+        // admin/config editor's runSync handler.
         if (syncInFlight) return;
-        if (lastPerFileBlocking > 0) {
-          log(`viewer[${fileName}]: run-sync ignored — collisions present`);
-          return;
-        }
-        if (!lastPerFileHasWork) {
+        if (!lastPerFileHasWork && countAccepted(lastPerFileDecisions) === 0) {
           log(`viewer[${fileName}]: run-sync ignored — nothing to do`);
           return;
         }
@@ -208,6 +227,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
             webviewPanel,
             fileName,
             lastPerFilePlans,
+            lastPerFileDecisions,
             currentResult,
             renderWithSyncTarget,
           );
@@ -494,13 +514,16 @@ async function runPerFileSync(
   webviewPanel: vscode.WebviewPanel,
   fileName: string,
   plans: PlanForDestination[],
+  decisions: ReadonlyMap<string, RowDecision>,
   currentResult: ParseResult | null,
   renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
 ): Promise<void> {
-  log(`viewer[${fileName}]: run-sync — starting execution`);
+  log(
+    `viewer[${fileName}]: run-sync — starting execution (${countAccepted(decisions)} armed override(s))`,
+  );
   let summary;
   try {
-    summary = await runSync(plans);
+    summary = await runSync(plans, decisions);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`viewer[${fileName}]: run-sync threw — ${message}`);
@@ -568,6 +591,13 @@ interface SyncTargetResult {
   html: string;
   plans: PlanForDestination[];
   blocking: number;
+  /**
+   * Items whose only warnings are 'override' severity. The viewer's orange
+   * Run Sync button is enabled whenever `blocking > 0` so the user can ship
+   * armed overrides through the same per-row affordance the standalone plan
+   * webview offers.
+   */
+  overridableWarnings: number;
   hasWork: boolean;
 }
 
@@ -633,7 +663,7 @@ async function buildSyncTargetHtml(
 }
 
 function bannerOnly(html: string): SyncTargetResult {
-  return { html, plans: [], blocking: 0, hasWork: false };
+  return { html, plans: [], blocking: 0, overridableWarnings: 0, hasWork: false };
 }
 
 function renderUncoveredBanner(workspaceFolderName: string, relPath: string): string {
@@ -666,24 +696,25 @@ async function renderScopedPlan(
       pathFilter: documentUri,
       pathFilterIsFile: true,
     });
-    // Embedded read-only preview: the viewer panel has no message channel
-    // back to a plan controller, so suppress the decision checkboxes that
-    // the standalone plan webview emits.
+    // M5.1: per-row decision checkboxes are wired through to the viewer's
+    // postMessage channel — same as the admin/config editors. Collisions get
+    // an Overwrite arming, destination-only rows get Delete, and green-path
+    // rows with override-only warnings get "Sync anyway".
     const vm = toViewModel(
       plans,
       (plan) => {
         const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
         return rel || plan.source.sourceFolderUri.toString();
       },
-      { interactive: false },
+      { interactive: true },
     );
     const head = `<p class="sync-attribution">Source: <code>${escapeHtml(attribution.workspaceFolderName)}</code> · path <code>${escapeHtml(attribution.relPath)}</code></p>`;
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =
       vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, vm.totals.updateCollision, vm.totals.warnings);
+    const actions = renderRunSyncRow(hasWork, vm.totals);
     const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
-    return { html, plans, blocking, hasWork };
+    return { html, plans, blocking, overridableWarnings: vm.totals.overridableWarnings, hasWork };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`viewer: scoped-plan failed — ${message}`);
@@ -713,24 +744,22 @@ async function renderScopedPlanForDestination(
       pathFilter,
       pathFilterIsFile: true,
     });
-    // Embedded read-only preview: the viewer panel has no message channel
-    // back to a plan controller, so suppress the decision checkboxes that
-    // the standalone plan webview emits.
+    // M5.1: same interactive treatment as the source-side scoped plan.
     const vm = toViewModel(
       plans,
       (plan) => {
         const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
         return rel || plan.source.sourceFolderUri.toString();
       },
-      { interactive: false },
+      { interactive: true },
     );
     const head = `<p class="sync-attribution">Placed here by source <code>${escapeHtml(ctx.sourceWorkspaceFolderName)}</code> · source path <code>${escapeHtml(ctx.sourceRelPath)}</code></p>`;
     const blocking = vm.totals.updateCollision + vm.totals.warnings;
     const hasWork =
       vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, vm.totals.updateCollision, vm.totals.warnings);
+    const actions = renderRunSyncRow(hasWork, vm.totals);
     const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
-    return { html, plans, blocking, hasWork };
+    return { html, plans, blocking, overridableWarnings: vm.totals.overridableWarnings, hasWork };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`viewer: dest-mapped scoped-plan failed — ${message}`);
@@ -739,29 +768,63 @@ async function renderScopedPlanForDestination(
 }
 
 /**
- * Render the Run Sync action row appended to a scoped plan section. The button
- * is disabled (with an explanatory hint) when there's nothing to do or when
- * collisions/warnings would block — same gating as the admin/config editors.
- * Per-row decisions for collisions and the orange "Proceed with safe items
- * only" path live in the standalone plan webview; this per-file Run Sync is
- * green-path only by design.
+ * Render the Run Sync action row appended to a scoped plan section. M5.1
+ * mirrors the admin/config editor's traffic-light buttons:
+ *   - Green Run Sync — always present; enabled iff `blocking === 0` & hasWork.
+ *   - Orange Run Sync (safe items only) — shown iff `blocking > 0`; label is
+ *     refreshed by the viewer's `__decisionWiring` hook as the user arms
+ *     per-row checkboxes (the same checkboxes embedded in the scoped plan
+ *     above this action row).
+ *
+ * The hint to the right explains gating when something blocks; otherwise it
+ * stays empty.
  */
-function renderRunSyncRow(hasWork: boolean, collisions: number, warnings: number): string {
+function renderRunSyncRow(
+  hasWork: boolean,
+  totals: {
+    updateCollision: number;
+    warnings: number;
+    blockingWarnings: number;
+    overridableWarnings: number;
+    create: number;
+    updateTracked: number;
+    deleteTracked: number;
+  },
+): string {
+  const collisions = totals.updateCollision;
+  const blocking = collisions + totals.warnings;
+  const safeUpper = totals.create + totals.updateTracked + totals.deleteTracked;
+
   let hint = '';
-  let disabled = '';
-  const blocking = collisions + warnings;
+  let greenDisabled = '';
+  let orangeAttrs = ' hidden disabled';
+
   if (blocking > 0) {
-    disabled = ' disabled';
+    greenDisabled = ' disabled';
     const parts: string[] = [];
     if (collisions) parts.push(`${collisions} collision${collisions === 1 ? '' : 's'}`);
-    if (warnings) parts.push(`${warnings} warning${warnings === 1 ? '' : 's'}`);
-    hint = `${parts.join(' + ')} — open the workspace plan to decide per file.`;
+    if (totals.blockingWarnings) {
+      parts.push(`${totals.blockingWarnings} blocked file${totals.blockingWarnings === 1 ? '' : 's'}`);
+    }
+    if (totals.overridableWarnings) {
+      parts.push(
+        `${totals.overridableWarnings} file${totals.overridableWarnings === 1 ? '' : 's'} needing override`,
+      );
+    }
+    if (safeUpper > 0 || collisions > 0 || totals.overridableWarnings > 0) {
+      orangeAttrs = '';
+      hint = `${parts.join(' + ')} — orange ships armed overrides or skips the rest.`;
+    } else {
+      hint = `${parts.join(' + ')} — cannot ship; fix the source file and re-open.`;
+    }
   } else if (!hasWork) {
-    disabled = ' disabled';
+    greenDisabled = ' disabled';
     hint = 'Nothing to sync — destination is up to date.';
   }
+
   return `<div class="sync-actions">
-    <button id="sync-run-btn" class="action-btn sync-run-btn" type="button"${disabled} title="Apply the green-path operations from the plan above — limited to this file">Run Sync</button>
+    <button id="sync-run-btn" class="action-btn sync-run-btn" type="button"${greenDisabled} title="Apply the green-path operations from the plan above — limited to this file">Run Sync</button>
+    <button id="sync-run-safe-btn" class="action-btn sync-run-safe-btn" type="button"${orangeAttrs} title="Sync only the items without collisions or warnings — armed checkboxes still ship">Run Sync (safe items only)</button>
     <span id="sync-run-hint" class="action-status">${escapeHtml(hint)}</span>
   </div>`;
 }

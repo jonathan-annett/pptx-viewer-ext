@@ -19,7 +19,7 @@
 // says so; this editor's intro panel says so. Edits flow through the
 // snapshot writer rather than through onDidChangeTextDocument.
 
-import { planContentStyles } from './planHtml';
+import { decisionWiringScript, planContentStyles } from './planHtml';
 
 export interface AdminEditorFolder {
   uri: string;
@@ -130,6 +130,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
 
   <script id="init-payload" type="application/json" nonce="${nonce}">${initialPayload}</script>
   <script nonce="${nonce}">${CLIENT_JS}</script>
+  <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
 </html>`;
 }
@@ -369,7 +370,9 @@ const EMBEDDED_PLAN_STYLE = `
 
 const CLIENT_JS = `
 (function () {
-  const vscode = acquireVsCodeApi();
+  // Cache the API on window so the decisionWiringScript loaded after us can
+  // reuse it. acquireVsCodeApi() throws if called twice in the same page.
+  const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
   const payloadEl = document.getElementById('init-payload');
   let state = JSON.parse(payloadEl.textContent);
 
@@ -541,6 +544,22 @@ const CLIENT_JS = `
     runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
   }
 
+  // Live label on the orange button — armed-count is read straight off the
+  // DOM checkboxes the shared decisionWiringScript posts to the extension.
+  // Hooked into window.__decisionWiring so the shared snippet calls it on
+  // every toggle without us re-binding listeners. Matches the standalone
+  // plan webview's labelling.
+  function refreshOrangeButton() {
+    if (runSyncSafeBtn.hidden) return;
+    let n = 0;
+    const cbs = document.querySelectorAll('.decision-input');
+    for (let i = 0; i < cbs.length; i++) if (cbs[i].checked) n++;
+    runSyncSafeBtn.textContent = n === 0
+      ? 'Run Sync (safe items only)'
+      : 'Run Sync (with ' + n + ' override' + (n === 1 ? '' : 's') + ')';
+  }
+  window.__decisionWiring = refreshOrangeButton;
+
   function setPlanScanning() {
     planStatusEl.className = 'plan-status plan-scanning';
     planStatusEl.textContent = 'Scanning…';
@@ -608,12 +627,15 @@ const CLIENT_JS = `
       if (safeUpper > 0) {
         runSyncSafeBtn.hidden = false;
         runSyncSafeBtn.disabled = false;
-        hint += ' — orange skips them; open the workspace plan to decide per file.';
+        hint +=
+          ' — orange skips them (or arm the per-row checkboxes below to ship overrides).';
       } else {
         hideOrange();
         hint += ' — open the workspace plan (Folder Sync: Show Plan) to decide per file.';
       }
       runSyncHintEl.textContent = hint;
+      // Reflect any pre-armed (remembered) decisions in the orange label.
+      refreshOrangeButton();
     } else if (!msg.hasWork) {
       runSyncBtn.disabled = true;
       hideOrange();
@@ -703,9 +725,11 @@ const CLIENT_JS = `
         // recomputes which button is visible/enabled. Just reset labels.
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
+        refreshOrangeButton();
       } else if (msg.status === 'error') {
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
+        refreshOrangeButton();
         // Re-enable buttons defensively; the next planStatus will gate them
         // properly. Without this the editor would be stuck if a planStatus
         // doesn't follow.

@@ -9,7 +9,7 @@
 // jsonc-parser's modification API so comments + formatting are preserved.
 
 import type { SyncConfig } from './configParse';
-import { planContentStyles } from './planHtml';
+import { decisionWiringScript, planContentStyles } from './planHtml';
 
 export interface WorkspaceFolderEntry {
   /** URI string — the stable identifier persisted in `.sync.jsonc`. */
@@ -128,6 +128,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 
   <script id="init-payload" type="application/json" nonce="${nonce}">${initialPayload}</script>
   <script nonce="${nonce}">${CLIENT_JS}</script>
+  <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
 </html>`;
 }
@@ -333,7 +334,9 @@ const EMBEDDED_PLAN_STYLE = `
 
 const CLIENT_JS = `
 (function () {
-  const vscode = acquireVsCodeApi();
+  // Cache the API on window so the decisionWiringScript loaded after us can
+  // reuse it. acquireVsCodeApi() throws if called twice in the same page.
+  const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
   const payloadEl = document.getElementById('init-payload');
   const initial = JSON.parse(payloadEl.textContent);
 
@@ -589,6 +592,21 @@ const CLIENT_JS = `
     runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
   }
 
+  // M5.1: live label on the orange button — armed-count is read straight
+  // off the DOM checkboxes the shared decisionWiringScript posts to the
+  // extension. Hooked into window.__decisionWiring so the shared snippet
+  // calls it on every toggle without us re-binding listeners.
+  function refreshOrangeButton() {
+    if (runSyncSafeBtn.hidden) return;
+    let n = 0;
+    const cbs = document.querySelectorAll('.decision-input');
+    for (let i = 0; i < cbs.length; i++) if (cbs[i].checked) n++;
+    runSyncSafeBtn.textContent = n === 0
+      ? 'Run Sync (safe items only)'
+      : 'Run Sync (with ' + n + ' override' + (n === 1 ? '' : 's') + ')';
+  }
+  window.__decisionWiring = refreshOrangeButton;
+
   function setPlanScanning() {
     planStatusEl.className = 'plan-status plan-scanning';
     planStatusEl.textContent = 'Scanning…';
@@ -655,12 +673,14 @@ const CLIENT_JS = `
       if (safeUpper > 0) {
         runSyncSafeBtn.hidden = false;
         runSyncSafeBtn.disabled = false;
-        hint += ' — orange skips them; open the workspace plan to decide per file.';
+        hint +=
+          ' — orange skips them (or arm the per-row checkboxes below to ship overrides).';
       } else {
         hideOrange();
         hint += ' — open the workspace plan to decide per file.';
       }
       runSyncHintEl.textContent = hint;
+      refreshOrangeButton();
     } else if (!msg.hasWork) {
       runSyncBtn.disabled = true;
       hideOrange();
@@ -766,12 +786,14 @@ const CLIENT_JS = `
         // buttons. Reset labels here.
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
+        refreshOrangeButton();
       } else if (msg.status === 'error') {
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
         runSyncBtn.disabled = false;
         if (!runSyncSafeBtn.hidden) runSyncSafeBtn.disabled = false;
         runSyncHintEl.textContent = 'Sync failed: ' + (msg.error || 'unknown error');
+        refreshOrangeButton();
       }
     }
   });

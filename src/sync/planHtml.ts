@@ -362,6 +362,7 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
       ${renderFooter(blocking, hasWork)}
     </footer>
   </main>
+  <script nonce="${nonce}">${decisionWiringScript()}</script>
   <script nonce="${nonce}">${footerScript()}</script>
 </body>
 </html>`;
@@ -584,62 +585,41 @@ function renderFooter(blocking: number, hasWork: boolean): string {
       <button type="button" class="btn btn-cancel btn-red" id="cancel-btn">Cancel</button>`;
 }
 
-function footerScript(): string {
-  // M3 wired Cancel; M4 added Proceed; M5 Phase B added per-row decision
-  // checkboxes; Phase C adds the "Don't ask again" companion + orange Proceed.
-  //
-  // Each .decision-input carries `data-decision-*` attributes identifying
-  // the row + intent ('overwrite' for collisions, 'delete' for destination-
-  // only). Its sibling .decision-remember-input shares the same id via
-  // `data-remember-for` so a single change handler updates both.
-  //
-  // Posted message shape: {type:'decision', id, kind, relPath, accepted, remember}.
-  // The extension stores accepted+remember in-memory; on Proceed it dispatches
-  // the accepted rows into the executor and persists the remember subset.
+/**
+ * Inline JS that wires per-row decision controls to a webview's postMessage
+ * channel. Pure: returns a string suitable for embedding inside a
+ * `<script nonce="...">` block under the host's CSP.
+ *
+ * The snippet:
+ *  - Uses delegated `change` listeners on `document.body`, so it survives
+ *    plan-pairs HTML being swapped via innerHTML (admin/config editors
+ *    rebuild the plan section on each topology change) without re-binding.
+ *  - Posts `{type:'decision', id, kind, relPath, accepted, remember}` on
+ *    every primary checkbox toggle (and again on the Remember companion's
+ *    toggle, since the primary's accepted state hasn't changed but
+ *    `remember` has).
+ *  - Calls a host-supplied `onDecisionChange()` callback after every post so
+ *    the host can refresh its own button label / armed-count display. The
+ *    host installs the callback by assigning `window.__decisionWiring` BEFORE
+ *    this script runs; absence is fine — the callback is optional.
+ *
+ * Each input carries `data-decision-*` attributes (see `renderRow`). The
+ * companion Remember checkbox shares the primary's id via `data-remember-for`.
+ *
+ * Standalone plan webview's Cancel/Proceed buttons are NOT wired here — they
+ * live in `footerScript()` because only that webview owns those buttons. The
+ * shared piece is the per-row wiring + payload shape.
+ */
+export function decisionWiringScript(): string {
   return `(function(){
-    const vscode = acquireVsCodeApi();
-    const cancelBtn = document.getElementById('cancel-btn');
-    const proceedBtn = document.getElementById('proceed-btn');
-    const orangeBtn = document.getElementById('proceed-orange-btn');
-    const checkboxes = Array.from(document.querySelectorAll('.decision-input'));
+    const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
 
     function rememberFor(id){
-      return document.querySelector('.decision-remember-input[data-remember-for="' + id + '"]');
+      return document.querySelector('.decision-remember-input[data-remember-for="' + id.replace(/"/g, '\\\\"') + '"]');
     }
 
-    function lock(label){
-      if (cancelBtn) cancelBtn.disabled = true;
-      if (proceedBtn) {
-        proceedBtn.disabled = true;
-        if (label) proceedBtn.textContent = label;
-      }
-      if (orangeBtn) {
-        orangeBtn.disabled = true;
-        if (label) orangeBtn.textContent = label;
-      }
-      for (let i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].disabled = true;
-        const r = rememberFor(checkboxes[i].dataset.decisionId);
-        if (r) r.disabled = true;
-      }
-    }
-
-    function overrideCount(){
-      let n = 0;
-      for (let i = 0; i < checkboxes.length; i++) if (checkboxes[i].checked) n++;
-      return n;
-    }
-
-    function refreshOrangeLabel(){
-      if (!orangeBtn) return;
-      const n = overrideCount();
-      orangeBtn.textContent = n === 0
-        ? 'Proceed with safe items only'
-        : 'Proceed with overrides (' + n + ')';
-      // Phase C: orange is enabled whenever there are blocks; the user can
-      // proceed with zero overrides to take the safe subset.
-      orangeBtn.disabled = false;
-      orangeBtn.removeAttribute('title');
+    function primaryFor(id){
+      return document.querySelector('.decision-input[data-decision-id="' + id.replace(/"/g, '\\\\"') + '"]');
     }
 
     function postDecision(cb){
@@ -655,7 +635,101 @@ function footerScript(): string {
           remember: !!(remember && remember.checked && cb.checked),
         });
       } catch (_) {}
+      try {
+        if (typeof window.__decisionWiring === 'function') window.__decisionWiring();
+      } catch (_) {}
     }
+
+    // Delegated listener — installed once on document, survives innerHTML
+    // swaps of the plan pairs container. Idempotent: a flag on document
+    // prevents double-binding if a host accidentally injects the snippet
+    // twice (e.g. a follow-up plan rebuild that re-renders the page chrome).
+    if (!document.__decisionWiringInstalled) {
+      document.__decisionWiringInstalled = true;
+      document.addEventListener('change', function(ev){
+        const t = ev.target;
+        if (!t) return;
+        if (t.classList && t.classList.contains('decision-input')) {
+          const remember = rememberFor(t.dataset.decisionId);
+          if (remember) {
+            if (!t.checked) remember.checked = false;
+            remember.disabled = !t.checked;
+          }
+          postDecision(t);
+          return;
+        }
+        if (t.classList && t.classList.contains('decision-remember-input')) {
+          const primary = primaryFor(t.dataset.rememberFor);
+          if (primary) postDecision(primary);
+          return;
+        }
+      });
+    }
+  })();`;
+}
+
+function footerScript(): string {
+  // M3 wired Cancel; M4 added Proceed; M5 Phase B added per-row decision
+  // checkboxes; Phase C adds the "Don't ask again" companion + orange Proceed.
+  // M5.1 split the per-row plumbing into `decisionWiringScript()` so the
+  // embedded plan surfaces (admin/config/viewer) can share the same payload
+  // shape. The standalone webview keeps the Cancel/Proceed wiring local.
+  //
+  // The standalone's orange label tracks armed-count live. We piggy-back on
+  // the shared snippet's `window.__decisionWiring` callback to do that
+  // refresh — keeps the count math out of the shared piece (which has no
+  // orange button to label).
+  return `(function(){
+    const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
+    const cancelBtn = document.getElementById('cancel-btn');
+    const proceedBtn = document.getElementById('proceed-btn');
+    const orangeBtn = document.getElementById('proceed-orange-btn');
+
+    function checkboxes(){
+      return Array.from(document.querySelectorAll('.decision-input'));
+    }
+
+    function lock(label){
+      if (cancelBtn) cancelBtn.disabled = true;
+      if (proceedBtn) {
+        proceedBtn.disabled = true;
+        if (label) proceedBtn.textContent = label;
+      }
+      if (orangeBtn) {
+        orangeBtn.disabled = true;
+        if (label) orangeBtn.textContent = label;
+      }
+      const cbs = checkboxes();
+      for (let i = 0; i < cbs.length; i++) {
+        cbs[i].disabled = true;
+        const id = cbs[i].dataset.decisionId;
+        const r = document.querySelector('.decision-remember-input[data-remember-for="' + id.replace(/"/g, '\\\\"') + '"]');
+        if (r) r.disabled = true;
+      }
+    }
+
+    function overrideCount(){
+      const cbs = checkboxes();
+      let n = 0;
+      for (let i = 0; i < cbs.length; i++) if (cbs[i].checked) n++;
+      return n;
+    }
+
+    function refreshOrangeLabel(){
+      if (!orangeBtn) return;
+      const n = overrideCount();
+      orangeBtn.textContent = n === 0
+        ? 'Proceed with safe items only'
+        : 'Proceed with overrides (' + n + ')';
+      // Phase C: orange is enabled whenever there are blocks; the user can
+      // proceed with zero overrides to take the safe subset.
+      orangeBtn.disabled = false;
+      orangeBtn.removeAttribute('title');
+    }
+
+    // Hook into the shared decision-wiring callback so the orange label
+    // refreshes on every armed-count change.
+    window.__decisionWiring = refreshOrangeLabel;
 
     if (cancelBtn) cancelBtn.addEventListener('click', function(){
       try { vscode.postMessage({type:'cancel'}); } catch (_) {}
@@ -669,27 +743,6 @@ function footerScript(): string {
       try { vscode.postMessage({type:'proceed'}); } catch (_) {}
     });
 
-    for (let i = 0; i < checkboxes.length; i++) {
-      const cb = checkboxes[i];
-      cb.addEventListener('change', function(){
-        // Remember is only meaningful when primary is checked. Untick + disable
-        // the companion box on opt-out so the user can't accidentally persist
-        // a "no, never overwrite" the manifest schema doesn't model.
-        const remember = rememberFor(cb.dataset.decisionId);
-        if (remember) {
-          if (!cb.checked) remember.checked = false;
-          remember.disabled = !cb.checked;
-        }
-        postDecision(cb);
-        refreshOrangeLabel();
-      });
-      const remember = rememberFor(cb.dataset.decisionId);
-      if (remember) {
-        remember.addEventListener('change', function(){
-          postDecision(cb);
-        });
-      }
-    }
     refreshOrangeLabel();
 
     window.addEventListener('message', function(e){

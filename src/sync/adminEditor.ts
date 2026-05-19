@@ -37,6 +37,7 @@ import {
 import type { PlanForDestination } from './planner';
 import { buildDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
+import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
 import type { SyncManager } from './manager';
 
 const VIEW_TYPE = 'folderSync.adminEditor';
@@ -81,6 +82,15 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     let disposed = false;
     let syncInFlight = false;
 
+    // M5.1: per-row decisions captured from the embedded plan. Cleared on
+    // each rebuild because decision ids are positional (pairIndex-based) and
+    // a topology change can shuffle which pairs are present. Rows whose
+    // manifest already records a remembered decision come back pre-checked
+    // via the renderer's `withDecision({ checked: true })` — the manifest is
+    // the source of truth for those, so an empty starting Map doesn't lose
+    // them; pickArmedDecisions only adds NEW arming on top.
+    const decisions = new Map<string, RowDecision>();
+
     const rebuildPlan = async (): Promise<void> => {
       if (disposed) return;
       const myToken = ++planRunToken;
@@ -89,6 +99,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
         const plans = await buildDryRunPlan(this.manager.getTopology());
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;
+        // Per the comment on `decisions` above: plan IDs may have shifted, so
+        // start from empty. The webview's checkboxes re-arm any remembered
+        // rows on render and the user re-confirms anything else.
+        decisions.clear();
         void postPlanResult(panel, plans, (_totals, hasWork) => {
           lastPlanHasWork = hasWork;
         });
@@ -151,6 +165,14 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
 
     panel.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       try {
+        if (msg.type === 'decision') {
+          // Validate + apply via the shared pure helper. Log lines use the
+          // admin-editor prefix so the channel makes the source obvious.
+          handleDecisionMessage(msg, decisions, (line) =>
+            log(`admin-editor: ${line}`),
+          );
+          return;
+        }
         if (msg.type === 'renameFolder') {
           await this.renameFolder(msg.index, msg.name);
         } else if (msg.type === 'refreshSnapshot') {
@@ -174,17 +196,21 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
           if (syncInFlight) return;
           // No blocking-guard: when collisions/warnings are present the
           // webview only enables the orange "safe items only" button, which
-          // posts the same `runSync` message. `runSyncFromAdmin` calls
-          // `executePlan` with no decided overwrites/deletes, so the
-          // executor naturally skips collisions, destination-only, and
-          // warned items. Green path + orange path land here identically.
+          // posts the same `runSync` message. The executor honours whatever
+          // decisions the user has armed; un-armed collisions, warned items,
+          // and destination-only files skip naturally. Green path + orange
+          // path land here identically — the only difference is what's in
+          // the `decisions` map at this point.
           if (!lastPlanHasWork) {
             log('admin-editor: runSync ignored — nothing to do');
             return;
           }
           syncInFlight = true;
           try {
-            await runSyncFromAdmin(panel, lastPlans);
+            log(
+              `admin-editor: runSync — ${countAccepted(decisions)} armed override(s)`,
+            );
+            await runSyncFromAdmin(panel, lastPlans, decisions);
           } finally {
             syncInFlight = false;
             // Refresh the plan post-run — the manifest changes mean the next
@@ -259,7 +285,8 @@ type WebviewMessage =
   | { type: 'clearSnapshot' }
   | { type: 'openAsText' }
   | { type: 'refreshPlan' }
-  | { type: 'runSync' };
+  | { type: 'runSync' }
+  | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
 function buildViewModel(document: vscode.TextDocument, store: SnapshotStore): AdminEditorViewModel {
   const text = document.getText();
@@ -300,16 +327,18 @@ function postPlanResult(
   plans: PlanForDestination[],
   gate: (totals: PlanTotals, hasWork: boolean) => void,
 ): Thenable<boolean> {
-  // Embedded read-only view: no message channel back from this panel to
-  // collect per-row decisions, so suppress the decision checkboxes that
-  // the standalone plan webview emits.
+  // M5.1: this editor now collects per-row decisions over the existing
+  // panel message channel (the webview posts {type:'decision', ...}; the
+  // wired side stores them and threads them into runSync). The standalone
+  // plan webview remains the place for bulk review, but routine
+  // overwrite / delete / "Sync anyway" arming works here too.
   const vm = toViewModel(
     plans,
     (plan) => {
       const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
       return rel || plan.source.sourceFolderUri.toString();
     },
-    { interactive: false },
+    { interactive: true },
   );
   const t = vm.totals;
   const chipsHtml = renderPlanChips(t);
@@ -338,13 +367,14 @@ function postPlanResult(
 async function runSyncFromAdmin(
   panel: vscode.WebviewPanel,
   plans: PlanForDestination[],
+  decisions: ReadonlyMap<string, RowDecision>,
 ): Promise<void> {
   log('admin-editor: runSync — starting execution');
   void panel.webview.postMessage({ type: 'syncStatus', status: 'running' });
 
   let summary;
   try {
-    summary = await runSync(plans);
+    summary = await runSync(plans, decisions);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`admin-editor: sync execution threw — ${message}`);

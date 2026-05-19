@@ -31,9 +31,10 @@ test('renders a CSP meta tag with the supplied nonce', () => {
   const html = renderConfigEditorHtml(baseVm(), 'abc123');
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /script-src 'nonce-abc123'/);
-  // The nonce is used on both scripts (init payload + client JS).
+  // The nonce is used on all three scripts (init payload + client JS +
+  // shared per-row decision wiring snippet from planHtml.ts).
   const occurrences = html.split('nonce="abc123"').length - 1;
-  assert.equal(occurrences, 2, 'nonce should appear on both <script> tags');
+  assert.equal(occurrences, 3, 'nonce should appear on all three <script> tags');
 });
 
 test('init payload includes destinations (uri-keyed), includes, excludes', () => {

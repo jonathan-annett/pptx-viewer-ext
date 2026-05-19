@@ -83,3 +83,46 @@ export function applyDecision(
   }
   return decisions.size;
 }
+
+/**
+ * Count the rows the user has armed (i.e. `accepted: true`). Absences and
+ * explicit unticks are not counted.
+ */
+export function countAccepted(decisions: ReadonlyMap<string, RowDecision>): number {
+  let n = 0;
+  for (const d of decisions.values()) if (d.accepted) n++;
+  return n;
+}
+
+/**
+ * Validate-and-apply an untyped webview message in one call. The shared
+ * shape every embedded plan surface uses: parse → apply → log. Pure module,
+ * so the host supplies its own logger (vscode `log` channel writer). Returns
+ * the applied decision when the message was well-formed and the map was
+ * updated; returns `undefined` for malformed input (host is responsible for
+ * reporting that, since severity / channel are host-specific).
+ *
+ * The logger callback receives a human-readable one-line summary suitable
+ * for the host's debug channel — keeps the formatting consistent across the
+ * standalone webview, admin editor, room editor, and pptx viewer.
+ */
+export function handleDecisionMessage(
+  msg: unknown,
+  decisions: Map<string, RowDecision>,
+  log?: (line: string) => void,
+): RowDecision | undefined {
+  const decision = parseDecisionMessage(msg);
+  if (!decision) {
+    if (log) log('decision message rejected (malformed)');
+    return undefined;
+  }
+  applyDecision(decisions, decision);
+  if (log) {
+    const rememberBit = decision.accepted && decision.remember ? ' (remember)' : '';
+    log(
+      `decision ${decision.accepted ? 'set' : 'cleared'}${rememberBit} — ` +
+        `${decision.kind} ${decision.relPath} (total accepted: ${countAccepted(decisions)})`,
+    );
+  }
+  return decision;
+}

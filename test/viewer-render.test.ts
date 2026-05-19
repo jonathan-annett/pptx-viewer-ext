@@ -143,6 +143,37 @@ test('renderHtml: CSP forbids default-src and allows only data: images', () => {
   assert.ok(html.includes('img-src data:'), 'img-src data: only');
 });
 
+// ───── M5.1: shared decision-wiring snippet ─────────────────────────────
+
+test('renderHtml: embeds the shared decisionWiringScript so per-row checkboxes post {type:"decision"}', () => {
+  const html = renderHtml(parseResult(), NONCE);
+  // Distinctive tokens emitted by decisionWiringScript() in src/sync/planHtml.ts.
+  // The viewer needs these whether or not a sync-target section is present,
+  // so the script can attach to rows that show up on a subsequent re-render
+  // (drop / save-as → renderWithSyncTarget rebuilds the whole HTML, but the
+  // first render with no sync section still benefits from a no-op listener).
+  assert.ok(
+    html.includes('__decisionWiringInstalled'),
+    'delegated listener guard token present',
+  );
+  assert.ok(
+    html.includes('__decisionVscode'),
+    'cached vscode API singleton present (so the viewer + decision scripts share it)',
+  );
+  assert.ok(
+    /type:\s*['"]decision['"]/.test(html),
+    'decision message type emitted by the shared snippet',
+  );
+});
+
+test('renderHtml: nonce flows onto every <script> tag (viewer + decision wiring)', () => {
+  const html = renderHtml(parseResult(), NONCE);
+  // M5.1 added a second <script> for the shared decisionWiringScript. Both
+  // must carry the per-render nonce — otherwise the strict CSP blocks them.
+  const occurrences = html.split(`<script nonce="${NONCE}">`).length - 1;
+  assert.equal(occurrences, 2, 'two nonce-tagged <script> tags (viewer + decision wiring)');
+});
+
 // ───── run ──────────────────────────────────────────────────────────────
 
 let failed = 0;

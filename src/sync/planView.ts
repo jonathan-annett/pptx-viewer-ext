@@ -10,7 +10,7 @@ import { buildDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary } from './runSync';
-import { applyDecision, parseDecisionMessage, type RowDecision } from './decisions';
+import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
 import { log } from '../log';
 
 /**
@@ -75,7 +75,7 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
       return;
     }
     if (m.type === 'decision') {
-      handleDecisionMessage(msg, decisions);
+      handleDecisionMessage(msg, decisions, (line) => log(`sync: ${line}`));
       return;
     }
   });
@@ -95,34 +95,6 @@ function makeNonce(): string {
   const arr = new Uint8Array(16);
   crypto.getRandomValues(arr);
   return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
- * Wired handler: validate the message via the pure parser, apply to the
- * in-memory map, log the outcome. Pure work lives in `decisions.ts` so
- * tsx tests can exercise the parser/applier directly.
- */
-function handleDecisionMessage(
-  msg: unknown,
-  decisions: Map<string, RowDecision>,
-): void {
-  const decision = parseDecisionMessage(msg);
-  if (!decision) {
-    log(`sync: decision message rejected (malformed)`);
-    return;
-  }
-  applyDecision(decisions, decision);
-  const rememberBit = decision.accepted && decision.remember ? ' (remember)' : '';
-  log(
-    `sync: decision ${decision.accepted ? 'set' : 'cleared'}${rememberBit} — ` +
-      `${decision.kind} ${decision.relPath} (total accepted: ${decisions.size})`,
-  );
-}
-
-function countAccepted(decisions: ReadonlyMap<string, RowDecision>): number {
-  let n = 0;
-  for (const d of decisions.values()) if (d.accepted) n++;
-  return n;
 }
 
 /**

@@ -30,6 +30,7 @@
 
 import type { Flag, MediaEntry, ParseResult } from './pptx';
 import { compareModalCss } from './sync/compareModalHtml';
+import { decisionWiringScript } from './sync/planHtml';
 
 export interface RenderOptions {
   /** Pre-rendered HTML for the "Sync target" section, or null/undefined for
@@ -121,6 +122,7 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     </div>
   </div>
   <script nonce="${nonce}">${viewerScript()}</script>
+  <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
 </html>`;
 }
@@ -193,18 +195,37 @@ function formatMedia(media: MediaEntry[]): string {
 // through the extension host bypasses the iframe restriction entirely.
 function viewerScript(): string {
   return `(function(){
-  const vscode = acquireVsCodeApi();
+  // Cache the API on window so decisionWiringScript (loaded after us) can
+  // reuse it. acquireVsCodeApi() throws if called twice in the same page.
+  const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
   const saveBtn = document.getElementById('save-as-btn');
   const updateBtn = document.getElementById('update-btn');
   const updateInput = document.getElementById('update-input');
   const status = document.getElementById('action-status');
   const modalHost = document.getElementById('modal-host');
   const dropOverlay = document.getElementById('drop-overlay');
-  // The Run Sync button + hint live inside the Sync target section, which
-  // may or may not be rendered — both are nullable. Re-resolved each render
+  // The Run Sync buttons + hint live inside the Sync target section, which
+  // may or may not be rendered — all nullable. Re-resolved each render
   // because the whole webview HTML is replaced on every renderWithSyncTarget.
   const syncRunBtn = document.getElementById('sync-run-btn');
+  const syncRunSafeBtn = document.getElementById('sync-run-safe-btn');
   const syncRunHint = document.getElementById('sync-run-hint');
+
+  // M5.1: live armed-count display on the orange button. Mirrors the
+  // admin/config editor's refreshOrangeButton(). Hooked into the shared
+  // decisionWiringScript via window.__decisionWiring so we get a callback
+  // after every per-row checkbox toggle.
+  function refreshOrangeButton() {
+    if (!syncRunSafeBtn || syncRunSafeBtn.hidden) return;
+    var n = 0;
+    var cbs = document.querySelectorAll('.decision-input');
+    for (var i = 0; i < cbs.length; i++) if (cbs[i].checked) n++;
+    syncRunSafeBtn.textContent = n === 0
+      ? 'Run Sync (safe items only)'
+      : 'Run Sync (with ' + n + ' override' + (n === 1 ? '' : 's') + ')';
+  }
+  window.__decisionWiring = refreshOrangeButton;
+  refreshOrangeButton();
 
   function vlog(msg){
     try { vscode.postMessage({type:'viewer-log', message: msg}); } catch (_) {}
@@ -347,15 +368,33 @@ function viewerScript(): string {
     }
   });
 
-  // ----- Per-file Run Sync (button lives inside the Sync target section) -----
-  if (syncRunBtn) syncRunBtn.addEventListener('click', function(){
-    if (syncRunBtn.disabled) return;
-    syncRunBtn.disabled = true;
-    syncRunBtn.textContent = 'Syncing\u2026';
+  // ----- Per-file Run Sync (buttons live inside the Sync target section) -----
+  // Both buttons post the same {type:'run-sync'}; the extension decides what
+  // to do based on the in-memory decisions Map. Orange differs from green
+  // only in that the user has armed some per-row overrides before clicking.
+  function lockSyncButtons(label){
+    if (syncRunBtn) {
+      syncRunBtn.disabled = true;
+      syncRunBtn.textContent = label;
+    }
+    if (syncRunSafeBtn) {
+      syncRunSafeBtn.disabled = true;
+      syncRunSafeBtn.textContent = label;
+    }
     if (syncRunHint) syncRunHint.textContent = '';
     setBusy(true);
-    setStatus('Syncing\u2026');
-    vlog('click → run-sync');
+    setStatus(label);
+  }
+  if (syncRunBtn) syncRunBtn.addEventListener('click', function(){
+    if (syncRunBtn.disabled) return;
+    vlog('click → run-sync (green)');
+    lockSyncButtons('Syncing\u2026');
+    try { vscode.postMessage({type:'run-sync'}); } catch (_) {}
+  });
+  if (syncRunSafeBtn) syncRunSafeBtn.addEventListener('click', function(){
+    if (syncRunSafeBtn.disabled) return;
+    vlog('click → run-sync (orange / safe items only)');
+    lockSyncButtons('Syncing\u2026');
     try { vscode.postMessage({type:'run-sync'}); } catch (_) {}
   });
 
@@ -399,11 +438,7 @@ function viewerScript(): string {
       // not to re-render (defensive no-currentResult case, or an error before
       // the re-render fires).
       if (m.status === 'running') {
-        if (syncRunBtn) {
-          syncRunBtn.disabled = true;
-          syncRunBtn.textContent = 'Syncing\u2026';
-        }
-        setStatus('Syncing\u2026');
+        lockSyncButtons('Syncing\u2026');
       } else if (m.status === 'done') {
         setBusy(false);
         setStatus(m.failed ? 'Sync partially failed' : 'Synced');
@@ -411,6 +446,11 @@ function viewerScript(): string {
           syncRunBtn.disabled = true;
           syncRunBtn.textContent = 'Run Sync';
         }
+        if (syncRunSafeBtn) {
+          syncRunSafeBtn.disabled = true;
+          syncRunSafeBtn.textContent = 'Run Sync (safe items only)';
+        }
+        refreshOrangeButton();
       } else if (m.status === 'error') {
         setBusy(false);
         setStatus('Sync failed: ' + (m.message || 'unknown'));
@@ -418,6 +458,11 @@ function viewerScript(): string {
           syncRunBtn.disabled = false;
           syncRunBtn.textContent = 'Run Sync';
         }
+        if (syncRunSafeBtn && !syncRunSafeBtn.hidden) {
+          syncRunSafeBtn.disabled = false;
+          syncRunSafeBtn.textContent = 'Run Sync (safe items only)';
+        }
+        refreshOrangeButton();
         if (syncRunHint) syncRunHint.textContent = '';
       }
       return;
@@ -679,9 +724,21 @@ function css(): string {
       background: var(--vscode-charts-green, #4caf50);
       filter: brightness(1.1);
     }
-    .sync-run-btn:disabled {
+    .sync-run-btn:disabled,
+    .sync-run-safe-btn:disabled {
       opacity: 0.55;
       cursor: not-allowed;
+    }
+    /* Orange variant — same pattern as admin/config editor's .btn-orange. The
+       button is hidden unless the plan has blocks; the renderRunSyncRow emits
+       the 'hidden' attribute on the element so we don't need a class toggle. */
+    .sync-run-safe-btn {
+      background: var(--vscode-charts-orange, #d97706);
+      color: #fff;
+      border-color: transparent;
+    }
+    .sync-run-safe-btn:hover:not(:disabled) {
+      filter: brightness(1.1);
     }
     ${syncPlanEmbedCss()}
 
@@ -796,18 +853,86 @@ function syncPlanEmbedCss(): string {
       padding: 4px 10px 10px;
     }
     .sync-target ul.rows .row {
-      display: grid;
-      grid-template-columns: 1fr max-content max-content;
-      gap: 12px;
-      align-items: baseline;
       padding: 2px 0;
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 0.92em;
     }
+    /* Flex (not grid) so trailing cells — size, hashes, warning badge,
+       decision checkboxes — flow naturally as the vocabulary grows. Mirrors
+       planContentCss()'s .row-main in the standalone plan webview. */
+    .sync-target ul.rows .row-main {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .sync-target ul.rows .row-main .path { flex: 1 1 auto; min-width: 0; }
     .sync-target ul.rows .path { word-break: break-all; }
     .sync-target ul.rows .size,
     .sync-target ul.rows .hashes {
       color: var(--vscode-descriptionForeground);
+    }
+    .sync-target ul.rows .hashes { opacity: 0.8; }
+    /* Warning badge — same chip palette as the standalone plan webview so a
+       file warned in the workspace plan looks identical here. */
+    .sync-target ul.rows .warn-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 0.85em;
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 18%, transparent);
+      border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 50%, transparent);
+      color: var(--vscode-editorWarning-foreground, #cca700);
+      cursor: help;
+    }
+    .sync-target ul.rows .warn-list {
+      list-style: none;
+      margin: 4px 0 4px 16px;
+      padding: 0;
+      font-size: 0.9em;
+    }
+    .sync-target ul.rows .warn-item {
+      padding: 1px 0 1px 12px;
+      color: var(--vscode-editorWarning-foreground, #cca700);
+      position: relative;
+    }
+    .sync-target ul.rows .warn-item::before {
+      content: '\u26A0';
+      position: absolute;
+      left: -2px;
+      font-size: 0.85em;
+    }
+    /* Per-row decision checkboxes — mirror the standalone webview palette so
+       the affordance reads the same in both surfaces. */
+    .sync-target ul.rows .decision,
+    .sync-target ul.rows .decision-remember {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+      padding: 0 4px;
+      border-radius: 3px;
+    }
+    .sync-target ul.rows .decision-remember { font-size: 0.85em; }
+    .sync-target ul.rows .decision:hover,
+    .sync-target ul.rows .decision-remember:hover {
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    }
+    .sync-target ul.rows .decision-input,
+    .sync-target ul.rows .decision-remember-input { margin: 0; cursor: pointer; }
+    .sync-target ul.rows .decision-overwrite .decision-label { color: var(--vscode-errorForeground); }
+    .sync-target ul.rows .decision-delete .decision-label,
+    .sync-target ul.rows .decision-warning-override .decision-label {
+      color: var(--vscode-editorWarning-foreground, #cca700);
+    }
+    .sync-target ul.rows .decision-input:checked + .decision-label { font-weight: 600; }
+    .sync-target ul.rows .decision-remember-input:disabled,
+    .sync-target ul.rows .decision-remember-input:disabled + .decision-remember-label {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
     .sync-target .banner.ok   { background: color-mix(in srgb, var(--vscode-charts-green, #4caf50) 10%, transparent); border-left-color: var(--vscode-charts-green, #4caf50); }
   `;

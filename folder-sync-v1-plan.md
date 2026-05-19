@@ -522,7 +522,7 @@ M4.7 extends this editor (along with the room editor and pptx preview) with the 
 
 Everything in M4.7 shipped over 2026-05-18 → 2026-05-19. The three follow-ons landed after the user dogfooded Phase D on the live URL and surfaced gaps: Run Sync only existed in the admin editor (felt like a regression once the user had three custom editors visible), the VS Code drop overlay's "hold shift to drop into editor" copy was inverted relative to behaviour, and the compare modal lacked a one-gesture path through to syncing the new file.
 
-**Next milestone is M5** (interactive decisions + validators). The plan is **clean** between M4.7 and M5: no carried-over work, no half-finished follow-ons. M5 was paused for M4.7 and is now unblocked.
+**Next milestone is M5** (interactive decisions + validators). The plan is **clean** between M4.7 and M5: no carried-over work, no half-finished follow-ons. M5 was paused for M4.7 and is now unblocked. *(2026-05-20 update: M5 has since shipped — see below.)*
 
 **Why this exists:** The product framing is "pushing files to rooms" for a multi-room conference site. Three natural scopes, each with a natural surface:
 
@@ -658,19 +658,34 @@ No watcher needed; the file is whatever it is when previewed. (A future polish i
 - `renderPlanHtml` is unchanged — same renderer, three call sites (admin editor, room editor, file preview).
 - `buildScopedDryRunPlan` is covered by `test/sync-scoped-plan.test.ts` (no scope, sub-directory, single file); `classifyPreviewContext` is covered by `test/sync-preview-context.test.ts` (all four cases).
 
-### M5 — Interactive decisions + validators *(next — M4.7 is done)*
+### M5 — Interactive decisions + validators *(✅ shipped)*
 
-- Collision detection against the manifest
-- Destination reverse pass to surface destination-only files
-- Per-row toggles in the UI: "overwrite this", "delete this", "don't ask again"
-- `manifest.decisions` persistence and re-application on next run
-- Orange + red footer state with live transitions as toggles change
-- Wire existing pptx validators (linked media, show type, showMediaCtrls + embedded video) into the plan as a Warnings category
-- Orange button proceeds with non-blocked items only; red button cancels
+**Status snapshot (2026-05-20, M5 complete):**
 
-**Done when:** collision and destination-only scenarios behave per spec; "don't ask again" persists across runs; pptx warnings appear and block green.
+| Phase | What | Status |
+|---|---|---|
+| A | Pptx validators surfaced as plan warnings (linked media, show type, media controls) | ✅ shipped (commit `6c2cb7c`) |
+| B | Per-row decision UI — checkboxes for overwrite/delete/remember (UI-only, no executor wiring) | ✅ shipped (commit `359e43a`) |
+| C | Wire orange path: armed decisions flow to executor; `manifest.decisions` persist across runs | ✅ shipped (commit `74c5838`) |
+| D | Warnings block green footer; orange proceed skips files with unresolved warnings | ✅ shipped (commit `4a1799d`, `76b1d6b`) |
+| D-adj | Warning severity tiers (`'block'` vs `'override'`) + per-file "Sync anyway" override; media-controls demoted to override-only | ✅ shipped (commit `54355d3`) |
+| follow-on | Orange "safe items only" button rendered in embedded plan views (room editor, admin editor, pptx viewer) | ✅ shipped (commit `1cc5f69`) |
+| M5.1 | Per-row decision affordances (Overwrite / Delete / "Sync anyway") + live orange-button label wired in every embedded preview surface; shared `decisionWiringScript()` + `handleDecisionMessage()` helpers | ✅ shipped (this change) |
 
-### M6 — Polish + remaining surfaces *(paused until M4.7 ships)*
+M5 shipped over 2026-05-19 → 2026-05-20. Collision detection, destination-only surfacing, and the manifest-decisions persistence were already in place from earlier milestones; M5's job was the *interactive* layer on top — letting the user arm specific overwrites/deletes/overrides per file and have those decisions remembered.
+
+**Scope adjustment during M5 (D-adj):** the original plan had a single "warnings" category that hard-blocked green. Dogfooding the live URL after Phase D revealed this was too aggressive — the media-controls-on warning is genuinely *ship-able* (the file works fine; the progress bar is just visually noisy). D-adj introduced a two-tier severity model: `'block'` warnings (kiosk, browse mode, linked external media) still block green and cannot be overridden; `'override'` warnings (media-controls + embedded video) gain a per-file "Sync anyway" checkbox that arms a `warning-override` decision, persisted in the manifest like other arming decisions. The `RowDecision.kind` union widened from `'overwrite' | 'delete'` to `'overwrite' | 'delete' | 'warning-override'` to carry this.
+
+**M5.1 — decisions in every embedded preview surface (2026-05-20): ✅ shipped.** The four embedded plan surfaces (room editor, admin editor, pptx viewer source case, pptx viewer destination case) now pass `{ interactive: true }` to `toViewModel`, so per-row Overwrite / Delete / "Sync anyway" checkboxes render inline alongside the read-only preview. Each host installs its own `'decision'` message handler that funnels through the shared pure helper `handleDecisionMessage` in `src/sync/decisions.ts`, which validates the payload and applies it to the host's in-memory `Map<string, RowDecision>`. The Run Sync buttons mirror the standalone webview's traffic-light: green when nothing blocks, orange "Run Sync (safe items only)" when collisions/warnings exist — with a live armed-count label that updates as the user arms checkboxes.
+
+  Implementation pieces:
+
+  - **Shared per-row JS:** `decisionWiringScript()` exported from `src/sync/planHtml.ts` returns a delegated `change` listener that posts `{type:'decision', id, kind, relPath, accepted, remember}` for every primary toggle (and again for the Remember companion). A `window.__decisionWiring` callback hook lets each host refresh its own orange button label without re-binding listeners.
+  - **`acquireVsCodeApi()` caching:** each host's client JS now caches the API on `window.__decisionVscode` so the second `<script>` block (decisionWiringScript) can reuse it instead of throwing.
+  - **Wired sites:** `src/sync/planView.ts` (standalone — refactored to share helpers), `src/sync/adminEditor.ts` + `adminEditorHtml.ts`, `src/sync/configEditor.ts` + `configEditorHtml.ts`, `src/provider.ts` + `src/webview.ts` (pptx viewer). The viewer's `renderRunSyncRow` now emits green + orange buttons; `runPerFileSync` takes a `decisions` map and forwards it to `runSync(plans, decisions)`.
+  - **Tests:** existing `test/sync-decisions.test.ts` covers the pure helpers; `sync-config-editor` and `sync-admin-editor` nonce-count assertions were updated from 2 to 3 to account for the added shared `<script>` block. All sync + viewer + parse tests pass.
+
+### M6 — Polish + remaining surfaces *(next — M5 is done)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath

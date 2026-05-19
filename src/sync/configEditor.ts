@@ -28,6 +28,7 @@ import {
 import type { PlanForDestination } from './planner';
 import { buildScopedDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
+import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
 import type { SyncManager } from './manager';
 import { log } from '../log';
 
@@ -77,6 +78,12 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     let disposed = false;
     let syncInFlight = false;
 
+    // M5.1: per-row decisions captured from the embedded plan webview.
+    // Cleared on each plan rebuild — decision ids are positional
+    // (pairIndex-based) and topology changes can reshuffle pair order.
+    // Remembered rows re-arm from the manifest via the renderer.
+    const decisions = new Map<string, RowDecision>();
+
     const rebuildPlan = async (): Promise<void> => {
       if (disposed) return;
       const myToken = ++planRunToken;
@@ -87,6 +94,7 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         });
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;
+        decisions.clear();
         void postPlanResult(panel, plans, (_totals, hasWork) => {
           lastPlanHasWork = hasWork;
         });
@@ -210,6 +218,12 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
 
     panel.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       try {
+        if (msg.type === 'decision') {
+          handleDecisionMessage(msg, decisions, (line) =>
+            log(`sync-config-editor: ${line}`),
+          );
+          return;
+        }
         if (msg.type === 'setConfig') {
           const newText = serialiseConfig(document.getText(), msg.config);
           if (newText === document.getText()) return;
@@ -252,10 +266,10 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
           //
           // No blocking-guard: when collisions/warnings are present the
           // webview only enables the orange "safe items only" button, which
-          // posts the same `runSync` message. `runSyncFromConfig` calls
-          // `executePlan` with no decided overwrites/deletes, so the
-          // executor naturally skips collisions, destination-only, and
-          // warned items. Green path + orange path land here identically.
+          // posts the same `runSync` message. Armed per-row decisions in
+          // `decisions` flow into the executor; unarmed collisions and
+          // warned items skip naturally. Green and orange paths land here
+          // identically — the only difference is what's in `decisions`.
           if (syncInFlight) return;
           if (!lastPlanHasWork) {
             log('sync-config-editor: runSync ignored — nothing to do');
@@ -263,7 +277,10 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
           }
           syncInFlight = true;
           try {
-            await runSyncFromConfig(panel, lastPlans);
+            log(
+              `sync-config-editor: runSync — ${countAccepted(decisions)} armed override(s)`,
+            );
+            await runSyncFromConfig(panel, lastPlans, decisions);
           } finally {
             syncInFlight = false;
             // Refresh the plan post-run — the manifest changes mean the next
@@ -304,7 +321,8 @@ type WebviewMessage =
   | { type: 'openWorkspacePlan' }
   | { type: 'refreshPlan' }
   | { type: 'openAsText' }
-  | { type: 'runSync' };
+  | { type: 'runSync' }
+  | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
 function emptyConfig(): SyncConfig {
   return { destinations: [], include: [], exclude: [] };
@@ -370,16 +388,17 @@ function postPlanResult(
   plans: PlanForDestination[],
   gate: (totals: PlanTotals, hasWork: boolean) => void,
 ): Thenable<boolean> {
-  // Embedded read-only view: no message channel back from this panel to
-  // collect per-row decisions, so suppress the decision checkboxes that
-  // the standalone plan webview emits.
+  // M5.1: the room editor now collects per-row decisions via the panel's
+  // existing message channel. The host stores them and threads them into
+  // runSync; the webview's "Run Sync (safe items only)" button is renamed
+  // live as the user arms overrides.
   const vm = toViewModel(
     plans,
     (plan) => {
       const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
       return rel || plan.source.sourceFolderUri.toString();
     },
-    { interactive: false },
+    { interactive: true },
   );
   const totals: PlanTotals = vm.totals;
   const chipsHtml = renderPlanChips(totals);
@@ -412,13 +431,14 @@ function postPlanResult(
 async function runSyncFromConfig(
   panel: vscode.WebviewPanel,
   plans: PlanForDestination[],
+  decisions: ReadonlyMap<string, RowDecision>,
 ): Promise<void> {
   log('sync-config-editor: runSync — starting execution');
   void panel.webview.postMessage({ type: 'syncStatus', status: 'running' });
 
   let summary;
   try {
-    summary = await runSync(plans);
+    summary = await runSync(plans, decisions);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync-config-editor: sync execution threw — ${message}`);
