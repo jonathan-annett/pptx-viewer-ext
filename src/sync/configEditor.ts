@@ -28,7 +28,12 @@ import {
 import type { PlanForDestination } from './planner';
 import { buildScopedDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
-import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
+import {
+  countAccepted,
+  handleDecisionMessage,
+  seedRememberedDecisions,
+  type RowDecision,
+} from './decisions';
 import type { SyncManager } from './manager';
 import { log } from '../log';
 
@@ -95,6 +100,13 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;
         decisions.clear();
+        // Pre-checked DOM checkboxes from manifest-remembered decisions
+        // don't fire change events on load; seed the in-memory map so the
+        // extension's armed-count matches the rendered DOM.
+        const seeded = seedRememberedDecisions(plans, decisions);
+        if (seeded > 0) {
+          log(`sync-config-editor: seeded ${seeded} remembered decision(s) from plan`);
+        }
         void postPlanResult(panel, plans, (_totals, hasWork) => {
           lastPlanHasWork = hasWork;
         });

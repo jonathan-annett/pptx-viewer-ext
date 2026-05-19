@@ -10,7 +10,12 @@ import { buildDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary } from './runSync';
-import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
+import {
+  countAccepted,
+  handleDecisionMessage,
+  seedRememberedDecisions,
+  type RowDecision,
+} from './decisions';
 import { log } from '../log';
 
 /**
@@ -57,7 +62,12 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
   // (`${pairIndex}:${kind}:${relPath}`), which is stable for the lifetime
   // of this panel — exactly what we need for an in-memory map. Phase C
   // reads from here when wiring decisions into the executor + manifest.
+  // Seed from `remembered.accepted` items so pre-checked DOM checkboxes
+  // (which don't fire change events on load) still appear as armed when
+  // Proceed runs the executor.
   const decisions = new Map<string, RowDecision>();
+  const seeded = seedRememberedDecisions(plans, decisions);
+  if (seeded > 0) log(`sync: seeded ${seeded} remembered decision(s) from plan`);
 
   panel.webview.onDidReceiveMessage(async (msg: unknown) => {
     if (!msg || typeof msg !== 'object') return;

@@ -6,6 +6,9 @@
 // plan panel. Phase C persists them into the manifest's `decisions` map
 // (see manifest-types.ts) and threads them into the executor.
 
+import type { PlanItem } from './plan';
+import { hasOverridableWarningOnly } from './plan';
+
 /**
  * A single per-row decision captured from the webview. The id is the
  * stable identifier emitted by the renderer
@@ -125,4 +128,61 @@ export function handleDecisionMessage(
     );
   }
   return decision;
+}
+
+/**
+ * Seed the in-memory decisions map from plan items that carry a remembered
+ * "don't ask again" decision in the manifest. The renderer pre-checks these
+ * rows in the HTML (`withDecision({ checked: true, remembered: true })`),
+ * but a pre-checked DOM checkbox does NOT fire a `change` event on page
+ * load — so without seeding, the extension's view of armed decisions stays
+ * empty while the user thinks they're armed. Clicking Run Sync then runs
+ * the executor with zero armed overrides and the safe-path skip logic
+ * filters everything out. (Symptom: first orange click does nothing;
+ * second click — after manually toggling the box — works.)
+ *
+ * Mirrors `toViewModel` in planHtml.ts: pairIndex is positional in the
+ * plans array (same iteration order both sides use), and the decision id
+ * is `${pairIndex}:${kind}:${relPath}`.
+ *
+ * Returns the number of decisions added — useful for the host's debug log.
+ *
+ * Structurally typed on the plan parameter so callers don't have to bring
+ * in `PlanForDestination` (which transitively imports vscode types).
+ */
+export function seedRememberedDecisions(
+  plans: readonly { readonly items: readonly PlanItem[] }[],
+  decisions: Map<string, RowDecision>,
+): number {
+  let added = 0;
+  let pairIndex = -1;
+  for (const plan of plans) {
+    pairIndex++;
+    for (const item of plan.items) {
+      if (!item.remembered?.accepted) continue;
+      let kind: RowDecision['kind'];
+      if (item.kind === 'update-collision') {
+        kind = 'overwrite';
+      } else if (item.kind === 'destination-only') {
+        kind = 'delete';
+      } else if (
+        (item.kind === 'create' || item.kind === 'update-tracked') &&
+        hasOverridableWarningOnly(item)
+      ) {
+        kind = 'warning-override';
+      } else {
+        continue;
+      }
+      const id = `${pairIndex}:${kind}:${item.relPath}`;
+      decisions.set(id, {
+        id,
+        kind,
+        relPath: item.relPath,
+        accepted: true,
+        remember: true,
+      });
+      added++;
+    }
+  }
+  return added;
 }

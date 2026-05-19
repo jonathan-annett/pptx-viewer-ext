@@ -37,7 +37,12 @@ import {
 import type { PlanForDestination } from './planner';
 import { buildDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
-import { countAccepted, handleDecisionMessage, type RowDecision } from './decisions';
+import {
+  countAccepted,
+  handleDecisionMessage,
+  seedRememberedDecisions,
+  type RowDecision,
+} from './decisions';
 import type { SyncManager } from './manager';
 
 const VIEW_TYPE = 'folderSync.adminEditor';
@@ -86,9 +91,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     // each rebuild because decision ids are positional (pairIndex-based) and
     // a topology change can shuffle which pairs are present. Rows whose
     // manifest already records a remembered decision come back pre-checked
-    // via the renderer's `withDecision({ checked: true })` — the manifest is
-    // the source of truth for those, so an empty starting Map doesn't lose
-    // them; pickArmedDecisions only adds NEW arming on top.
+    // via the renderer's `withDecision({ checked: true })`; we seed the Map
+    // from the plan's `remembered.accepted` items after every rebuild so the
+    // executor sees the same arming the user sees (pre-checked DOM boxes
+    // don't fire change events on load).
     const decisions = new Map<string, RowDecision>();
 
     const rebuildPlan = async (): Promise<void> => {
@@ -101,8 +107,12 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
         lastPlans = plans;
         // Per the comment on `decisions` above: plan IDs may have shifted, so
         // start from empty. The webview's checkboxes re-arm any remembered
-        // rows on render and the user re-confirms anything else.
+        // rows on render; seed the Map to match.
         decisions.clear();
+        const seeded = seedRememberedDecisions(plans, decisions);
+        if (seeded > 0) {
+          log(`admin-editor: seeded ${seeded} remembered decision(s) from plan`);
+        }
         void postPlanResult(panel, plans, (_totals, hasWork) => {
           lastPlanHasWork = hasWork;
         });

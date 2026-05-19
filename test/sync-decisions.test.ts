@@ -11,8 +11,10 @@ import { strict as assert } from 'node:assert';
 import {
   applyDecision,
   parseDecisionMessage,
+  seedRememberedDecisions,
   type RowDecision,
 } from '../src/sync/decisions';
+import type { PlanItem } from '../src/sync/plan';
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
@@ -201,6 +203,181 @@ test('applyDecision: re-accepting an existing id overwrites prior record', () =>
   });
   assert.equal(map.size, 1);
   assert.equal(map.get('a')?.remember, true);
+});
+
+// ───── seedRememberedDecisions ───────────────────────────────────────────
+
+function item(over: Partial<PlanItem> & Pick<PlanItem, 'kind' | 'relPath'>): PlanItem {
+  return { ...over } as PlanItem;
+}
+
+test('seedRememberedDecisions: empty input → no entries, returns 0', () => {
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions([], map);
+  assert.equal(n, 0);
+  assert.equal(map.size, 0);
+});
+
+test('seedRememberedDecisions: items without remembered → no entries', () => {
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions(
+    [{ items: [item({ kind: 'create', relPath: 'a.pptx' })] }],
+    map,
+  );
+  assert.equal(n, 0);
+});
+
+test('seedRememberedDecisions: remembered update-collision → overwrite entry', () => {
+  // A collision row with a remembered "don't ask again" overwrite decision.
+  // The renderer pre-checks the row; this seed must mirror that so the
+  // executor sees it as armed.
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'update-collision',
+            relPath: 'a.pptx',
+            remembered: { accepted: true },
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  assert.equal(n, 1);
+  const row = map.get('0:overwrite:a.pptx');
+  assert.ok(row, 'expected an overwrite entry at id 0:overwrite:a.pptx');
+  assert.equal(row.accepted, true);
+  assert.equal(row.remember, true);
+  assert.equal(row.kind, 'overwrite');
+});
+
+test('seedRememberedDecisions: remembered destination-only → delete entry', () => {
+  const map = new Map<string, RowDecision>();
+  seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'destination-only',
+            relPath: 'orphan.pptx',
+            remembered: { accepted: true },
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  const row = map.get('0:delete:orphan.pptx');
+  assert.ok(row);
+  assert.equal(row.kind, 'delete');
+});
+
+test('seedRememberedDecisions: remembered create + override-warning → warning-override entry', () => {
+  // Reproduces the bug from the live test: a create row with an overridable
+  // warning (e.g. pptx media-controls + embedded video) and a manifest-
+  // remembered warning-override decision. The renderer pre-checks the box;
+  // without seeding, the extension's decision map stays empty and the
+  // executor's warning-override gate filters the row out — first click on
+  // orange does nothing, second click after a manual toggle succeeds.
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'create',
+            relPath: 'wed/talk.pptx',
+            remembered: { accepted: true },
+            warnings: [
+              { code: 'showMediaCtrlsWithVideo', severity: 'override', detail: '' },
+            ],
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  assert.equal(n, 1);
+  const row = map.get('0:warning-override:wed/talk.pptx');
+  assert.ok(row, 'expected warning-override entry to be seeded');
+  assert.equal(row.kind, 'warning-override');
+});
+
+test('seedRememberedDecisions: create without warnings + remembered → no entry', () => {
+  // Defensive: a create row with no warnings has no warning-override
+  // checkbox in the UI, so the seed must not invent an arming.
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'create',
+            relPath: 'clean.pptx',
+            remembered: { accepted: true },
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  assert.equal(n, 0);
+});
+
+test('seedRememberedDecisions: pairIndex is positional across plans', () => {
+  // Two plans, one item each, both remembered. The IDs need to be 0:* and
+  // 1:* — same positional convention the renderer uses in toViewModel.
+  const map = new Map<string, RowDecision>();
+  seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'update-collision',
+            relPath: 'a.pptx',
+            remembered: { accepted: true },
+          }),
+        ],
+      },
+      {
+        items: [
+          item({
+            kind: 'update-collision',
+            relPath: 'a.pptx',
+            remembered: { accepted: true },
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  assert.equal(map.size, 2);
+  assert.ok(map.get('0:overwrite:a.pptx'));
+  assert.ok(map.get('1:overwrite:a.pptx'));
+});
+
+test('seedRememberedDecisions: remembered.accepted=false → no entry', () => {
+  // Phase-C only writes manifest decisions for accepted=true, but the type
+  // allows false; the seed must not arm an unticked-remembered row.
+  const map = new Map<string, RowDecision>();
+  const n = seedRememberedDecisions(
+    [
+      {
+        items: [
+          item({
+            kind: 'update-collision',
+            relPath: 'a.pptx',
+            remembered: { accepted: false },
+          }),
+        ],
+      },
+    ],
+    map,
+  );
+  assert.equal(n, 0);
 });
 
 // ───── runner ────────────────────────────────────────────────────────────

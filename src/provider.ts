@@ -31,7 +31,12 @@ import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
 import { runSync, formatRunSummary } from './sync/runSync';
-import { countAccepted, handleDecisionMessage, type RowDecision } from './sync/decisions';
+import {
+  countAccepted,
+  handleDecisionMessage,
+  seedRememberedDecisions,
+  type RowDecision,
+} from './sync/decisions';
 
 class PptxDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -111,7 +116,14 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       // The webview HTML is rebuilt on every render, so any decisions the
       // user armed before are gone from the DOM. Reset the stash to match —
       // remembered rows will come back pre-checked via the renderer.
+      // Seed the map from the plan's `remembered.accepted` items so the
+      // extension's view of armed decisions matches the rendered DOM (pre-
+      // checked checkboxes don't fire change events on load).
       lastPerFileDecisions = new Map();
+      const seeded = seedRememberedDecisions(lastPerFilePlans, lastPerFileDecisions);
+      if (seeded > 0) {
+        log(`viewer[${fileName}]: seeded ${seeded} remembered decision(s) from plan`);
+      }
       const opts: RenderOptions = { syncTargetHtml: syncTarget?.html ?? null };
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
