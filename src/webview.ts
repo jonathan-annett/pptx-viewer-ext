@@ -115,7 +115,10 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
   </main>
   <div id="modal-host" class="modal-host" aria-hidden="true"></div>
   <div id="drop-overlay" class="drop-overlay" aria-hidden="true">
-    <div class="drop-overlay-inner">Drop a .pptx to compare or update</div>
+    <div class="drop-overlay-inner">
+      <div class="drop-overlay-title">Drop a .pptx to compare or update</div>
+      <div class="drop-overlay-sub">Hold <kbd>Shift</kbd> while dropping &mdash; otherwise VS Code opens it as a new tab</div>
+    </div>
   </div>
   <script nonce="${nonce}">${viewerScript()}</script>
 </body>
@@ -695,7 +698,27 @@ function css(): string {
       border-radius: 6px;
       background: var(--vscode-editor-background);
       color: var(--vscode-foreground);
+      text-align: center;
+    }
+    .drop-overlay-title {
       font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .drop-overlay-sub {
+      font-weight: 400;
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+    }
+    /* kbd pill — mimics VS Code's keybinding affordance so the Shift hint
+       reads as a key rather than a word. */
+    .drop-overlay-sub kbd {
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.9em;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.4));
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+      color: var(--vscode-foreground);
     }
 
     /* ----- Modal overlay (compare / identical) --------------------------- */
