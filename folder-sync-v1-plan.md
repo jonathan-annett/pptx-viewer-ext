@@ -2,7 +2,9 @@
 
 ## Purpose
 
-Add a one-way folder sync feature to the existing `pptx-viewer-ext` VS Code web extension. Users author small YAML files in their source folders describing where each should sync to; destinations are workspace folders added to vscode.dev via "Add Folder to Workspace". The user **convenes** a sync deliberately (no timers, no background watchers); each run produces a plan that the user reviews and gates before any writes happen.
+Add a one-way folder sync feature to the existing `pptx-viewer-ext` VS Code web extension. Users author small JSONC files in their source folders describing where each should sync to; destinations are workspace folders added to vscode.dev via "Add Folder to Workspace". The user **convenes** a sync deliberately (no timers, no background watchers); each run produces a plan that the user reviews and gates before any writes happen.
+
+**Config format note:** v1 originally used `.sync.yaml` with a hand-rolled mini-parser. Partway through development we pivoted to `.sync.jsonc` (JSON with comments + trailing commas) parsed by the `jsonc-parser` package. Reasoning: VS Code's own settings/tasks/launch ecosystem is JSONC, and `contributes.jsonValidation` gives us IntelliSense + validation for free against a bundled JSON Schema. The original justification for YAML — human-authorable templates with comments — is better served by a forthcoming custom-editor UI than by YAML syntax. See `M4.5` below.
 
 The pptx-viewer feature continues to exist alongside the sync engine. The validation checks the viewer surfaces (linked media, kiosk/window show mode, show-media-controls) flow into the sync plan as flagged items, surfacing for user decision at gate time.
 
@@ -12,8 +14,8 @@ This plan covers the sync feature only. The development substrate (web extension
 
 ## User-facing model
 
-1. User opens vscode.dev with one workspace folder containing one or more **source** folders. Each source has its own `.sync.yaml` describing its destinations.
-2. User adds **destination** workspace folders via "Add Folder to Workspace". These are referenced by name from the source yamls.
+1. User opens vscode.dev with one workspace folder containing one or more **source** folders. Each source has its own `.sync.jsonc` describing its destinations.
+2. User adds **destination** workspace folders via "Add Folder to Workspace". These are referenced by name from the source configs.
 3. User invokes a sync via Explorer context menu, status bar button, command palette, or optional keybinding.
 4. A webview panel shows the **plan** — a categorized list of every operation that would occur.
 5. User gates the operation via a traffic-light decision:
@@ -29,8 +31,8 @@ The user is the "event" — sync is a convened operation, not a reactive automat
 
 | Concept | Definition |
 |---|---|
-| **Source** | Any folder containing a `.sync.yaml` file. Can sit at any depth within a workspace folder. |
-| **Destination** | A workspace folder whose name is referenced from some source's yaml. Detected automatically — no explicit marking needed. |
+| **Source** | Any folder containing a `.sync.jsonc` file. Can sit at any depth within a workspace folder. |
+| **Destination** | A workspace folder whose name is referenced from some source's config. Detected automatically — no explicit marking needed. |
 | **Scope** | The subset of the workspace targeted by a given sync invocation. Either workspace-wide or a specific folder under a source. |
 | **Plan** | A structured list of every operation that would occur given the scope and current state. Produced before any writes. |
 | **Manifest** | A persistent record of what sync has placed in a destination, plus user "don't ask again" decisions. Lives in destination root. |
@@ -39,32 +41,43 @@ The user is the "event" — sync is a convened operation, not a reactive automat
 
 ## Configuration
 
-### `.sync.yaml` schema
+### `.sync.jsonc` schema
 
-```yaml
-# Required: at least one destination
-destinations:
-  - name: backup-drive          # Must match a workspace folder name
-    path: projects/alpha        # Optional subpath within the destination
-  - name: archive-server
-    path: snapshots/alpha
+```jsonc
+{
+  // Required: at least one destination
+  "destinations": [
+    {
+      "name": "backup-drive",        // Must match a workspace folder name
+      "path": "projects/alpha"       // Optional subpath within the destination
+    },
+    {
+      "name": "archive-server",
+      "path": "snapshots/alpha"
+    }
+  ],
 
-# Optional: glob patterns to exclude (in addition to built-in ignores)
-exclude:
-  - "~$*"
-  - "*.tmp"
-  - "node_modules/**"
+  // Optional: glob patterns to exclude (in addition to built-in ignores)
+  "exclude": [
+    "~$*",
+    "*.tmp",
+    "node_modules/**"
+  ],
 
-# Optional: glob patterns to include (default: everything not excluded)
-include:
-  - "**/*"
+  // Optional: glob patterns to include (default: everything not excluded)
+  "include": [
+    "**/*"
+  ]
+}
 ```
 
-The yaml lives at the root of any folder treated as a source. The file itself is implicitly excluded from sync.
+The config lives at the root of any folder treated as a source. The file itself is implicitly excluded from sync. Parsed with `jsonc-parser` so comments and trailing commas are first-class — same dialect VS Code uses for `settings.json`, `tasks.json`, `launch.json`.
+
+A JSON Schema (bundled at `schemas/sync.schema.json`) is registered via `contributes.jsonValidation` against `**/.sync.jsonc` — the user gets IntelliSense, hover docs, and red-squiggle validation in the regular text editor with no extra wiring.
 
 ### Built-in ignores (always applied)
 
-- `.sync.yaml` (the config itself)
+- `.sync.jsonc` (the config itself)
 - `.foldersync-manifest.json` (sync state, never copied)
 - `.DS_Store`, `Thumbs.db` (OS metadata)
 - `~$*` (Office lock files)
@@ -72,15 +85,15 @@ The yaml lives at the root of any folder treated as a source. The file itself is
 
 ### Hot reload
 
-YAML changes are picked up automatically via `vscode.workspace.createFileSystemWatcher('**/.sync.yaml')`. Editing a yaml triggers topology re-resolution before the next sync invocation; no restart needed.
+Config changes are picked up automatically via `vscode.workspace.createFileSystemWatcher('**/.sync.jsonc')`. Editing a config triggers topology re-resolution before the next sync invocation; no restart needed.
 
 ### Topology validation at load
 
-Each time the yaml set is reloaded:
+Each time the config set is reloaded:
 
 - Every `destinations[].name` must resolve to a workspace folder currently open. Unresolved names produce warnings in the Output Channel: *"destination 'backup-drive' is not currently in the workspace"*. The source is still loadable; the unresolved destination will be skipped at sync time.
 - Multiple sources targeting the same destination must use non-colliding subpaths. Collisions are configuration errors that block sync until resolved.
-- A malformed yaml emits an error in the Output Channel; the affected source is excluded from sync until fixed.
+- A malformed config emits an error in the Output Channel; the affected source is excluded from sync until fixed.
 
 ---
 
@@ -93,8 +106,8 @@ Every sync run follows three phases: **plan → gate → execute**. The user onl
 Given a scope (workspace-wide or folder-scoped):
 
 1. **Source discovery**
-   - Workspace-wide: walk all workspace folders, find every `.sync.yaml`. Each is a source root.
-   - Folder-scoped: walk up from the selected folder. The nearest `.sync.yaml` is the source. The scope is restricted to files at or below the selected folder.
+   - Workspace-wide: walk all workspace folders, find every `.sync.jsonc`. Each is a source root.
+   - Folder-scoped: walk up from the selected folder. The nearest `.sync.jsonc` is the source. The scope is restricted to files at or below the selected folder.
 
 2. **Destination resolution**
    - For each source, look up each `destinations[].name` as a currently-open workspace folder URI.
@@ -229,7 +242,7 @@ Distinguish "files sync placed here" from "files the user added independently", 
 
 | Surface | Behaviour |
 |---|---|
-| Explorer context menu — folder | "Folder Sync: Sync This Folder" — folder-scoped. Greyed (with tooltip) if no `.sync.yaml` at or above the selection, or the selection is inside a destination workspace folder |
+| Explorer context menu — folder | "Folder Sync: Sync This Folder" — folder-scoped. Greyed (with tooltip) if no `.sync.jsonc` at or above the selection, or the selection is inside a destination workspace folder |
 | Status bar button | "Folder Sync" with sync icon — workspace-wide. Tooltip shows source/destination count |
 | Command palette | "Folder Sync: Sync Everything" (workspace-wide) and "Folder Sync: Sync This Folder" (acts on the active editor's folder, or first selected explorer item) |
 | Optional keybinding | User-configurable via standard VS Code keybinding; no default binding ships |
@@ -242,9 +255,9 @@ For workspace-wide invocations covering multiple sources, the plan is **aggregat
 
 ### Workspace structure
 
-- **No `.sync.yaml` anywhere in the workspace** — status bar button shows "No sync configuration"; context menu items are greyed.
-- **`.sync.yaml` references a destination not in the workspace** — warning at config load, that destination skipped at sync time; the plan summary reports "skipped: destination 'X' not available".
-- **Nested sources** (e.g. `projects/.sync.yaml` AND `projects/alpha/.sync.yaml`) — closest wins (the "at or above" rule). The outer yaml never sees `alpha` because alpha's own yaml takes over for that subtree.
+- **No `.sync.jsonc` anywhere in the workspace** — status bar button shows "No sync configuration"; context menu items are greyed.
+- **`.sync.jsonc` references a destination not in the workspace** — warning at config load, that destination skipped at sync time; the plan summary reports "skipped: destination 'X' not available".
+- **Nested sources** (e.g. `projects/.sync.jsonc` AND `projects/alpha/.sync.jsonc`) — closest wins (the "at or above" rule). The outer config never sees `alpha` because alpha's own config takes over for that subtree.
 
 ### Sync execution
 
@@ -256,6 +269,10 @@ For workspace-wide invocations covering multiple sources, the plan is **aggregat
 
 - **Manifest absent but destination has files** — all destination files become destination-only in the plan. User most likely just proceeds, which creates manifest entries for files that also exist in source. Pure destination-only files remain destination-only.
 - **Manifest version newer than extension** — refuse to sync, surface error.
+
+### Config format migration
+
+- **Existing `.sync.yaml` files** — once M4.5 ships, the YAML loader is gone. The format is not auto-migrated by the extension; users with pre-pivot files convert by hand (the schema is small and the new authoring UI makes it a one-time chore). If we ever publish to a marketplace, a one-shot migration command might be worth adding.
 
 ---
 
@@ -278,7 +295,7 @@ Raised in conversation, deliberately not in v1:
 
 ## Milestones
 
-The v1 scope is sequenced into six milestones. Each milestone is a single coherent diff, testable end-to-end on the VPS test harness, and leaves the existing pptx viewer untouched. Earlier milestones de-risk later ones — the config layer and plan engine are exercised long before any code writes a file.
+The v1 scope is sequenced into milestones. Each milestone is a single coherent diff, testable end-to-end on the VPS test harness, and leaves the existing pptx viewer untouched. Earlier milestones de-risk later ones — the config layer and plan engine are exercised long before any code writes a file. M1–M4 shipped against `.sync.yaml`; M4.5 pivots the format to `.sync.jsonc` and adds a minimal authoring UI, after which M5/M6 resume.
 
 ### M1 — Config layer + diagnostics ✅ shipped (commit 4a60c73)
 
@@ -291,6 +308,8 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 
 **Done when:** authoring a yaml causes topology to resolve live, unresolved destinations produce a warning, the topology command prints the current resolved view.
 
+> **Note (post-M4 pivot):** the yaml-mini implementation and `.sync.yaml` filename will be replaced with `.sync.jsonc` parsed by `jsonc-parser` as part of **M4.5** below. The M1 outcomes (load, hot reload, topology validation, status bar) remain — only the file format and parser swap.
+
 ### M2 — Plan engine (workspace-wide, no UI) ✅ shipped (commit 9e05937)
 
 - Glob matching for `include`/`exclude` plus the built-in ignore list
@@ -302,27 +321,77 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 
 **Done when:** every operation category is exercisable by setting up the right source/destination state and verifying the output text. No filesystem writes anywhere yet.
 
-### M3 — Plan webview UI (read-only)
+### M3 — Plan webview UI (read-only) ✅ shipped (commit 19f0be2)
 
 - New regular webview panel (not a custom editor) with explicit CSP + per-render nonce, following the pptx-viewer pattern
 - Header with scope description + aggregate counts
 - Collapsible sections with per-row info (path, size, brief reason)
-- Traffic-light footer: **Cancel** wired up; **Proceed** buttons rendered but disabled
+- Traffic-light footer: **Cancel** wired up; **Proceed** buttons rendered but disabled (Proceed is wired in M4)
 - Invocation via command palette only for now
+- Pure/vscode-wired split: `planHtml.ts` (pure renderer, tsx-testable) vs `planView.ts` (vscode panel wiring)
 
-**Done when:** the plan webview renders the M2 plan structure and can be dismissed. No execution path yet.
+**Done when:** the plan webview renders the M2 plan structure and can be dismissed. No execution path yet. ✅
 
-### M4 — Executor + manifest writes (green path)
+### M4 — Executor + manifest writes (green path) ✅ shipped (commit aed3a74)
 
 - Atomic writes via `writeFile` to `<path>.tmp` then `vscode.workspace.fs.rename`
 - Manifest read → mutate → atomic write (same tmp+rename pattern)
-- Create / tracked-update / tracked-delete execution
+- Create / tracked-update / tracked-delete execution, with pure executor in `src/sync/executor.ts` (injected `SyncFs<U>`) and vscode-wired orchestrator in `src/sync/runSync.ts`
 - Per-file error isolation; Output Channel summary; completion notification with success/failure counts
-- Green **Proceed** button wired up for plans with no blocking items
+- Green **Proceed** button wired up for plans with no blocking items; clean no-op plans show "Nothing to do" + Close
 
-**Done when:** a clean sync (no collisions, no validation warnings) runs end-to-end and the manifest reflects what was placed.
+**Done when:** a clean sync (no collisions, no validation warnings) runs end-to-end and the manifest reflects what was placed. ✅
 
-### M5 — Interactive decisions + validators
+### M4.5 — JSON pivot + minimal authoring UI
+
+**Why this exists:** After M4 shipped working, the user decided in-depth testing should wait until there's a UI for editing settings, and standardised the project on JSON over YAML because VS Code's settings/tasks/launch ecosystem is JSONC. M5 and M6 are paused until M4.5 ships.
+
+**Part A — format pivot (mechanical)**
+
+- Add `jsonc-parser` to dependencies (bundled; small)
+- Delete `src/sync/yaml-mini.ts` and `test/sync-yaml.test.ts`
+- Rewrite `src/sync/config.ts` to parse `.sync.jsonc` via `jsonc-parser` (use `parseTree` + `getNodeValue` so we keep span info for error reporting; or `parse` with errors array if spans aren't needed)
+- Update `src/sync/manager.ts` glob to `**/.sync.jsonc`; update the `FileSystemWatcher` pattern likewise
+- Update `src/sync/planner.ts` (and anywhere else) to drop the dynamic `./yaml-mini` import in favour of the JSONC path
+- Migrate any in-repo `.sync.yaml` test fixtures to `.sync.jsonc`
+- Remove the `test:sync-yaml` script from `package.json`
+
+**Part B — schema + IntelliSense**
+
+- Author `schemas/sync.schema.json` describing the config shape (destinations, include, exclude, with descriptions on each property)
+- Register via `package.json` `contributes.jsonValidation`:
+  ```json
+  "contributes": {
+    "jsonValidation": [
+      { "fileMatch": ["**/.sync.jsonc"], "url": "./schemas/sync.schema.json" }
+    ]
+  }
+  ```
+- Bundle the schema file into the published extension (esbuild config or copy step)
+
+**Part C — minimal authoring custom editor**
+
+A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user can pick destinations from a dropdown of currently-open workspace folder names rather than typing them, and can hit "Dry run" to see the plan inline without leaving the editor. Reuses `renderPlanHtml` + the M2 dry-run plan builder — no new engine code.
+
+- Custom editor activates on `.sync.jsonc` (registered as a secondary editor — the user can still open as raw text via "Reopen With")
+- Upper half: form-style controls
+  - List of destinations with `<select>` populated from `vscode.workspace.workspaceFolders` names
+  - Subpath text input per destination
+  - Add/remove destination row
+  - Plain textareas for include/exclude glob lists (one per line is fine for v1; better authoring is a future polish task)
+- Lower half: embedded plan webview, refreshed by a **Dry run** button
+- Two-way sync between the form and the underlying JSONC text: edits in the form re-serialise via `jsonc-parser`'s modification API (preserves comments + formatting where possible)
+- CSP + per-render nonce same as the plan webview
+
+**Done when:**
+
+- `.sync.jsonc` files in samples/fixtures replace the old `.sync.yaml`
+- The bundled JSON Schema gives IntelliSense + red squiggles in a plain text editor on a malformed config
+- The custom editor opens by default on `.sync.jsonc`, shows destinations as dropdowns of workspace folder names, and a Dry-run click renders the M3 plan webview inline
+- All existing pure tests pass against the new parser path
+- `yaml-mini.ts` and `test/sync-yaml.test.ts` are gone from the tree
+
+### M5 — Interactive decisions + validators *(paused until M4.5 ships)*
 
 - Collision detection against the manifest
 - Destination reverse pass to surface destination-only files
@@ -334,7 +403,7 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 
 **Done when:** collision and destination-only scenarios behave per spec; "don't ask again" persists across runs; pptx warnings appear and block green.
 
-### M6 — Polish + remaining surfaces
+### M6 — Polish + remaining surfaces *(paused until M4.5 ships)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.yaml` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
@@ -365,10 +434,15 @@ The v1 scope is sequenced into six milestones. Each milestone is a single cohere
 
 Items raised in conversation that wait until v1 ships. Listed in rough order of expected value; sequencing decided when v1 is closer to done.
 
-### `.sync.yaml` editor with embedded dry-run
+### Authoring UI polish (after M4.5 minimal version)
 
-A custom editor for `.sync.yaml` files. Upper half: form-style controls that list currently-open workspace folders so destinations can be picked from a dropdown rather than typed (eliminates the unresolved-name failure mode at authoring time, not just at load). Lower half: the existing plan webview, refreshed by a "Dry run" button on the editor. Reuses `renderPlanHtml` + `buildDryRunPlan` from M3 — no new engine, just a new front door that ties authoring and previewing into one surface.
+M4.5 ships a *minimal* `.sync.jsonc` custom editor: workspace-folder dropdown, subpath input, add/remove rows, glob textareas, embedded dry-run. Polish that didn't make M4.5:
+
+- Richer glob editor (per-pattern row with remove button, validation against the schema, an "exclude default" toggle that adds/removes the common boilerplate patterns)
+- Live preview of which files match the current include/exclude set without running a full dry-run
+- "Save as template" — copy the current config to clipboard or another folder
+- Visual diff when the user has edited the form vs the underlying file (e.g. comments would be lost)
 
 ### Per-file sync from the pptx viewer
 
-A "Sync now" action on the pptx custom editor's metadata page. Resolves the file's source `.sync.yaml` (nearest-yaml rule), pushes the single file to each destination immediately (no plan/gate cycle — the user already saw the file open), updates the manifest, and surfaces sync status as a new metadata row (last synced timestamp + destination list, or "not under a sync source"). Skips the collision/validator gate when invoked this way — the user is acting on one known file and has the viewer's validation output in front of them.
+A "Sync now" action on the pptx custom editor's metadata page. Resolves the file's source `.sync.jsonc` (nearest-config rule), pushes the single file to each destination immediately (no plan/gate cycle — the user already saw the file open), updates the manifest, and surfaces sync status as a new metadata row (last synced timestamp + destination list, or "not under a sync source"). Skips the collision/validator gate when invoked this way — the user is acting on one known file and has the viewer's validation output in front of them.
