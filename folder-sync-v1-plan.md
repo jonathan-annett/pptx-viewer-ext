@@ -355,7 +355,7 @@ The v1 scope is sequenced into milestones. Each milestone is a single coherent d
   - Destination rows with `<select>` populated from current workspace folders, subpath input, add/remove rows
   - Plain textareas for include/exclude (one glob per line)
   - Form edits flow back into the document via `jsonc-parser`'s `modify()` API so comments + formatting on other keys are preserved
-  - **Dry run** button opens the existing M3 plan webview (workspace-wide) in a separate panel — the "embedded plan in the lower half" was descoped to keep this milestone minimal; embedding is a polish item in the post-v1 roadmap
+  - **Dry run** button opens the existing M3 plan webview (workspace-wide) in a separate panel — the "embedded plan in the lower half" was descoped to keep this milestone minimal. Picked back up as M4.7 with the scope correction (room-scoped, not workspace-wide) and re-labelled to **Open workspace-wide plan** so the per-room/global distinction is explicit
   - **Reopen as text** button delegates to `vscode.openWith` with the default text editor
   - CSP + per-render nonce same as plan webview and pptx viewer
   - Pure renderer in `configEditorHtml.ts` (with smoke tests under tsx) + vscode-wired `configEditor.ts`
@@ -470,7 +470,7 @@ Registered as `folderSync.adminEditor`, viewType priority `default` so the file 
 - Two buttons: **Clear snapshot**, **Refresh from current workspace** (re-captures now).
 - Footer note: *"This file is managed by Folder Sync. Open as text via Reopen With → Text Editor only for diagnostics."*
 
-M4.7 extends this editor with workspace-level sync commands (Full Dry-Run, etc) — that's the natural home per the framing of "top level info and commands that affect all the lower sync sources". M4.6 just establishes the editor and its maintenance commands.
+M4.7 extends this editor (along with the room editor and pptx preview) with the embedded + scoped dry-run system across all three sync scopes — see the M4.7 milestone below. M4.6 just establishes the admin editor surface and its maintenance commands.
 
 **Probe outcomes (2026-05-19, sha 6b45c4e — `folderSync.probeColdRead` command in `src/sync/probe.ts`):**
 
@@ -500,7 +500,94 @@ M4.7 extends this editor with workspace-level sync commands (Full Dry-Run, etc) 
 - *Clear Workspace Snapshot* produces a clean activation next refresh (no restore, no prompt, no file on disk).
 - Snapshot updates on every topology change — verifiable by editing a `.sync.jsonc` to add a destination, refreshing, and seeing the new destination re-attached with its display name intact.
 
-### M5 — Interactive decisions + validators *(paused until M4.6 ships)*
+### M4.7 — Embedded + scoped dry-run across all three sync surfaces *(planned)*
+
+**Why this exists:** The product framing is "pushing files to rooms" for a multi-room conference site. Three natural scopes, each with a natural surface:
+
+| Scope | Surface | What this milestone adds |
+|---|---|---|
+| Per-event / global (all rooms) | `.admin-sync.jsonc` editor | Full Dry-Run section, run automatically + on Refresh |
+| Per-room | `.sync.jsonc` editor | Embedded plan section for *this* room only, auto-runs on open + on file changes |
+| Per-file | pptx preview panel | Implied single-file plan, context-sensitive (source / uncovered / destination) |
+
+Today, the `.sync.jsonc` editor's only dry-run affordance is a button that opens the workspace-wide plan in a separate panel — that's both the wrong scope (everything, not just this room) and the wrong place (a different panel). The admin editor has no sync controls at all. The pptx preview shows file metadata but says nothing about *where* the file would be pushed. M4.7 closes all three gaps with one shared rendering surface so the same information appears everywhere.
+
+**Conceptual lock-in:** the per-file view is "the dry-run for this file's containing room, filtered to just this file." A user looking at a pptx preview should see exactly the info they'd see in the room editor if this were the only file in the room — same renderer, same fields, smaller scope. That's the unifying constraint that makes the engine work pay off thrice over.
+
+**Engine work — scope-restricted planner:**
+
+The current `buildDryRunPlan(topology)` is workspace-wide. M4.7 needs:
+
+- `buildScopedDryRunPlan(topology, { sourceConfigUri, pathFilter? })` — pure addition over the existing planner. `sourceConfigUri` selects a single source from `topology.sources`; `pathFilter` (optional URI) further restricts the source walk to files at-or-below that path. `pathFilter` of a directory yields a folder-scoped plan; `pathFilter` of a single file yields a one-file plan.
+- Destination subpath rule already documented in §"Sync engine" (lines 110-115) — folder-scoped syncs append the relative offset to the destination subpath. The new function applies the same rule.
+- Returns the same `PlanForDestination[]` shape so the existing `renderPlanHtml` works without modification.
+
+Tests under tsx mirror `test/sync-plan.test.ts`: empty scope, scope at source root (= workspace-wide for that one source), scope at a subdirectory, scope at a single file. `test/sync-scoped-plan.test.ts`.
+
+**Per-event / global — `.admin-sync.jsonc` editor Full Dry-Run:**
+
+- Plan section appears below the existing folders/settings panels in the admin editor. Reuses `renderPlanHtml` — workspace-wide is just *no scope filter*, so it's literally `buildDryRunPlan(topology)` (or the scoped variant with no filter; same result).
+- Runs automatically on editor open (same UX promise as the room editor — no extra click to see the state).
+- Re-runs on the existing **Refresh from current workspace** button (which already exists for the snapshot; extend it to also refresh the plan).
+- A separate **Run Sync** button — same machinery as the existing `folderSync.openPlan` → Proceed flow, but invoked from inside the admin editor without a separate panel. Gated by the same green/orange/red footer the plan webview already renders.
+
+**Per-room — `.sync.jsonc` editor embedded dry-run:**
+
+- Plan section appears below the form fields in the existing `configEditor` webview. Reuses `renderPlanHtml` so it's visually identical to the standalone plan panel — but constrained to *this* `.sync.jsonc`'s source + destinations.
+- Runs automatically on editor open. Status indicator: "Scanning…" → results, or "Error: …" with a Retry button.
+- Re-runs on:
+  1. Any `onDidChangeTextDocument` of the same `.sync.jsonc` (debounced ~500ms after the form's last edit so the user isn't churning the planner while typing).
+  2. File-tree changes inside the source folder. Implement via `vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(sourceFolder, '**/*'))` — covers vscode.dev's file-tree drop-to-add path (drops fire `onDidCreate` on the watcher), explorer-add, external rewrites, and deletes. Debounce ~500ms to coalesce drop bursts.
+  3. **Refresh** button — manual. Useful for cases the watcher doesn't see (FSA-granted folders where vscode.dev's watcher coverage is incomplete; verify behaviour during implementation).
+- Existing "Dry run" button at the bottom of the editor (which opens the workspace-wide plan in a separate panel) stays — relabel to **Open workspace-wide plan** so the scope distinction is explicit.
+
+**Per-file — pptx preview implied dry-run:**
+
+New section in the pptx viewer's HTML, below the existing metadata + validation flags. Header: **Sync target**. The preview can be opened in three distinct contexts, and the section renders accordingly. The classification key is *which workspace folder the file lives in*: a source folder (one that owns a `.sync.jsonc` covering this file), the top-level workspace folder (`workspaceFolders[0]`, where no `.sync.jsonc` applies), or a destination folder (one named by some `.sync.jsonc`'s `destinations[].name`).
+
+1. **File is inside a source folder covered by a `.sync.jsonc`.** Resolve via nearest-config rule (walk up from the file's URI). Run `buildScopedDryRunPlan(topology, { sourceConfigUri, pathFilter: documentUri })`. Render via `renderPlanHtml`. One row per destination — that's the per-room view, scoped to this one file.
+2. **File is inside `workspaceFolders[0]` but no `.sync.jsonc` covers it.** Render an informational hint: *"This file is not covered by a room config. Open the room's `.sync.jsonc` (or create one) to set up syncing."* Optionally a quick-action button that creates a stub `.sync.jsonc` next to the file — *deferred to follow-up*; v1 just shows the message.
+3. **File is inside a destination folder** (the workspace folder is named by some `.sync.jsonc`'s `destinations[].name`, marked read-only). Two sub-cases:
+    - **Reverse-mapped to a source.** Look up the manifest entry for this destination URI; if found, it points back at the source config + relative path. Show the same per-file dry-run as case (1), labelled to make the direction clear (e.g. *"Synced from `rooms/plenary1/.sync.jsonc`"*). The plan shows what the *next* sync would do for this destination — usually *Skip (unchanged)*; *Update (tracked)* if the source has changed; *Update (collision)* if the destination hash drifted out from under the manifest.
+    - **Orphan** (no manifest entry maps to this destination path). Render: *"This file is unique to the destination folder — no source pushes it. The next sync will leave it as-is."* Distinguish from "not yet scanned" by checking that the topology has at least one destination matching this folder; an unscanned destination shows a *"Run a dry-run to determine sync state"* hint instead.
+
+Classification flows through one helper, `classifyPreviewContext(documentUri, topology, manifest)`, returning a discriminated union so the renderer branches cleanly. Pure module under tsx (`src/sync/previewContext.ts`).
+
+No watcher needed; the file is whatever it is when previewed. (A future polish item is re-running on `Save` in case the user is editing the source in a split — out of scope for v1.)
+
+**Files (proposed):**
+
+- `src/sync/scopedPlan.ts` — pure helpers (scope filter predicate, single-file walk short-circuit). No vscode imports.
+- `src/sync/planner.ts` — add `buildScopedDryRunPlan` (vscode-wired side; reuses `loadConfigForSource`, `walkAndHash` etc.).
+- `src/sync/previewContext.ts` — pure classifier: `(documentUri, topology, manifest) → { kind: 'source' | 'uncovered' | 'destinationMapped' | 'destinationOrphan', …context }`.
+- `src/sync/adminEditorHtml.ts` — add the Full Dry-Run section + Run Sync button markup.
+- `src/sync/adminEditor.ts` — wire plan build + message handlers.
+- `src/sync/configEditorHtml.ts` — add the plan section markup + scanning/idle/error states.
+- `src/sync/configEditor.ts` — wire watcher + debouncer; post `planUpdated` messages to the webview.
+- `src/webview.ts` (pptx viewer) — add the Sync target section, branching by `previewContext.kind`.
+- `src/provider.ts` — classify on open, build the scoped plan when applicable, render.
+- `test/sync-scoped-plan.test.ts` — scope-filter tests under tsx.
+- `test/sync-preview-context.test.ts` — classifier tests for the four cases.
+
+**Open design questions:**
+
+- **Drag-and-drop pickup empirically.** vscode.dev's file-tree drop-to-add uses the workbench's file operation pipeline. `FileSystemWatcher` and `onDidCreateFiles` *should* both fire — but vscode.dev's watcher coverage over FSA-granted folders has historically been spotty. First implementation step is a small probe: open `.sync.jsonc`, drop a file into the source folder, watch the Output Channel for the watcher event. If watchers prove unreliable, fall back to `onDidCreateFiles` (documented to fire for all workbench-driven file ops). The Refresh button is the always-works backstop.
+- **Reverse-mapping a destination file to its source.** Case 3a of the per-file context needs the manifest to answer *"which `.sync.jsonc` pushed this file here?"* The M4 manifest format already records the destination URIs it placed, keyed under each source. The lookup is "find a manifest entry whose `destinationUri + relativePath` equals this file's URI." If the manifest doesn't yet store enough to reconstruct the source path from a destination match (e.g., it stores hashes but not source-relative paths), extend it as part of this milestone. Worth verifying against the current `manifest-types.ts` shape during implementation.
+- **Debounce horizons.** Plan re-runs after form edits, and watcher coalescing — both at 500ms initially, but the user noted the right values need to be felt out during dogfooding. Leave as TBD in the implementation and surface to user feedback before locking in.
+- **Scope-filter granularity at the planner.** `pathFilter` against a file walks the entire source then filters, which is wasteful for the single-file pptx case. Optimisation: when `pathFilter` is a regular file, short-circuit to `readFile(pathFilter)` + hash + single-file state-compare. Premature for v1 unless rooms get genuinely large; revisit if the per-file preview feels slow.
+
+**Done when:**
+
+- Opening `.admin-sync.jsonc` shows a Full Dry-Run section under the existing panels, auto-populated within ~1s of open; Refresh and Run Sync work end-to-end.
+- Opening a `.sync.jsonc` shows a room-scoped categorised plan below the form, auto-populated within ~1s of open.
+- Dropping a file into the source folder via the file tree updates the per-room plan within ~1s without manual refresh (or, if watcher proves unreliable, the Refresh button works and the limitation is documented in the substrate dead-ends section).
+- The pptx preview correctly classifies all four contexts (source, uncovered, destination-mapped, destination-orphan) and renders the matching surface.
+- For the source case, the per-file plan shows one row per destination with the same operation labels (Create / Update tracked / Update collision / Skip / Delete) and the same styling as the room view.
+- A destination-orphan file shows the "unique to destination" message; a mapped destination file shows the source's per-file dry-run with the source-config attribution visible.
+- `renderPlanHtml` is unchanged — same renderer, three call sites (admin editor, room editor, file preview).
+- `buildScopedDryRunPlan` is covered by `test/sync-scoped-plan.test.ts` (no scope, sub-directory, single file); `classifyPreviewContext` is covered by `test/sync-preview-context.test.ts` (all four cases).
+
+### M5 — Interactive decisions + validators *(paused until M4.7 ships)*
 
 - Collision detection against the manifest
 - Destination reverse pass to surface destination-only files
@@ -512,7 +599,7 @@ M4.7 extends this editor with workspace-level sync commands (Full Dry-Run, etc) 
 
 **Done when:** collision and destination-only scenarios behave per spec; "don't ask again" persists across runs; pptx warnings appear and block green.
 
-### M6 — Polish + remaining surfaces *(paused until M4.6 ships)*
+### M6 — Polish + remaining surfaces *(paused until M4.7 ships)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
