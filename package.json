@@ -14,7 +14,9 @@
     "Other"
   ],
   "browser": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "capabilities": {
     "virtualWorkspaces": true,
     "untrustedWorkspaces": {
@@ -70,6 +72,16 @@
         "command": "folderSync.probeColdRead",
         "title": "Folder Sync: Probe Cold-Read (M4.6 diagnostic)",
         "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.showSnapshot",
+        "title": "Folder Sync: Show Workspace Snapshot",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.clearSnapshot",
+        "title": "Folder Sync: Clear Workspace Snapshot",
+        "category": "Folder Sync"
       }
     ]
   },
@@ -86,6 +98,7 @@
     "test:sync-planview": "node --import tsx test/sync-planview.test.ts",
     "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
     "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",
+    "test:sync-snapshot": "node --import tsx test/sync-snapshot.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"

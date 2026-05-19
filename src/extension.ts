@@ -9,6 +9,13 @@ import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { registerProbe } from './sync/probe';
+import { SnapshotStore } from './sync/snapshotStore';
+import {
+  clearSnapshotCommand,
+  maybeRestore,
+  showSnapshotCommand,
+  startSnapshotWriter,
+} from './sync/restoreFlow';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -25,10 +32,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(PptxEditorProvider.register());
   log('activate: custom editor registered for *.pptx');
 
+  // M4.6 — silent restore must run BEFORE SyncManager.create so the
+  // manager's initial reload sees the just-restored folders. If the
+  // restore triggers a host restart (first folder added to a folderless
+  // workspace), this activation tears down and re-runs with folders in
+  // place; the post-restart branch finishes settings application + toast.
+  const snapshotStore = new SnapshotStore(context);
+  try {
+    await maybeRestore(context, snapshotStore);
+  } catch (err) {
+    log(`snapshot: maybeRestore threw — ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Sync feature — M1: config layer + diagnostics. The manager owns config
   // discovery, hot-reload, and topology resolution. The status bar and the
   // showTopology command are surface layers over the manager's state.
   const manager = await SyncManager.create(context);
+
+  // Snapshot writer subscribes to topology changes — every config edit or
+  // workspace folder add/remove recaptures and rewrites .admin-sync.jsonc
+  // if anything actually changed. Skip-on-equal handled inside.
+  context.subscriptions.push(
+    startSnapshotWriter(snapshotStore, (listener) => manager.onDidChange(listener)),
+  );
   createStatusBarItem(context, manager);
   context.subscriptions.push(SyncConfigEditorProvider.register());
   log('activate: .sync.jsonc custom editor registered');
@@ -55,6 +81,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await openPlanPanel(manager.getTopology());
     }),
     registerProbe(context),
+    vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
+      log('snapshot: showSnapshot invoked');
+      await showSnapshotCommand(snapshotStore);
+      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+    }),
+    vscode.commands.registerCommand('folderSync.clearSnapshot', async () => {
+      log('snapshot: clearSnapshot invoked');
+      await clearSnapshotCommand(context, snapshotStore);
+    }),
   );
   log('activate: folder sync manager initialised');
 }
