@@ -15,7 +15,7 @@
 //     dry-run plan with attribution
 
 import * as vscode from 'vscode';
-import { parsePptx, type ParseResult } from './pptx';
+import { parsePptx, type ParseResult, type ParseTimings } from './pptx';
 import { renderHtml, renderError, type RenderOptions } from './webview';
 import { log } from './log';
 import type { SyncManager } from './sync/manager';
@@ -261,10 +261,15 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     });
 
     try {
+      // Time the raw VS Code FS read separately from the parse — useful for
+      // sizing the parse-cache work (large decks read over the FS provider
+      // can dominate the wall-clock the user feels).
+      const tReadStart = performance.now();
       const [bytes, stat] = await Promise.all([
         vscode.workspace.fs.readFile(document.uri),
         vscode.workspace.fs.stat(document.uri),
       ]);
+      const readMs = performance.now() - tReadStart;
       const result = await parsePptx(bytes, {
         fileName,
         size: stat.size,
@@ -284,6 +289,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           `thumbnail: ${thumbDesc}` +
           (result.parseError ? `, parseError: ${result.parseError}` : ''),
       );
+      if (result.timings) logParseTimings(fileName, '', result.timings, readMs);
       await renderWithSyncTarget(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -376,6 +382,7 @@ async function handleIngest(
       size: bytes.byteLength,
       mtime: Date.now(),
     });
+    if (candidate.timings) logParseTimings(ingestFileName, `ingest[${source}]: `, candidate.timings);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`ingest[${source}]: parse threw — ${message}`);
@@ -500,6 +507,7 @@ async function writeAndRender(
     size: stat.size,
     mtime: stat.mtime,
   });
+  if (refreshed.timings) logParseTimings(targetName, 'refresh: ', refreshed.timings);
   await renderWithSyncTarget(refreshed, 'Updated');
 }
 
@@ -897,6 +905,44 @@ function pickContainingFolder(
     }
   }
   return best;
+}
+
+/**
+ * Format a millisecond duration for the parse-timing log line. Under 10ms we
+ * keep one decimal (sub-millisecond noise is visible there); above that an
+ * integer is plenty for human-eyeballing relative phase costs.
+ */
+function fmtMs(ms: number): string {
+  if (!Number.isFinite(ms)) return '?';
+  if (ms < 10) return `${ms.toFixed(1)}ms`;
+  return `${Math.round(ms)}ms`;
+}
+
+/**
+ * Emit a one-line parse-timing breakdown to the output channel. Used by all
+ * three parsePptx call sites (initial open, ingest from drop/picker, refresh
+ * after Update). `readMs` is only present for the initial-open path — ingest
+ * has its bytes in memory from the webview, refresh has them from the write
+ * it just performed.
+ */
+function logParseTimings(
+  fileName: string,
+  prefix: string,
+  timings: ParseTimings,
+  readMs?: number,
+): void {
+  const readPart = readMs !== undefined ? `read=${fmtMs(readMs)} ` : '';
+  log(
+    `${prefix}parse-timing: ${fileName} — total=${fmtMs(timings.totalMs)} ` +
+      `${readPart}` +
+      `hash=${fmtMs(timings.hashMs)} ` +
+      `unzip=${fmtMs(timings.unzipMs)} ` +
+      `xml=${fmtMs(timings.xmlDecodeMs)} ` +
+      `slides=${fmtMs(timings.slideScanMs)} ` +
+      `meta=${fmtMs(timings.metadataMs)} ` +
+      `media=${fmtMs(timings.mediaMs)} ` +
+      `show=${fmtMs(timings.showPropsMs)}`,
+  );
 }
 
 function escapeHtml(s: string): string {

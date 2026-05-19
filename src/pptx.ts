@@ -26,6 +26,42 @@ export interface Flag {
   detail: string;
 }
 
+/**
+ * Per-phase timings (milliseconds) collected during a single parsePptx call.
+ * Populated unconditionally so the host can decide what to log — used by the
+ * pptx viewer to surface a one-line breakdown that informs the parse-cache
+ * design (which steps actually dominate on a 100MB+ deck).
+ *
+ * Phases:
+ *  - hashMs       sha256 of the original bytes (crypto.subtle).
+ *  - unzipMs      fflate `unzipSync` over the full payload.
+ *  - xmlDecodeMs  strFromU8 on the 4 small XML parts we read directly
+ *                 (Content_Types, core.xml, presProps.xml, presentation.xml).
+ *                 Slide-rels lookups inside parseEmbeddedMedia decode on
+ *                 demand and land in `mediaMs` below.
+ *  - slideScanMs  listing slide entries + hidden-flag substring check on each
+ *                 (we decode just enough to find `show="0"`).
+ *  - metadataMs   author + lastModifiedBy regex extraction from core.xml.
+ *  - mediaMs      embeddedMedia walk + thumbnail extract + linked-media scan
+ *                 (the last includes a regex over every slide's _rels file).
+ *  - showPropsMs  parseShowType + parseShowMediaControls.
+ *  - totalMs      end-to-end parsePptx wall time (slightly larger than the
+ *                 sum: object construction + the ParseResult assembly itself).
+ *
+ * The integers here are `performance.now()` deltas, so sub-millisecond noise
+ * is normal; the absolute values matter, not the precision.
+ */
+export interface ParseTimings {
+  hashMs: number;
+  unzipMs: number;
+  xmlDecodeMs: number;
+  slideScanMs: number;
+  metadataMs: number;
+  mediaMs: number;
+  showPropsMs: number;
+  totalMs: number;
+}
+
 export interface ParseResult {
   fileName: string;
   size: number;
@@ -45,6 +81,12 @@ export interface ParseResult {
     showMediaControls: Flag;
   };
   parseError?: string;
+  /**
+   * Per-phase timings. Always populated by parsePptx — informational only,
+   * does not affect rendering or sync behaviour. See ParseTimings above for
+   * what each phase covers.
+   */
+  timings?: ParseTimings;
 }
 
 export interface FileInfo {
@@ -56,16 +98,26 @@ export interface FileInfo {
 const UNKNOWN = 'unknown';
 
 export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<ParseResult> {
+  // Phase timings collected via performance.now() — see ParseTimings above
+  // for what each phase covers. Pure measurement: no parse behaviour changes,
+  // and the host decides whether to surface them.
+  const t0 = performance.now();
+
+  const tHashStart = performance.now();
   const sha256 = await sha256Hex(bytes);
+  const hashMs = performance.now() - tHashStart;
 
   let entries: Record<string, Uint8Array> = {};
   let parseError: string | undefined;
+  const tUnzipStart = performance.now();
   try {
     entries = unzipSync(bytes);
   } catch (err) {
     parseError = `Could not unzip file: ${err instanceof Error ? err.message : String(err)}`;
   }
+  const unzipMs = performance.now() - tUnzipStart;
 
+  const tXmlStart = performance.now();
   const contentTypes = readText(entries['[Content_Types].xml']);
   const core = readText(entries['docProps/core.xml']);
   // <p:showPr> is written by PowerPoint into ppt/presProps.xml, NOT
@@ -74,7 +126,9 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const presProps = readText(entries['ppt/presProps.xml']);
   const presentation = readText(entries['ppt/presentation.xml']);
   const showSettingsXml = presProps || presentation;
+  const xmlDecodeMs = performance.now() - tXmlStart;
 
+  const tSlideStart = performance.now();
   const slideNames = Object.keys(entries)
     .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
     .sort(naturalSort);
@@ -83,16 +137,23 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   for (const name of slideNames) {
     if (isHiddenSlide(entries[name])) hiddenSlideCount++;
   }
+  const slideScanMs = performance.now() - tSlideStart;
 
+  const tMetaStart = performance.now();
   const author = extractElementText(core, 'dc:creator') ?? UNKNOWN;
   const lastModifiedBy = extractElementText(core, 'cp:lastModifiedBy') ?? UNKNOWN;
+  const metadataMs = performance.now() - tMetaStart;
 
+  const tMediaStart = performance.now();
   const embeddedMedia = parseEmbeddedMedia(contentTypes, entries);
   const thumbnail = extractThumbnail(entries);
-
   const linkedMediaFound = anyLinkedMedia(entries);
+  const mediaMs = performance.now() - tMediaStart;
+
+  const tShowStart = performance.now();
   const showType = parseShowType(showSettingsXml);
   const mediaControlsOn = parseShowMediaControls(showSettingsXml);
+  const showPropsMs = performance.now() - tShowStart;
   // showMediaCtrls only matters when there's embedded video for the controls
   // to attach to. A file with the setting on but no video has nothing to
   // show — so we don't warn. Audio doesn't get an on-screen controls bar in
@@ -142,6 +203,16 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
             },
     },
     parseError,
+    timings: {
+      hashMs,
+      unzipMs,
+      xmlDecodeMs,
+      slideScanMs,
+      metadataMs,
+      mediaMs,
+      showPropsMs,
+      totalMs: performance.now() - t0,
+    },
   };
 }
 
