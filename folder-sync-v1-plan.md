@@ -407,7 +407,83 @@ A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user ca
 - All existing pure tests pass against the new parser path
 - `yaml-mini.ts` and `test/sync-yaml.test.ts` are gone from the tree
 
-### M5 — Interactive decisions + validators *(paused until M4.5 ships)*
+### M4.6 — Workspace snapshot + silent restore *(active target)*
+
+**Starting point for the next session:** Spec below is signed off. The first concrete step is the cold-read URI probe (first bullet under "Open design questions") — it's load-bearing for the whole architecture. Run it on the VPS before writing any snapshot module. The "Snapshot shape" and "Restore path" sections assume the probe succeeds; the fallback (if it fails) is noted under that bullet.
+
+**Why this exists:** vscode.dev loses its open-folder set on browser refresh, but FSA grants persist at the origin level (verified empirically — pasting the workspace JSON back via *Workspaces: Open Workspace Configuration File* re-attaches folders with no further permission prompts, even in a fresh window of the same browser profile). The extension can automate that restore: persist the workspace shape on every topology change, replay it on a folderless activation.
+
+This is orthogonal to M5's interactive UI work — it touches activation flow and storage, not the plan/gate engine. Slotting it before M5 because (a) it materially improves the test loop the user is about to lean on for M5 dogfooding, and (b) it's small.
+
+**Storage model:**
+
+- **`.admin-sync.jsonc`** at the top level of `workspaceFolders[0]` is the snapshot file. JSONC for consistency with `.sync.jsonc`. Contains a managed-by-extension header comment warning the user not to hand-edit, then:
+  - `folders` — array of `{ uri: string, name: string }`. Both fields captured explicitly: users can override folder display names in the workspace config (e.g. `name: "P1 PC2"` for `uri: "file:///Plenary1 PC2"`), and the restore must preserve the override.
+  - `settings` — full Workspace-target configuration blob (everything the user would see in *Open Workspace Configuration File*, not just `files.readonly*`).
+  - `capturedAt` — ISO timestamp for diagnostics.
+- **`context.globalState`** holds one pointer entry under `folderSync.snapshotPointer`:
+  - `uri` — the `.admin-sync.jsonc` location as a string.
+  - `lastWriteAt` — ISO timestamp matching `capturedAt`, for staleness diagnostics.
+- First-folder convention: `workspaceFolders[0]` is also (by user convention, e.g. via `files.readonlyExclude`) the writable folder. Positional, not name-based — array position is load-bearing, display name is decorative.
+- Why this split: globalState alone can't carry the snapshot across a `globalState` wipe (browser profile reset, extension reinstall). The on-disk file is the durable artifact; the pointer is the cold-start hint. If the pointer is wiped but the file survives, an import wizard (deferred to follow-up) can re-establish the link.
+
+**Trigger and write path:**
+
+- On any topology change (added/removed source, destination resolved/unresolved, config edit applied), recompute the snapshot from current `workspaceFolders` + workspace config.
+- Atomic write: tmp + rename via `vscode.workspace.fs.rename`, same pattern as the manifest writer.
+- Update `globalState.snapshotPointer` to match the new `capturedAt`.
+- If `workspaceFolders` is empty, no write — there's nothing to capture and writing would require knowing which folder to target.
+
+**Restore path (cold activation):**
+
+1. Read `globalState.snapshotPointer`. If absent → no restore, log `snapshot: no pointer, no restore`.
+2. If `workspaceFolders` is already non-empty → no restore (user opened something via UI). Refresh pointer on the next topology change as usual.
+3. Otherwise, `vscode.workspace.fs.readFile(pointer.uri)` to load `.admin-sync.jsonc`. (See empirical probe below — load-bearing unknown.)
+4. Parse via the existing `jsonc-parser` setup.
+5. Call `vscode.workspace.updateWorkspaceFolders(0, 0, ...folders.map(f => ({ uri: vscode.Uri.parse(f.uri), name: f.name })))`. Names preserved.
+6. Apply each settings key via `getConfiguration().update(key, value, ConfigurationTarget.Workspace)`.
+7. Surface a single toast: `Workspace restored from snapshot · Undo`. Undo clears pointer + file and removes the just-added folders.
+8. Any failure (file unreadable, pointer stale, parse error) → log it, leave workspace alone, never crash activation.
+
+**Known settings keys** (`files.readonlyInclude`, `files.readonlyExclude`, anything else found during implementation) are restored without comment. Unknown keys are also restored (full-blob policy) but each unknown key is logged: `snapshot: restoring unknown setting <key> = <value summary>`. Diagnostic only — never blocks restore.
+
+**Commands:**
+
+- **Folder Sync: Clear Workspace Snapshot** — wipes `globalState.snapshotPointer` *and* deletes `.admin-sync.jsonc`. Confirmation prompt; destructive.
+- **Folder Sync: Show Workspace Snapshot** — dumps the current on-disk snapshot to the Output Channel.
+- **Folder Sync: Open Admin Config** — opens `.admin-sync.jsonc` in its custom editor (below).
+
+**Custom editor on `.admin-sync.jsonc`:**
+
+Registered as `folderSync.adminEditor`, viewType priority `default` so the file always opens with the safe editor (no accidental hand-edits). M4.6 surface is minimal:
+
+- List of snapshotted folders (uri + name) and a settings summary.
+- Per-folder **⋯** menu with a **Rename** action — opens an inline edit on the `name`, commits via `vscode.workspace.updateWorkspaceFolders(index, 1, { uri: same, name: newName })`. This is the only UX in vscode.dev that exposes folder renaming without making the user edit raw JSON, so any folder-list rendering we do is a natural place to surface it. Establishes the pattern for M4.7 and beyond — see "Folder rename as a cross-cutting UX touch" under the post-v1 polish section.
+- Two buttons: **Clear snapshot**, **Refresh from current workspace** (re-captures now).
+- Footer note: *"This file is managed by Folder Sync. Open as text via Reopen With → Text Editor only for diagnostics."*
+
+M4.7 extends this editor with workspace-level sync commands (Full Dry-Run, etc) — that's the natural home per the framing of "top level info and commands that affect all the lower sync sources". M4.6 just establishes the editor and its maintenance commands.
+
+**Open design questions to confirm during implementation:**
+
+- **(load-bearing)** Can `vscode.workspace.fs.readFile(uri)` resolve a `vscode-vfs://` URI to a folder that *isn't currently mounted* in `workspaceFolders`? Probe: in a normal session with a folder open, write a throwaway command that (a) captures a file URI inside that folder, (b) removes the folder via `updateWorkspaceFolders`, (c) tries to read the captured URI. If it succeeds, the cold-restore architecture above works as-described. **If it fails**, restore becomes a two-step process: `updateWorkspaceFolders` to mount `workspaceFolders[0]` first using a URI shape we'd need to derive (probably from the pointer URI's parent), *then* read `.admin-sync.jsonc`, then continue with the remaining folders + settings. Same architecture, just an extra mount step at the front.
+- URI round-trip shape: does `vscode.Uri.parse(snapshot.folders[0].uri)` produce a URI that `updateWorkspaceFolders` resolves against the FSA grant? Or do we need `vscode.Uri.from({...})` with explicit scheme/authority/path? Falls out of the same probe.
+- Race against user-initiated workspace open: if the user is in the middle of *Open Folder* when activation fires, we must not race. Mitigation: only restore if `workspaceFolders` is still empty after a short `await new Promise(r => setTimeout(r, 0))` — gives VS Code a tick to finish any in-flight folder add.
+- Settings round-trip: confirm `getConfiguration().update(..., Workspace)` is sufficient for all keys, or whether some (e.g. `files.readonlyInclude`) need `ConfigurationTarget.WorkspaceFolder` per-folder. Empirically validate against the user's existing readonly-locked-destinations setup.
+- *(low priority)* `context.globalState` is per-extension but not per-origin. If the user ever installed this extension on both vscode.dev and desktop, a desktop session would clobber the vscode.dev snapshot pointer. Don't worry for v1 — desktop is not a target environment. Revisit if/when desktop publishing is on the table.
+- *(deferred to follow-up)* Import wizard for the case where `globalState` is wiped but `.admin-sync.jsonc` still exists on disk. User opens *one* folder containing the file, extension detects it, offers to restore. Captures the resurrection path. Tracked as M4.6-follow-up, lands once the core flow is stable.
+
+**Done when:**
+
+- Refreshing the browser with `vscode.sophtwhere.com` open re-attaches the previously open folders (with custom names preserved) and re-applies workspace settings, with a single "Workspace restored from snapshot" toast and no permission prompts.
+- Output Channel shows the activation decision: `snapshot: restored N folder(s) and M setting(s)` / `snapshot: workspace already populated, no restore` / `snapshot: no pointer, no restore`.
+- `.admin-sync.jsonc` exists at the top level of `workspaceFolders[0]` after any topology change, is human-readable JSONC, and carries a "managed by Folder Sync — do not hand-edit" header comment.
+- Unknown settings keys round-trip and log.
+- The custom editor opens `.admin-sync.jsonc` as a read-only listing with Clear/Refresh buttons; hand-editing requires explicit Reopen With → Text Editor.
+- *Clear Workspace Snapshot* produces a clean activation next refresh (no restore, no prompt, no file on disk).
+- Snapshot updates on every topology change — verifiable by editing a `.sync.jsonc` to add a destination, refreshing, and seeing the new destination re-attached with its display name intact.
+
+### M5 — Interactive decisions + validators *(paused until M4.6 ships)*
 
 - Collision detection against the manifest
 - Destination reverse pass to surface destination-only files
@@ -419,7 +495,7 @@ A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user ca
 
 **Done when:** collision and destination-only scenarios behave per spec; "don't ask again" persists across runs; pptx warnings appear and block green.
 
-### M6 — Polish + remaining surfaces *(paused until M4.5 ships)*
+### M6 — Polish + remaining surfaces *(paused until M4.6 ships)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
@@ -458,6 +534,10 @@ M4.5 ships a *minimal* `.sync.jsonc` custom editor: workspace-folder dropdown, s
 - Live preview of which files match the current include/exclude set without running a full dry-run
 - "Save as template" — copy the current config to clipboard or another folder
 - Visual diff when the user has edited the form vs the underlying file (e.g. comments would be lost)
+
+### Folder rename as a cross-cutting UX touch
+
+VS Code's built-in UI doesn't expose a friendly way to set a workspace folder's display `name` — the user has to hand-edit the workspace JSON via *Workspaces: Open Workspace Configuration File*. Any feature of ours that renders a list of folders or destinations should expose a **⋯ → Rename** affordance that commits via `vscode.workspace.updateWorkspaceFolders(index, 1, { uri: same, name: newName })`. Established in M4.6's admin editor; inherited by M4.7's config editor destination rows, the workspace control panel (M4.7), and any further folder-list rendering. Cost is one short helper module and a confirmation prompt; payoff is users get folder rename for free everywhere we render the list.
 
 ### Per-file sync from the pptx viewer
 
