@@ -85,6 +85,8 @@ new code runs
 
 That's the loop. Most cycles need nothing more.
 
+The user runs vscode.sophtwhere.com as an installed PWA on macOS. **Cmd-R reliably reloads the PWA window** and picks up the freshly-built `dist/extension.js` — same behaviour as a hard reload in a Chrome tab, no DevTools or service-worker dance required. If a future change starts misbehaving on PWA refresh (stale bundle, persistent state), the activation log line `[pptx-viewer] build: <iso> sha=<short>` in the Output Channel / DevTools console is the diagnostic: SHA on screen ≠ SHA on the VPS means the PWA cached a stale bundle and something needs hardening.
+
 ### Agent VPS access
 
 The phone agent has SSH access to the VPS as `jonathan@vscode.sophtwhere.com`. The checkout lives at `~/pptx-viewer-ext`. The pm2 process layout: `pptx-watch` (esbuild `--watch`) and `pptx-dev-server` (Koa test-web server).
