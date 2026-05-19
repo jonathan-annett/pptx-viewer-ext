@@ -42,12 +42,18 @@ class PptxDocument implements vscode.CustomDocument {
 export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<PptxDocument> {
   public static readonly viewType = 'pptxViewer.viewer';
 
-  constructor(private readonly manager: SyncManager) {}
+  constructor(
+    private readonly manager: SyncManager,
+    private readonly globalState: vscode.Memento,
+  ) {}
 
-  public static register(manager: SyncManager): vscode.Disposable {
+  public static register(
+    manager: SyncManager,
+    globalState: vscode.Memento,
+  ): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       PptxEditorProvider.viewType,
-      new PptxEditorProvider(manager),
+      new PptxEditorProvider(manager, globalState),
       {
         webviewOptions: { retainContextWhenHidden: false },
         supportsMultipleEditorsPerDocument: false,
@@ -137,6 +143,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
             pendingCandidate = candidate;
           },
           renderWithSyncTarget,
+          this.globalState.get<boolean>('pptxViewer.autoSyncAfterDrop', false),
         );
         return;
       }
@@ -148,7 +155,27 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         }
         const candidate = pendingCandidate;
         pendingCandidate = null;
+        // The webview sends the checkbox state along; persist it so the next
+        // drop's modal opens with the same default. Cancel takes the other
+        // branch and does NOT touch the stored default.
+        const autoSync = (msg as { autoSync?: unknown }).autoSync === true;
+        await this.globalState.update('pptxViewer.autoSyncAfterDrop', autoSync);
         await handleConfirmUpdate(document, webviewPanel, candidate, renderWithSyncTarget);
+        if (autoSync && lastPerFileHasWork && lastPerFileBlocking === 0 && !syncInFlight) {
+          syncInFlight = true;
+          webviewPanel.webview.postMessage({ type: 'sync-status', status: 'running' });
+          try {
+            await runPerFileSync(
+              webviewPanel,
+              fileName,
+              lastPerFilePlans,
+              currentResult,
+              renderWithSyncTarget,
+            );
+          } finally {
+            syncInFlight = false;
+          }
+        }
         return;
       }
 
@@ -273,6 +300,7 @@ async function handleIngest(
   currentResult: ParseResult | null,
   setCandidate: (c: { fileName: string; bytes: Uint8Array; sha256: string }) => void,
   renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
+  autoSyncDefault: boolean,
 ): Promise<void> {
   const source = m.source === 'drop' ? 'drop' : 'picker';
   const resultMessageType = source === 'drop' ? 'drop-result' : 'picker-result';
@@ -371,7 +399,7 @@ async function handleIngest(
   // Drop path — stash candidate and ask the user.
   setCandidate({ fileName: ingestFileName, bytes, sha256: candidate.sha256 });
   const modalHtml = currentResult
-    ? renderCompareModalHtml(currentResult, candidate)
+    ? renderCompareModalHtml(currentResult, candidate, autoSyncDefault)
     : renderIdenticalModalHtml(ingestFileName); // shouldn't happen — current is always set by the time the user can drop, but be tolerant
   webviewPanel.webview.postMessage({
     type: 'drop-result',

@@ -66,7 +66,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Registration order doesn't otherwise matter — the custom editor isn't
   // invoked until the user opens a .pptx, which can only happen after
   // activation returns.
-  context.subscriptions.push(PptxEditorProvider.register(manager));
+  context.subscriptions.push(PptxEditorProvider.register(manager, context.globalState));
   log('activate: custom editor registered for *.pptx');
 
   // Snapshot writer subscribes to topology changes — every config edit or

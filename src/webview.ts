@@ -240,8 +240,13 @@ function viewerScript(): string {
     if (updateBtnInModal) updateBtnInModal.addEventListener('click', function(){
       updateBtnInModal.disabled = true;
       if (cancelBtnInModal) cancelBtnInModal.disabled = true;
+      // Read the auto-sync checkbox state at click time. The extension uses
+      // this both to persist the next-time default and to decide whether to
+      // run the per-file sync immediately after the write.
+      var autoSyncCb = document.getElementById('compare-auto-sync');
+      var autoSync = !!(autoSyncCb && autoSyncCb.checked);
       setStatus('Updating\u2026');
-      try { vscode.postMessage({type:'confirm-update'}); } catch (_) {}
+      try { vscode.postMessage({type:'confirm-update', autoSync: autoSync}); } catch (_) {}
     });
   }
 

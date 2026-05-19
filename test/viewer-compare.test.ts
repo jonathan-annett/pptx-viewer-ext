@@ -41,19 +41,20 @@ test('compare modal includes both file names', () => {
   const html = renderCompareModalHtml(
     parseResult({ fileName: 'current.pptx' }),
     parseResult({ fileName: 'dropped.pptx' }),
+    false,
   );
   assert.ok(html.includes('current.pptx'), 'current filename present');
   assert.ok(html.includes('dropped.pptx'), 'dropped filename present');
 });
 
 test('compare modal has Current and Dropped column headings', () => {
-  const html = renderCompareModalHtml(parseResult(), parseResult());
+  const html = renderCompareModalHtml(parseResult(), parseResult(), false);
   assert.ok(html.includes('>Current<'), 'Current column heading');
   assert.ok(html.includes('>Dropped<'), 'Dropped column heading');
 });
 
 test('compare modal exposes the IDs the viewer script binds to', () => {
-  const html = renderCompareModalHtml(parseResult(), parseResult());
+  const html = renderCompareModalHtml(parseResult(), parseResult(), false);
   assert.ok(html.includes('id="compare-update-btn"'), 'update button id');
   assert.ok(html.includes('id="compare-cancel-btn"'), 'cancel button id');
   assert.ok(/Update file/.test(html), 'update button label');
@@ -67,7 +68,7 @@ test('compare modal includes both thumbnails when present', () => {
   const candidate = parseResult({
     thumbnail: { mime: 'image/jpeg', dataUrl: 'data:image/jpeg;base64,BBBB' },
   });
-  const html = renderCompareModalHtml(current, candidate);
+  const html = renderCompareModalHtml(current, candidate, false);
   assert.ok(html.includes('data:image/png;base64,AAAA'), 'current thumbnail data url');
   assert.ok(html.includes('data:image/jpeg;base64,BBBB'), 'dropped thumbnail data url');
 });
@@ -76,6 +77,7 @@ test('compare modal renders a "No thumbnail" placeholder when one column lacks a
   const html = renderCompareModalHtml(
     parseResult({ thumbnail: { mime: 'image/png', dataUrl: 'data:image/png;base64,XX' } }),
     parseResult(),
+    false,
   );
   assert.ok(html.includes('No thumbnail'), 'placeholder present');
   assert.ok(html.includes('data:image/png;base64,XX'), 'other thumbnail still present');
@@ -85,6 +87,7 @@ test('compare modal includes both sha256 values so the user can confirm the diff
   const html = renderCompareModalHtml(
     parseResult({ sha256: 'a'.repeat(64) }),
     parseResult({ sha256: 'b'.repeat(64) }),
+    false,
   );
   assert.ok(html.includes('a'.repeat(64)));
   assert.ok(html.includes('b'.repeat(64)));
@@ -94,10 +97,28 @@ test('compare modal escapes HTML in untrusted fields (filename, author)', () => 
   const html = renderCompareModalHtml(
     parseResult({ fileName: '<script>x</script>.pptx' }),
     parseResult({ author: '<img src=x>' }),
+    false,
   );
   assert.ok(!html.includes('<script>x</script>'), 'script tag is escaped');
   assert.ok(!html.includes('<img src=x>'), 'img tag is escaped');
   assert.ok(html.includes('&lt;script&gt;'), 'escaped form present');
+});
+
+test('compare modal renders an auto-sync checkbox with the expected ID', () => {
+  const html = renderCompareModalHtml(parseResult(), parseResult(), false);
+  assert.ok(html.includes('id="compare-auto-sync"'), 'checkbox id present');
+  assert.ok(/Sync to destinations after update/.test(html), 'label text present');
+});
+
+test('auto-sync checkbox reflects autoSyncDefault=false as unchecked', () => {
+  const html = renderCompareModalHtml(parseResult(), parseResult(), false);
+  // No `checked` attribute on the checkbox input when default is false.
+  assert.ok(!/id="compare-auto-sync"[^>]*checked/.test(html), 'no checked attr when default false');
+});
+
+test('auto-sync checkbox reflects autoSyncDefault=true as checked', () => {
+  const html = renderCompareModalHtml(parseResult(), parseResult(), true);
+  assert.ok(/id="compare-auto-sync"[^>]* checked/.test(html), 'checked attr when default true');
 });
 
 // ───── renderIdenticalModalHtml ─────────────────────────────────────────
