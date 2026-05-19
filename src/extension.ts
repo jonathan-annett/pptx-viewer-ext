@@ -13,6 +13,7 @@ import { registerProbe } from './sync/probe';
 import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
+  ensureWorkspaceLockSettings,
   maybeRestore,
   showSnapshotCommand,
   startSnapshotWriter,
@@ -43,6 +44,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await maybeRestore(context, snapshotStore);
   } catch (err) {
     log(`snapshot: maybeRestore threw — ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
+  // if missing — destinations are read-only by default; the source folder
+  // (workspaceFolders[0]) is the writable carve-out. No-op when the user has
+  // already set these at workspace scope or when the snapshot just restored
+  // them. Must run AFTER maybeRestore (snapshot wins) and BEFORE the manager
+  // first emits (so the snapshot writer's initial state captures them).
+  try {
+    await ensureWorkspaceLockSettings();
+  } catch (err) {
+    log(`snapshot: ensureWorkspaceLockSettings threw — ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Sync feature — M1: config layer + diagnostics. The manager owns config

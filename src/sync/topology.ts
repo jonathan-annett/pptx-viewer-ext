@@ -137,8 +137,41 @@ export function resolveTopology(
     });
   }
 
-  // Cross-source collision detection: two distinct sources targeting the
-  // same final destination root URI.
+  // Cross-source destination-URI uniqueness: a workspace folder may be
+  // claimed as a destination by at most one .sync.jsonc file. Sharing a
+  // destination would make manifest ownership ambiguous (which source's
+  // manifest tracks which file?) and lets two sources race writes on the
+  // same tree. The room editor's dropdown also filters URIs claimed
+  // elsewhere — this diagnostic catches the case where a stale value is
+  // already on disk or two configs were edited as raw text.
+  const sourcesByDestUri = new Map<string, ResolvedSource[]>();
+  for (const src of sources) {
+    // De-duplicate within a single source — same URI with different
+    // subpaths is already caught by the intra-source check above, and we
+    // don't want to count one source twice here.
+    const seenInSrc = new Set<string>();
+    for (const dest of src.destinations) {
+      if (seenInSrc.has(dest.uri)) continue;
+      seenInSrc.add(dest.uri);
+      const list = sourcesByDestUri.get(dest.uri) ?? [];
+      list.push(src);
+      sourcesByDestUri.set(dest.uri, list);
+    }
+  }
+  for (const [uri, list] of sourcesByDestUri) {
+    if (list.length > 1) {
+      const where = list.map((s) => displayUri(s.configUri)).join(', ');
+      diagnostics.push({
+        severity: 'error',
+        message: `destination URI ${uri} is claimed by multiple sources (${where}); each destination can be owned by only one .sync.jsonc`,
+      });
+    }
+  }
+
+  // Subpath-overlap collision: two distinct sources writing into the same
+  // resolved destRootUri (URI + subpath). Useful even when the
+  // destination-URI uniqueness check above has fired, because the operator
+  // wants to see exactly where the collision lands.
   const claimants = new Map<string, ResolvedSource[]>();
   for (const src of sources) {
     for (const dest of src.destinations) {

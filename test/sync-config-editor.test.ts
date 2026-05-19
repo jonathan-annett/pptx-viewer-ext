@@ -20,6 +20,8 @@ function baseVm(overrides: Partial<ConfigEditorViewModel> = {}): ConfigEditorVie
   return {
     initialConfig: { destinations: [], include: [], exclude: [] },
     workspaceFolders: [],
+    sourceFolderUri: null,
+    claimedElsewhere: [],
     parseError: null,
     ...overrides,
   };
@@ -96,6 +98,29 @@ test('relabelled action button references the workspace-wide plan, not "dry run"
   const html = renderConfigEditorHtml(baseVm(), 'n');
   assert.match(html, /Open workspace-wide plan/);
   assert.ok(!/>Open dry-run plan</.test(html), 'old "Open dry-run plan" label should not appear');
+});
+
+test('payload includes sourceFolderUri and claimedElsewhere', () => {
+  // These two fields drive the dropdown filtering on the client. They must
+  // round-trip through the init payload so the page renders correctly on
+  // first paint (before the extension has a chance to post an update).
+  const html = renderConfigEditorHtml(
+    baseVm({
+      sourceFolderUri: 'file:///handle/src',
+      claimedElsewhere: ['file:///handle/dest-a', 'file:///handle/dest-b'],
+    }),
+    'n',
+  );
+  assert.match(html, /"sourceFolderUri":"file:\/\/\/handle\/src"/);
+  assert.match(html, /"claimedElsewhere":\["file:\/\/\/handle\/dest-a","file:\/\/\/handle\/dest-b"\]/);
+});
+
+test('hint text explains the source + claimed-elsewhere filters', () => {
+  // Regression guard against the older hint wording that just mentioned
+  // matching a workspace folder name — the new copy needs to set the
+  // expectation that the dropdown is filtered.
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.match(html, /source folder.*filtered out automatically/);
 });
 
 test('payload escapes </ to prevent script-tag breakout', () => {

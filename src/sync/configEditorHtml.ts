@@ -28,6 +28,21 @@ export interface ConfigEditorViewModel {
    * Rename button), so we never key off them.
    */
   workspaceFolders: WorkspaceFolderEntry[];
+  /**
+   * URI of the workspace folder containing this `.sync.jsonc`. Excluded from
+   * the dropdown options — a source cannot be its own destination, otherwise
+   * sync would target the folder it's reading from. May be null when the
+   * file isn't inside any open workspace folder (an edge case but possible
+   * when the form is opened on a detached URI).
+   */
+  sourceFolderUri: string | null;
+  /**
+   * URIs claimed as destinations by other `.sync.jsonc` files in the
+   * workspace. Each destination URI may be owned by only one source — see
+   * the matching diagnostic in topology.ts. The dropdown filters these out
+   * so the user can't accidentally create the conflict in the first place.
+   */
+  claimedElsewhere: string[];
   /** If the document failed to parse, the error to surface in the banner. */
   parseError: string | null;
 }
@@ -48,6 +63,8 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
   const initialPayload = JSON.stringify({
     config: vm.initialConfig,
     workspaceFolders: vm.workspaceFolders,
+    sourceFolderUri: vm.sourceFolderUri,
+    claimedElsewhere: vm.claimedElsewhere,
     parseError: vm.parseError,
   }).replace(/</g, '\\u003c');
 
@@ -69,7 +86,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 
   <section class="card">
     <h2>Destinations</h2>
-    <p class="hint">Each destination's <code>name</code> must match a workspace folder open in vscode.dev. Add the folder via <em>File → Add Folder to Workspace</em>.</p>
+    <p class="hint">Pick a workspace folder for each destination. The source folder (where this <code>.sync.jsonc</code> lives) and any folder already claimed by another <code>.sync.jsonc</code> are filtered out automatically.</p>
     <ul id="dest-list" class="dest-list"></ul>
     <button id="add-dest" class="btn btn-secondary" type="button">+ Add destination</button>
   </section>
@@ -293,6 +310,12 @@ const CLIENT_JS = `
     // Each entry: { uri, name }. Display name is for the dropdown label;
     // the option value (what gets persisted in .sync.jsonc) is the URI.
     workspaceFolders: initial.workspaceFolders || [],
+    // The workspace folder hosting this .sync.jsonc — filtered out of the
+    // destination dropdown (source ≠ destination invariant).
+    sourceFolderUri: initial.sourceFolderUri || null,
+    // URIs already claimed as destinations by some other .sync.jsonc —
+    // filtered out of the dropdown (one destination → one source).
+    claimedElsewhere: Array.isArray(initial.claimedElsewhere) ? initial.claimedElsewhere : [],
   };
 
   function fallbackNameFromUri(uri) {
@@ -328,22 +351,66 @@ const CLIENT_JS = `
 
       // Destination dropdown — value is the workspace folder URI (what gets
       // persisted), label is the live display name (what reads naturally).
-      // A "stale" row appears when the persisted URI isn't currently in the
-      // workspace; the user sees the URI underneath in red and can either
-      // open that folder or pick a different one without losing the value.
+      //
+      // Filter rules:
+      //   - The source folder (workspace folder containing this .sync.jsonc)
+      //     is never offered — a source cannot sync into itself.
+      //   - URIs claimed by some OTHER .sync.jsonc file are never offered —
+      //     each destination URI may be owned by exactly one source.
+      //   - A "stale" row appears when the persisted URI isn't currently in
+      //     the workspace; we surface it as a labelled disabled-looking
+      //     option so the user can see what's saved without losing the
+      //     value.
+      //   - If the currently-selected URI is excluded for a reason above, we
+      //     keep it as a labelled option (so the user sees what's saved and
+      //     why it's wrong) — they can then pick a valid alternative.
       const select = document.createElement('select');
-      const folders = state.workspaceFolders.slice();
-      const isStale = dest.uri && !folders.some(f => f.uri === dest.uri);
-      if (isStale) {
-        folders.unshift({ uri: dest.uri, name: fallbackNameFromUri(dest.uri) + '  (not in workspace)' });
+      const usedByOtherRows = new Set(
+        state.destinations
+          .map((d, j) => (j === idx ? null : d.uri))
+          .filter(Boolean)
+      );
+
+      function isFiltered(uri) {
+        if (!uri) return false;
+        if (state.sourceFolderUri && uri === state.sourceFolderUri) return 'source';
+        if (state.claimedElsewhere.indexOf(uri) !== -1) return 'claimed';
+        if (usedByOtherRows.has(uri)) return 'self-dupe';
+        return false;
       }
-      if (folders.length === 0) {
+
+      const offered = state.workspaceFolders.filter(f => !isFiltered(f.uri));
+      const isStale = dest.uri && !state.workspaceFolders.some(f => f.uri === dest.uri);
+      const filteredReason = isFiltered(dest.uri);
+
+      // If the saved value is currently filtered out (e.g. a manual edit
+      // moved the source-folder URI into the file), prepend a labelled
+      // option so the form still shows the user what's persisted.
+      if (filteredReason) {
+        const label =
+          filteredReason === 'source'
+            ? '  (source folder — cannot be its own destination)'
+            : filteredReason === 'claimed'
+            ? '  (claimed by another .sync.jsonc)'
+            : '  (already used in another row)';
+        offered.unshift({
+          uri: dest.uri,
+          name: fallbackNameFromUri(dest.uri) + label,
+        });
+      } else if (isStale) {
+        offered.unshift({
+          uri: dest.uri,
+          name: fallbackNameFromUri(dest.uri) + '  (not in workspace)',
+        });
+      }
+
+      if (offered.length === 0) {
         const opt = document.createElement('option');
         opt.value = '';
-        opt.textContent = '(no workspace folders)';
+        opt.textContent = '(no workspace folders available — every folder is the source or already a destination)';
         select.appendChild(opt);
       } else {
-        folders.forEach(f => {
+        offered.forEach(f => {
           const opt = document.createElement('option');
           opt.value = f.uri;
           opt.textContent = f.name || fallbackNameFromUri(f.uri);
@@ -379,10 +446,19 @@ const CLIENT_JS = `
       });
 
       // URI caption — shows the literal value persisted in the config. Span
-      // the full row so a long URI doesn't squeeze the controls above.
+      // the full row so a long URI doesn't squeeze the controls above. A
+      // "stale" colour applies for any condition that the topology resolver
+      // would flag (not in workspace, source-self, or claimed elsewhere).
       const uriEl = document.createElement('p');
-      uriEl.className = 'dest-uri' + (isStale ? ' stale' : '');
-      uriEl.title = isStale
+      const captionWarn = isStale || !!filteredReason;
+      uriEl.className = 'dest-uri' + (captionWarn ? ' stale' : '');
+      uriEl.title = filteredReason === 'source'
+        ? 'This URI is the source folder of this .sync.jsonc — a source cannot be its own destination.'
+        : filteredReason === 'claimed'
+        ? 'This URI is already claimed as a destination by another .sync.jsonc file in the workspace.'
+        : filteredReason === 'self-dupe'
+        ? 'This URI is already used as a destination by another row in this .sync.jsonc.'
+        : isStale
         ? 'This destination is recorded in .sync.jsonc but the folder is not currently open in the workspace.'
         : 'URI persisted in .sync.jsonc — stable across folder renames.';
       uriEl.textContent = dest.uri || '(no URI set)';
@@ -396,9 +472,18 @@ const CLIENT_JS = `
   }
 
   document.getElementById('add-dest').addEventListener('click', () => {
-    // Default to the first workspace folder so the row isn't empty on creation.
-    const firstUri = state.workspaceFolders[0] ? state.workspaceFolders[0].uri : '';
-    state.destinations.push({ uri: firstUri, path: '' });
+    // Default to the first workspace folder that's actually a legal
+    // destination — skip the source folder, anything claimed by other
+    // .sync.jsonc files, and anything already used in this form. Falls back
+    // to '' (no URI) if no legal option exists; the user sees the empty
+    // dropdown message and either adds another folder to the workspace or
+    // frees one up.
+    const usedHere = new Set(state.destinations.map(d => d.uri).filter(Boolean));
+    const claimed = new Set(state.claimedElsewhere);
+    const firstLegal = state.workspaceFolders.find(f =>
+      f.uri !== state.sourceFolderUri && !claimed.has(f.uri) && !usedHere.has(f.uri),
+    );
+    state.destinations.push({ uri: firstLegal ? firstLegal.uri : '', path: '' });
     renderDestList();
     flush();
   });
@@ -535,6 +620,12 @@ const CLIENT_JS = `
       }
     } else if (msg.type === 'workspaceFoldersChanged') {
       state.workspaceFolders = msg.workspaceFolders || [];
+      if (Array.isArray(msg.claimedElsewhere)) {
+        state.claimedElsewhere = msg.claimedElsewhere;
+      }
+      if (typeof msg.sourceFolderUri !== 'undefined') {
+        state.sourceFolderUri = msg.sourceFolderUri || null;
+      }
       renderDestList();
     } else if (msg.type === 'planStatus') {
       if (msg.status === 'scanning') setPlanScanning();

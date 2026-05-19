@@ -131,12 +131,21 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
       schedulePlan();
     });
 
-    // Workspace folder changes affect the dropdown options.
-    const folderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    // Shared posting of dropdown-eligibility state — used by both the
+    // workspace-folders change and the topology change subscriptions, since
+    // either can shift what's a legal destination for this room.
+    const postEligibility = (): void => {
       void panel.webview.postMessage({
         type: 'workspaceFoldersChanged',
         workspaceFolders: currentFolderEntries(),
+        sourceFolderUri: sourceFolderUriFor(document.uri),
+        claimedElsewhere: claimedByOtherSources(this.manager, document.uri),
       });
+    };
+
+    // Workspace folder changes affect the dropdown options.
+    const folderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      postEligibility();
       schedulePlan();
     });
 
@@ -144,8 +153,13 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     // .sync.jsonc on disk changes). The manager fires once on subscribe so
     // we get the initial build for free — but we already scheduled above,
     // so suppress the synchronous first call to avoid a duplicate run.
+    //
+    // We DO post eligibility on every topology change though (including the
+    // first emit), because a sibling .sync.jsonc just being created or
+    // edited can shift `claimedElsewhere` for this room.
     let firstTopologyEmit = true;
     const topologySub = this.manager.onDidChange(() => {
+      postEligibility();
       if (firstTopologyEmit) {
         firstTopologyEmit = false;
         return;
@@ -240,6 +254,8 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
       {
         initialConfig: config,
         workspaceFolders: currentFolderEntries(),
+        sourceFolderUri: sourceFolderUriFor(document.uri),
+        claimedElsewhere: claimedByOtherSources(this.manager, document.uri),
         parseError,
       },
       makeNonce(),
@@ -264,6 +280,38 @@ function currentFolderEntries(): Array<{ uri: string; name: string }> {
     uri: f.uri.toString(),
     name: f.name,
   }));
+}
+
+/**
+ * URI of the workspace folder containing `documentUri`, as a string. Returns
+ * null when the document isn't inside any open workspace folder (the editor
+ * was opened on a detached URI, or the folder was just removed). The room
+ * editor uses this to filter the source folder out of its destination
+ * dropdown — a source cannot be its own destination.
+ */
+function sourceFolderUriFor(documentUri: vscode.Uri): string | null {
+  const folder = vscode.workspace.getWorkspaceFolder(documentUri);
+  return folder ? folder.uri.toString() : null;
+}
+
+/**
+ * Set of destination URIs already claimed by sources OTHER than the one
+ * whose document URI is `currentDocUri`. Used to filter the room editor's
+ * destination dropdown so two `.sync.jsonc` files can't claim the same
+ * workspace folder (the cross-source-uniqueness invariant enforced by
+ * topology.ts at load time).
+ */
+function claimedByOtherSources(
+  manager: SyncManager,
+  currentDocUri: vscode.Uri,
+): string[] {
+  const claimed = new Set<string>();
+  const self = currentDocUri.toString();
+  for (const src of manager.getTopology().sources) {
+    if (src.configUri.toString() === self) continue;
+    for (const dest of src.destinations) claimed.add(dest.uri);
+  }
+  return Array.from(claimed);
 }
 
 function parentUri(uri: vscode.Uri): vscode.Uri {

@@ -222,6 +222,52 @@ async function undoRestore(
 }
 
 /**
+ * Seed the workspace's read-only lock settings if they aren't already set.
+ *
+ * Convention: workspaceFolders[0] is the writable source/operator folder; all
+ * other open folders are destinations (sync writes to them, the user does not
+ * edit them in this workspace). The two `files.readonly*` settings express
+ * that intent — `**` is read-only by default, with the source folder's path
+ * excluded.
+ *
+ * Seed-if-missing only — once a workspace-scope value is present we leave it
+ * alone, so a user who customises the lock keeps their customisation across
+ * activations. The snapshot system captures these keys as part of
+ * KNOWN_WORKSPACE_KEYS, so restored workspaces already arrive with the user's
+ * chosen values and this function then becomes a no-op.
+ *
+ * The pattern uses the workspace folder's display `name` because that's what
+ * VS Code's `files.readonly*` glob matches against (matching the user's
+ * verified working example: `/Speakers Prep/**`).
+ */
+export async function ensureWorkspaceLockSettings(): Promise<void> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) return;
+  const config = vscode.workspace.getConfiguration();
+
+  const includeInspect = config.inspect('files.readonlyInclude');
+  if (includeInspect?.workspaceValue === undefined) {
+    await config.update(
+      'files.readonlyInclude',
+      { '**': true },
+      vscode.ConfigurationTarget.Workspace,
+    );
+    log('snapshot: seeded files.readonlyInclude = { "**": true }');
+  }
+
+  const excludeInspect = config.inspect('files.readonlyExclude');
+  if (excludeInspect?.workspaceValue === undefined) {
+    const writableFolder = folders[0].name;
+    await config.update(
+      'files.readonlyExclude',
+      { [`/${writableFolder}/**`]: true },
+      vscode.ConfigurationTarget.Workspace,
+    );
+    log(`snapshot: seeded files.readonlyExclude — writable: /${writableFolder}/**`);
+  }
+}
+
+/**
  * Capture current workspace state and write it through `store`, bypassing
  * any diff-against-last-write. Used by the admin editor's "Refresh from
  * current workspace" button and reusable from commands. Returns the
