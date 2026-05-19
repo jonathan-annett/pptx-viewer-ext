@@ -58,18 +58,23 @@ the repo root for the full spec.
 ```jsonc
 // .sync.jsonc at the root of any folder you want treated as a source.
 // This file itself is implicitly excluded from sync.
+//
+// Destinations are identified by URI — copy them from the canonical
+// workspace snapshot at .admin-sync.jsonc (look at the `folders[].uri`
+// field). Keying by URI rather than display name means renaming a folder
+// in the Workspace snapshot editor doesn't break this file.
 {
   "destinations": [
-    // Minimal: just a workspace folder name. Whole source goes to the
+    // Minimal: just a destination URI. Whole source goes to the
     // destination's root.
-    { "name": "usb-backup" },
+    { "uri": "file:///handle/abc-usb-backup" },
 
     // With a subpath — the source maps into a nested location.
-    { "name": "nas-archive", "path": "projects/alpha/2026" },
+    { "uri": "file:///handle/def-nas-archive", "path": "projects/alpha/2026" },
 
     // Multiple destinations are independent; each gets the full source
     // (filtered by the include/exclude rules below).
-    { "name": "dropbox-mirror", "path": "work/alpha" }
+    { "uri": "file:///handle/ghi-dropbox-mirror", "path": "work/alpha" }
   ],
 
   // Glob patterns excluded in addition to the built-in ignores
@@ -89,21 +94,22 @@ the repo root for the full spec.
 
 ### Field meanings
 
-- `destinations[].name` — must match a workspace folder name currently open
-  in vscode.dev. Unresolved names produce a warning at load and are skipped
-  at sync time.
+- `destinations[].uri` — must match a workspace folder URI currently open in
+  vscode.dev. Copy the value from the matching entry in `.admin-sync.jsonc`
+  (`folders[].uri`). Unresolved URIs produce a warning at load and are
+  skipped at sync time.
 - `destinations[].path` — optional subpath under the destination. Normalised
   (no leading or trailing slashes, no doubled separators).
 - `exclude` / `include` — glob patterns. Built-in ignores are always applied.
 
 ### What to look for when testing
 
-- Workspace folder names in vscode.dev come from whatever you add via
-  *Add Folder to Workspace*. Pick simple, distinctive names — collisions
-  across destinations are detected and reported.
+- Workspace folder URIs in vscode.dev are stable across renames — the
+  display name shown in the explorer is just a label. Destinations key off
+  the URI for that reason; copy the URI from `.admin-sync.jsonc`.
 - Two sources writing to the same destination subpath (e.g. both
-  `.sync.jsonc` files declaring `name: usb-backup` with no `path`) trigger
-  the collision diagnostic.
+  `.sync.jsonc` files declaring the same `uri` with no `path`) trigger the
+  collision diagnostic.
 - An invalid config gets a `jsonc parse error: ...` message in the Output
   Channel, the affected source is skipped, and the rest of the topology
   still loads.

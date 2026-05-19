@@ -19,7 +19,7 @@ const test = (name: string, fn: () => void): void => {
 function baseVm(overrides: Partial<ConfigEditorViewModel> = {}): ConfigEditorViewModel {
   return {
     initialConfig: { destinations: [], include: [], exclude: [] },
-    workspaceFolderNames: [],
+    workspaceFolders: [],
     parseError: null,
     ...overrides,
   };
@@ -34,23 +34,27 @@ test('renders a CSP meta tag with the supplied nonce', () => {
   assert.equal(occurrences, 2, 'nonce should appear on both <script> tags');
 });
 
-test('init payload includes destinations, includes, excludes', () => {
+test('init payload includes destinations (uri-keyed), includes, excludes', () => {
   const html = renderConfigEditorHtml(
     baseVm({
       initialConfig: {
-        destinations: [{ name: 'foo', path: 'a/b' }],
+        destinations: [{ uri: 'file:///handle/abc', path: 'a/b' }],
         include: ['**/*.ts'],
         exclude: ['*.tmp'],
       },
-      workspaceFolderNames: ['foo', 'bar'],
+      workspaceFolders: [
+        { uri: 'file:///handle/abc', name: 'foo' },
+        { uri: 'file:///handle/def', name: 'bar' },
+      ],
     }),
     'n',
   );
-  // The data-island is one JSON line — match it loosely.
-  assert.match(html, /"destinations":\[\{"name":"foo","path":"a\/b"\}\]/);
+  // Destinations are keyed by URI now; the form maps URI → display name at
+  // render time via the workspaceFolders payload.
+  assert.match(html, /"destinations":\[\{"uri":"file:\/\/\/handle\/abc","path":"a\/b"\}\]/);
   assert.match(html, /"include":\["\*\*\/\*\.ts"\]/);
   assert.match(html, /"exclude":\["\*\.tmp"\]/);
-  assert.match(html, /"workspaceFolderNames":\["foo","bar"\]/);
+  assert.match(html, /"workspaceFolders":\[\{"uri":"file:\/\/\/handle\/abc","name":"foo"\}/);
 });
 
 test('parseError surfaces as a payload field', () => {
@@ -99,7 +103,11 @@ test('payload escapes </ to prevent script-tag breakout', () => {
   // close the surrounding <script type="application/json"> tag. The renderer
   // escapes "<" as "\u003c" inside the payload.
   const html = renderConfigEditorHtml(
-    baseVm({ workspaceFolderNames: ['</script><script>alert(1)</script>'] }),
+    baseVm({
+      workspaceFolders: [
+        { uri: 'file:///handle/abc', name: '</script><script>alert(1)</script>' },
+      ],
+    }),
     'n',
   );
   assert.ok(!html.includes('</script><script>alert(1)'), 'breakout sequence leaked into HTML');

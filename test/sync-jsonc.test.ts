@@ -29,13 +29,20 @@ function err(text: string, matcher: RegExp): void {
   assert.match(got.error, matcher);
 }
 
+// Test URIs mirror the shape vscode.dev's FSA URIs take. Spelled out as
+// `file:///handle/...` for readability — the parser doesn't care about the
+// scheme, only that it's a non-empty string. Stability across folder renames
+// is the whole reason we key destinations off URI rather than display name.
+const URI_A = 'file:///handle/abc-backup-drive';
+const URI_B = 'file:///handle/def-archive-server';
+
 // ───── happy path: the canonical .sync.jsonc shape ───────────────────────
 
 test('full .sync.jsonc shape parses to expected SyncConfig', () => {
   const src = `{
   "destinations": [
-    { "name": "backup-drive", "path": "projects/alpha" },
-    { "name": "archive-server", "path": "snapshots/alpha" }
+    { "uri": "${URI_A}", "path": "projects/alpha" },
+    { "uri": "${URI_B}", "path": "snapshots/alpha" }
   ],
   "exclude": ["~$*", "*.tmp", "node_modules/**"],
   "include": ["**/*"]
@@ -43,8 +50,8 @@ test('full .sync.jsonc shape parses to expected SyncConfig', () => {
   const got = ok(src);
   assert.deepEqual(got.config, {
     destinations: [
-      { name: 'backup-drive', path: 'projects/alpha' },
-      { name: 'archive-server', path: 'snapshots/alpha' },
+      { uri: URI_A, path: 'projects/alpha' },
+      { uri: URI_B, path: 'snapshots/alpha' },
     ],
     exclude: ['~$*', '*.tmp', 'node_modules/**'],
     include: ['**/*'],
@@ -52,12 +59,12 @@ test('full .sync.jsonc shape parses to expected SyncConfig', () => {
 });
 
 test('destinations with only required field', () => {
-  const got = ok(`{ "destinations": [{ "name": "only" }] }`);
-  assert.deepEqual(got.config.destinations, [{ name: 'only' }]);
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}" }] }`);
+  assert.deepEqual(got.config.destinations, [{ uri: URI_A }]);
 });
 
 test('exclude and include default to empty when omitted', () => {
-  const got = ok(`{ "destinations": [{ "name": "x" }] }`);
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}" }] }`);
   assert.deepEqual(got.config.exclude, []);
   assert.deepEqual(got.config.include, []);
 });
@@ -68,28 +75,28 @@ test('line comments are accepted', () => {
   const src = `{
   // top-level comment
   "destinations": [
-    { "name": "foo" } // inline comment
+    { "uri": "${URI_A}" } // inline comment
   ]
 }`;
   const got = ok(src);
-  assert.deepEqual(got.config.destinations, [{ name: 'foo' }]);
+  assert.deepEqual(got.config.destinations, [{ uri: URI_A }]);
 });
 
 test('block comments are accepted', () => {
   const src = `{
   /* block
      comment */
-  "destinations": [{ "name": "foo" }]
+  "destinations": [{ "uri": "${URI_A}" }]
 }`;
   const got = ok(src);
-  assert.deepEqual(got.config.destinations, [{ name: 'foo' }]);
+  assert.deepEqual(got.config.destinations, [{ uri: URI_A }]);
 });
 
 test('trailing commas are accepted', () => {
   const src = `{
   "destinations": [
-    { "name": "foo", },
-    { "name": "bar", },
+    { "uri": "${URI_A}", },
+    { "uri": "${URI_B}", },
   ],
   "exclude": ["a", "b",],
 }`;
@@ -101,12 +108,12 @@ test('trailing commas are accepted', () => {
 // ───── subpath normalisation ──────────────────────────────────────────────
 
 test('subpath has leading/trailing/duplicate slashes stripped', () => {
-  const got = ok(`{ "destinations": [{ "name": "x", "path": "//a//b//" }] }`);
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}", "path": "//a//b//" }] }`);
   assert.equal(got.config.destinations[0].path, 'a/b');
 });
 
 test('empty subpath stays empty (treated as destination root)', () => {
-  const got = ok(`{ "destinations": [{ "name": "x", "path": "" }] }`);
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}", "path": "" }] }`);
   assert.equal(got.config.destinations[0].path, '');
 });
 
@@ -124,29 +131,29 @@ test('empty destinations array is rejected', () => {
   err(`{ "destinations": [] }`, /`destinations` is required/);
 });
 
-test('destination without name is rejected', () => {
-  err(`{ "destinations": [{ "path": "a" }] }`, /destinations\[0\]\.name/);
+test('destination without uri is rejected', () => {
+  err(`{ "destinations": [{ "path": "a" }] }`, /destinations\[0\]\.uri/);
 });
 
-test('destination with empty name is rejected', () => {
-  err(`{ "destinations": [{ "name": "" }] }`, /destinations\[0\]\.name/);
+test('destination with empty uri is rejected', () => {
+  err(`{ "destinations": [{ "uri": "" }] }`, /destinations\[0\]\.uri/);
 });
 
-test('destination name not a string is rejected', () => {
-  err(`{ "destinations": [{ "name": 42 }] }`, /destinations\[0\]\.name/);
+test('destination uri not a string is rejected', () => {
+  err(`{ "destinations": [{ "uri": 42 }] }`, /destinations\[0\]\.uri/);
 });
 
 test('destination path not a string is rejected', () => {
-  err(`{ "destinations": [{ "name": "x", "path": 1 }] }`, /destinations\[0\]\.path/);
+  err(`{ "destinations": [{ "uri": "${URI_A}", "path": 1 }] }`, /destinations\[0\]\.path/);
 });
 
 test('exclude not an array is rejected', () => {
-  err(`{ "destinations": [{ "name": "x" }], "exclude": "nope" }`, /`exclude` must be an array/);
+  err(`{ "destinations": [{ "uri": "${URI_A}" }], "exclude": "nope" }`, /`exclude` must be an array/);
 });
 
 test('non-string entry in include is rejected', () => {
   err(
-    `{ "destinations": [{ "name": "x" }], "include": ["a", 5] }`,
+    `{ "destinations": [{ "uri": "${URI_A}" }], "include": ["a", 5] }`,
     /`include`\[1\] must be a string/,
   );
 });
@@ -163,10 +170,22 @@ test('empty input is rejected as a parse error', () => {
 
 test('unknown top-level keys are ignored', () => {
   const got = ok(`{
-  "destinations": [{ "name": "x" }],
+  "destinations": [{ "uri": "${URI_A}" }],
   "futureOption": "irrelevant"
 }`);
   assert.equal(got.config.destinations.length, 1);
+});
+
+// ───── stale `name` field is rejected (additionalProperties: false) ──────
+// The schema sets additionalProperties: false on each destination entry, so a
+// legacy `name` field surfaces as an unknown-property error in the JSON Schema
+// editor. The parser itself is more tolerant — it ignores unknown keys at the
+// destination level. This test confirms the parser still works when name is
+// present alongside uri (forward-compat with mixed files during migration),
+// but consumers should rely on the schema to flag the deprecated shape.
+test('extra name field on destination is ignored (parser tolerates it)', () => {
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}", "name": "legacy" }] }`);
+  assert.deepEqual(got.config.destinations, [{ uri: URI_A }]);
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

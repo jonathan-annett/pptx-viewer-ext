@@ -150,7 +150,7 @@ async function planForSource(
         destination: dest,
         items: [],
         summary: summarisePlan([]),
-        skippedReason: `destination '${dest.name}' is not in the workspace`,
+        skippedReason: `destination '${dest.name}' (${dest.uri}) is not in the workspace`,
       });
       continue;
     }

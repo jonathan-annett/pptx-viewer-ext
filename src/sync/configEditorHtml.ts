@@ -11,11 +11,23 @@
 import type { SyncConfig } from './configParse';
 import { planContentStyles } from './planHtml';
 
+export interface WorkspaceFolderEntry {
+  /** URI string — the stable identifier persisted in `.sync.jsonc`. */
+  uri: string;
+  /** Live display name from the workspace folder. Shown in the dropdown. */
+  name: string;
+}
+
 export interface ConfigEditorViewModel {
   /** Initial config to pre-fill the form. */
   initialConfig: SyncConfig;
-  /** Names of currently-open workspace folders, used to populate the dropdown. */
-  workspaceFolderNames: string[];
+  /**
+   * Currently-open workspace folders, used to populate the destination
+   * dropdown. The dropdown shows each entry's display `name` but persists
+   * its `uri` into the config — display names are mutable (admin editor's
+   * Rename button), so we never key off them.
+   */
+  workspaceFolders: WorkspaceFolderEntry[];
   /** If the document failed to parse, the error to surface in the banner. */
   parseError: string | null;
 }
@@ -35,7 +47,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
   // contains "</".
   const initialPayload = JSON.stringify({
     config: vm.initialConfig,
-    workspaceFolderNames: vm.workspaceFolderNames,
+    workspaceFolders: vm.workspaceFolders,
     parseError: vm.parseError,
   }).replace(/</g, '\\u003c');
 
@@ -148,12 +160,25 @@ code {
 .dest-list li {
   display: grid;
   grid-template-columns: minmax(160px, 1fr) minmax(160px, 2fr) auto;
-  gap: 8px;
+  gap: 8px 8px;
   align-items: center;
-  padding: 6px 0;
+  padding: 8px 0;
   border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.15));
 }
 .dest-list li:last-child { border-bottom: none; }
+.dest-uri {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+  word-break: break-all;
+  /* Pad the caption left so it lines up visually under the name column.
+     Negative top-margin tightens the gap so it reads as one row. */
+  margin-top: -4px;
+}
+.dest-uri.stale { color: var(--vscode-errorForeground, #cc5555); }
 select, input[type="text"], textarea {
   width: 100%;
   box-sizing: border-box;
@@ -260,13 +285,28 @@ const CLIENT_JS = `
 
   const state = {
     destinations: (initial.config.destinations || []).map(d => ({
-      name: d.name || '',
+      uri: d.uri || '',
       path: d.path || '',
     })),
     include: initial.config.include || [],
     exclude: initial.config.exclude || [],
-    folderNames: initial.workspaceFolderNames || [],
+    // Each entry: { uri, name }. Display name is for the dropdown label;
+    // the option value (what gets persisted in .sync.jsonc) is the URI.
+    workspaceFolders: initial.workspaceFolders || [],
   };
+
+  function fallbackNameFromUri(uri) {
+    // Mirrors topology.ts:fallbackNameFromUri — used purely for the "(not in
+    // workspace)" stale row so the dropdown still has something readable.
+    try {
+      var u = new URL(uri);
+      var path = u.pathname.replace(/\\/+$/, '');
+      var idx = path.lastIndexOf('/');
+      var seg = idx >= 0 ? path.slice(idx + 1) : path;
+      var decoded = decodeURIComponent(seg);
+      return decoded || uri;
+    } catch (_) { return uri; }
+  }
 
   const parseErrEl = document.getElementById('parse-error');
   if (initial.parseError) {
@@ -286,24 +326,34 @@ const CLIENT_JS = `
     state.destinations.forEach((dest, idx) => {
       const li = document.createElement('li');
 
-      // Name dropdown — populated from workspace folders. If the current name
-      // isn't in the dropdown, we still display it as a stale entry so the
-      // user can see + fix it without losing the value.
+      // Destination dropdown — value is the workspace folder URI (what gets
+      // persisted), label is the live display name (what reads naturally).
+      // A "stale" row appears when the persisted URI isn't currently in the
+      // workspace; the user sees the URI underneath in red and can either
+      // open that folder or pick a different one without losing the value.
       const select = document.createElement('select');
-      const names = state.folderNames.slice();
-      const stale = dest.name && !names.includes(dest.name);
-      if (stale) names.unshift(dest.name);
-      if (names.length === 0) names.push('');
-      names.forEach(n => {
+      const folders = state.workspaceFolders.slice();
+      const isStale = dest.uri && !folders.some(f => f.uri === dest.uri);
+      if (isStale) {
+        folders.unshift({ uri: dest.uri, name: fallbackNameFromUri(dest.uri) + '  (not in workspace)' });
+      }
+      if (folders.length === 0) {
         const opt = document.createElement('option');
-        opt.value = n;
-        opt.textContent = n || '(no workspace folders)';
-        if (n === dest.name) opt.selected = true;
-        if (stale && n === dest.name) opt.textContent = n + '  (not in workspace)';
+        opt.value = '';
+        opt.textContent = '(no workspace folders)';
         select.appendChild(opt);
-      });
+      } else {
+        folders.forEach(f => {
+          const opt = document.createElement('option');
+          opt.value = f.uri;
+          opt.textContent = f.name || fallbackNameFromUri(f.uri);
+          if (f.uri === dest.uri) opt.selected = true;
+          select.appendChild(opt);
+        });
+      }
       select.addEventListener('change', () => {
-        state.destinations[idx].name = select.value;
+        state.destinations[idx].uri = select.value;
+        renderDestList();
         flush();
       });
 
@@ -328,18 +378,27 @@ const CLIENT_JS = `
         flush();
       });
 
+      // URI caption — shows the literal value persisted in the config. Span
+      // the full row so a long URI doesn't squeeze the controls above.
+      const uriEl = document.createElement('p');
+      uriEl.className = 'dest-uri' + (isStale ? ' stale' : '');
+      uriEl.title = isStale
+        ? 'This destination is recorded in .sync.jsonc but the folder is not currently open in the workspace.'
+        : 'URI persisted in .sync.jsonc — stable across folder renames.';
+      uriEl.textContent = dest.uri || '(no URI set)';
+
       li.appendChild(select);
       li.appendChild(pathInput);
       li.appendChild(rm);
+      li.appendChild(uriEl);
       destListEl.appendChild(li);
     });
   }
 
   document.getElementById('add-dest').addEventListener('click', () => {
-    state.destinations.push({
-      name: state.folderNames[0] || '',
-      path: '',
-    });
+    // Default to the first workspace folder so the row isn't empty on creation.
+    const firstUri = state.workspaceFolders[0] ? state.workspaceFolders[0].uri : '';
+    state.destinations.push({ uri: firstUri, path: '' });
     renderDestList();
     flush();
   });
@@ -377,8 +436,8 @@ const CLIENT_JS = `
       type: 'setConfig',
       config: {
         destinations: state.destinations
-          .filter(d => d.name)
-          .map(d => d.path ? { name: d.name, path: d.path } : { name: d.name }),
+          .filter(d => d.uri)
+          .map(d => d.path ? { uri: d.uri, path: d.path } : { uri: d.uri }),
         include: state.include,
         exclude: state.exclude,
       },
@@ -460,7 +519,7 @@ const CLIENT_JS = `
     if (msg.type === 'docChanged') {
       // External edit. Re-derive form state from the new config.
       state.destinations = (msg.config.destinations || []).map(d => ({
-        name: d.name || '',
+        uri: d.uri || '',
         path: d.path || '',
       }));
       state.include = msg.config.include || [];
@@ -474,8 +533,8 @@ const CLIENT_JS = `
       } else {
         parseErrEl.hidden = true;
       }
-    } else if (msg.type === 'folderNamesChanged') {
-      state.folderNames = msg.workspaceFolderNames || [];
+    } else if (msg.type === 'workspaceFoldersChanged') {
+      state.workspaceFolders = msg.workspaceFolders || [];
       renderDestList();
     } else if (msg.type === 'planStatus') {
       if (msg.status === 'scanning') setPlanScanning();

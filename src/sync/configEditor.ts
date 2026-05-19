@@ -134,8 +134,8 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     // Workspace folder changes affect the dropdown options.
     const folderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
       void panel.webview.postMessage({
-        type: 'folderNamesChanged',
-        workspaceFolderNames: currentFolderNames(),
+        type: 'workspaceFoldersChanged',
+        workspaceFolders: currentFolderEntries(),
       });
       schedulePlan();
     });
@@ -239,7 +239,7 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     return renderConfigEditorHtml(
       {
         initialConfig: config,
-        workspaceFolderNames: currentFolderNames(),
+        workspaceFolders: currentFolderEntries(),
         parseError,
       },
       makeNonce(),
@@ -259,8 +259,11 @@ function emptyConfig(): SyncConfig {
   return { destinations: [], include: [], exclude: [] };
 }
 
-function currentFolderNames(): string[] {
-  return (vscode.workspace.workspaceFolders ?? []).map((f) => f.name);
+function currentFolderEntries(): Array<{ uri: string; name: string }> {
+  return (vscode.workspace.workspaceFolders ?? []).map((f) => ({
+    uri: f.uri.toString(),
+    name: f.name,
+  }));
 }
 
 function parentUri(uri: vscode.Uri): vscode.Uri {

@@ -13,7 +13,16 @@
 import { parse as parseJsonc, type ParseError, printParseErrorCode } from 'jsonc-parser';
 
 export interface SyncDestination {
-  name: string;
+  /**
+   * URI of the destination workspace folder, exactly as it appears in
+   * `.admin-sync.jsonc` (e.g. `file:///handle/...` in the web extension host).
+   *
+   * Identifying destinations by URI rather than by display name makes the
+   * configuration stable across folder renames — the admin editor's Rename
+   * button changes the display name but not the URI. The live display name
+   * is read from the matched workspace folder at resolve time.
+   */
+  uri: string;
   /** Optional subpath within the destination workspace folder. */
   path?: string;
 }
@@ -80,17 +89,17 @@ function validateSchema(raw: unknown): ParseResult {
       return { kind: 'error', error: `destinations[${i}] must be an object` };
     }
     const e = entry as Record<string, unknown>;
-    if (typeof e.name !== 'string' || e.name.length === 0) {
+    if (typeof e.uri !== 'string' || e.uri.length === 0) {
       return {
         kind: 'error',
-        error: `destinations[${i}].name is required and must be a non-empty string`,
+        error: `destinations[${i}].uri is required and must be a non-empty string`,
       };
     }
     if (e.path !== undefined && typeof e.path !== 'string') {
       return { kind: 'error', error: `destinations[${i}].path must be a string if set` };
     }
     destinations.push({
-      name: e.name,
+      uri: e.uri,
       ...(typeof e.path === 'string' ? { path: normaliseSubpath(e.path) } : {}),
     });
   }

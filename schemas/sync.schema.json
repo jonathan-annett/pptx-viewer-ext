@@ -2,24 +2,25 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/jonathan-annett/pptx-viewer-ext/schemas/sync.schema.json",
   "title": "Folder Sync configuration",
-  "description": "Configuration for a folder treated as a sync source. The folder containing this file is the source root; each entry in `destinations` names a workspace folder to sync into.",
+  "description": "Configuration for a folder treated as a sync source. The folder containing this file is the source root; each entry in `destinations` identifies a workspace folder to sync into by its URI.",
   "type": "object",
   "required": ["destinations"],
   "additionalProperties": false,
   "properties": {
     "destinations": {
       "type": "array",
-      "description": "One or more destinations to sync this folder into. Each name must match a workspace folder currently open in vscode.dev.",
+      "description": "One or more destinations to sync this folder into. Each `uri` must match the URI of a workspace folder open in vscode.dev (see .admin-sync.jsonc for the canonical list).",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": ["uri"],
         "additionalProperties": false,
         "properties": {
-          "name": {
+          "uri": {
             "type": "string",
-            "description": "The name of a workspace folder open in vscode.dev. Unresolved names are skipped at sync time with a warning.",
-            "minLength": 1
+            "description": "URI of a workspace folder, exactly as it appears in .admin-sync.jsonc (e.g. file:///handle/... in the web extension host). Stable across folder renames. Unresolved URIs are skipped at sync time with a warning.",
+            "minLength": 1,
+            "format": "uri"
           },
           "path": {
             "type": "string",

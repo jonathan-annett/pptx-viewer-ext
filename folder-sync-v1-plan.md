@@ -45,14 +45,17 @@ The user is the "event" — sync is a convened operation, not a reactive automat
 
 ```jsonc
 {
-  // Required: at least one destination
+  // Required: at least one destination. Destinations are keyed by URI — copy
+  // the value from the matching entry in .admin-sync.jsonc (folders[].uri).
+  // Using the URI rather than the display name means renaming a folder via
+  // the Workspace snapshot editor doesn't break this file.
   "destinations": [
     {
-      "name": "backup-drive",        // Must match a workspace folder name
-      "path": "projects/alpha"       // Optional subpath within the destination
+      "uri": "file:///handle/abc-backup-drive",   // From .admin-sync.jsonc
+      "path": "projects/alpha"                     // Optional subpath
     },
     {
-      "name": "archive-server",
+      "uri": "file:///handle/def-archive-server",
       "path": "snapshots/alpha"
     }
   ],
@@ -91,7 +94,7 @@ Config changes are picked up automatically via `vscode.workspace.createFileSyste
 
 Each time the config set is reloaded:
 
-- Every `destinations[].name` must resolve to a workspace folder currently open. Unresolved names produce warnings in the Output Channel: *"destination 'backup-drive' is not currently in the workspace"*. The source is still loadable; the unresolved destination will be skipped at sync time.
+- Every `destinations[].uri` must resolve to a workspace folder currently open. Unresolved URIs produce warnings in the Output Channel: *"destination URI 'file:///handle/abc-backup-drive' is not currently in the workspace"*. The source is still loadable; the unresolved destination will be skipped at sync time.
 - Multiple sources targeting the same destination must use non-colliding subpaths. Collisions are configuration errors that block sync until resolved.
 - A malformed config emits an error in the Output Channel; the affected source is excluded from sync until fixed.
 
@@ -110,7 +113,7 @@ Given a scope (workspace-wide or folder-scoped):
    - Folder-scoped: walk up from the selected folder. The nearest `.sync.jsonc` is the source. The scope is restricted to files at or below the selected folder.
 
 2. **Destination resolution**
-   - For each source, look up each `destinations[].name` as a currently-open workspace folder URI.
+   - For each source, look up each `destinations[].uri` against the currently-open workspace folder URIs.
    - Apply the optional `path` subpath.
    - For folder-scoped syncs, append the selected folder's relative offset to that destination subpath, so a sync of `alpha/src/utils` writes to `<destination>/projects/alpha/src/utils/...`.
 
@@ -543,11 +546,11 @@ Tests under tsx mirror `test/sync-plan.test.ts`: empty scope, scope at source ro
 
 **Per-file — pptx preview implied dry-run:**
 
-New section in the pptx viewer's HTML, below the existing metadata + validation flags. Header: **Sync target**. The preview can be opened in three distinct contexts, and the section renders accordingly. The classification key is *which workspace folder the file lives in*: a source folder (one that owns a `.sync.jsonc` covering this file), the top-level workspace folder (`workspaceFolders[0]`, where no `.sync.jsonc` applies), or a destination folder (one named by some `.sync.jsonc`'s `destinations[].name`).
+New section in the pptx viewer's HTML, below the existing metadata + validation flags. Header: **Sync target**. The preview can be opened in three distinct contexts, and the section renders accordingly. The classification key is *which workspace folder the file lives in*: a source folder (one that owns a `.sync.jsonc` covering this file), the top-level workspace folder (`workspaceFolders[0]`, where no `.sync.jsonc` applies), or a destination folder (one whose URI matches some `.sync.jsonc`'s `destinations[].uri`).
 
 1. **File is inside a source folder covered by a `.sync.jsonc`.** Resolve via nearest-config rule (walk up from the file's URI). Run `buildScopedDryRunPlan(topology, { sourceConfigUri, pathFilter: documentUri })`. Render via `renderPlanHtml`. One row per destination — that's the per-room view, scoped to this one file.
 2. **File is inside `workspaceFolders[0]` but no `.sync.jsonc` covers it.** Render an informational hint: *"This file is not covered by a room config. Open the room's `.sync.jsonc` (or create one) to set up syncing."* Optionally a quick-action button that creates a stub `.sync.jsonc` next to the file — *deferred to follow-up*; v1 just shows the message.
-3. **File is inside a destination folder** (the workspace folder is named by some `.sync.jsonc`'s `destinations[].name`, marked read-only). Two sub-cases:
+3. **File is inside a destination folder** (the workspace folder URI matches some `.sync.jsonc`'s `destinations[].uri`, marked read-only). Two sub-cases:
     - **Reverse-mapped to a source.** Look up the manifest entry for this destination URI; if found, it points back at the source config + relative path. Show the same per-file dry-run as case (1), labelled to make the direction clear (e.g. *"Synced from `rooms/plenary1/.sync.jsonc`"*). The plan shows what the *next* sync would do for this destination — usually *Skip (unchanged)*; *Update (tracked)* if the source has changed; *Update (collision)* if the destination hash drifted out from under the manifest.
     - **Orphan** (no manifest entry maps to this destination path). Render: *"This file is unique to the destination folder — no source pushes it. The next sync will leave it as-is."* Distinguish from "not yet scanned" by checking that the topology has at least one destination matching this folder; an unscanned destination shows a *"Run a dry-run to determine sync state"* hint instead.
 

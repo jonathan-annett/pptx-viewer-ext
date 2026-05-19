@@ -13,11 +13,21 @@ import * as vscode from 'vscode';
 import type { SourceLoad } from './config';
 
 export interface ResolvedDestination {
-  /** Original name as written in the config. */
+  /**
+   * URI of the destination workspace folder, exactly as written in the
+   * config. Stable across folder renames and authoritative for matching.
+   */
+  uri: string;
+  /**
+   * Display name of the matched workspace folder, looked up at resolve time
+   * from `vscode.workspace.workspaceFolders`. For unresolved URIs we fall
+   * back to the last path segment so the UI/logs still print something
+   * recognisable. **Display only** — never used for matching.
+   */
   name: string;
   /** Subpath within the destination workspace folder (already normalised). */
   subpath: string;
-  /** Resolved workspace folder URI, or null if no workspace folder matches the name. */
+  /** Resolved workspace folder URI, or null if no workspace folder matches the URI. */
   workspaceFolderUri: vscode.Uri | null;
   /** Final URI of the destination root (workspaceFolderUri + subpath), or null if unresolved. */
   destRootUri: vscode.Uri | null;
@@ -55,10 +65,8 @@ export function resolveTopology(
   const failed: SourceLoad[] = [];
   const sources: ResolvedSource[] = [];
 
-  const byName = new Map<string, vscode.WorkspaceFolder>();
   const byUri = new Map<string, vscode.WorkspaceFolder>();
   for (const f of workspaceFolders) {
-    byName.set(f.name, f);
     byUri.set(f.uri.toString(), f);
   }
 
@@ -76,13 +84,18 @@ export function resolveTopology(
     const resolved: ResolvedDestination[] = [];
     const seenSubpaths = new Set<string>();
     for (const dest of load.config.destinations) {
-      const folder = byName.get(dest.name);
+      const folder = byUri.get(dest.uri);
       const subpath = dest.path ?? '';
-      const dupeKey = `${dest.name}::${subpath}`;
+      // Dedupe key is `uri::subpath` — two distinct entries with the same URI
+      // and subpath collapse, but the same URI with different subpaths are
+      // legitimate (one source writing into two child folders of the same
+      // workspace folder).
+      const dupeKey = `${dest.uri}::${subpath}`;
+      const displayName = folder?.name ?? fallbackNameFromUri(dest.uri);
       if (seenSubpaths.has(dupeKey)) {
         diagnostics.push({
           severity: 'error',
-          message: `${displayUri(load.configUri)}: duplicate destination '${dest.name}'${subpath ? ` at '${subpath}'` : ''}`,
+          message: `${displayUri(load.configUri)}: duplicate destination '${displayName}'${subpath ? ` at '${subpath}'` : ''}`,
           configUri: load.configUri,
         });
         continue;
@@ -92,11 +105,12 @@ export function resolveTopology(
       if (!folder) {
         diagnostics.push({
           severity: 'warning',
-          message: `${displayUri(load.configUri)}: destination '${dest.name}' is not currently in the workspace`,
+          message: `${displayUri(load.configUri)}: destination URI '${dest.uri}' is not currently in the workspace`,
           configUri: load.configUri,
         });
         resolved.push({
-          name: dest.name,
+          uri: dest.uri,
+          name: displayName,
           subpath,
           workspaceFolderUri: null,
           destRootUri: null,
@@ -105,7 +119,8 @@ export function resolveTopology(
       }
 
       resolved.push({
-        name: dest.name,
+        uri: dest.uri,
+        name: displayName,
         subpath,
         workspaceFolderUri: folder.uri,
         destRootUri: subpath === '' ? folder.uri : appendPath(folder.uri, subpath),
@@ -159,7 +174,7 @@ export function formatTopology(topology: ResolvedTopology): string {
     for (const dest of src.destinations) {
       const target = dest.destRootUri
         ? dest.destRootUri.toString()
-        : `<unresolved: workspace folder "${dest.name}" not open>`;
+        : `<unresolved: ${dest.uri} not in workspace>`;
       const subpathNote = dest.subpath ? ` path="${dest.subpath}"` : '';
       lines.push(`    → ${dest.name}${subpathNote}  ${target}`);
     }
@@ -190,4 +205,23 @@ function displayUri(uri: vscode.Uri): string {
   // Falls back to fsPath / toString() when there's no workspace folder match.
   const rel = vscode.workspace.asRelativePath(uri, false);
   return rel || uri.toString();
+}
+
+/**
+ * Derive a short display name from a destination URI when no live workspace
+ * folder matches it. The last non-empty path segment is the conventional
+ * "folder name" for filesystem-style URIs (`file://`, `vscode-vfs://`, …),
+ * and is what vscode.dev defaults to when adding a folder to a workspace.
+ */
+function fallbackNameFromUri(uri: string): string {
+  try {
+    const parsed = vscode.Uri.parse(uri);
+    const path = parsed.path.replace(/\/+$/, '');
+    const idx = path.lastIndexOf('/');
+    const segment = idx >= 0 ? path.slice(idx + 1) : path;
+    const decoded = decodeURIComponent(segment);
+    return decoded || uri;
+  } catch {
+    return uri;
+  }
 }
