@@ -222,6 +222,32 @@ async function undoRestore(
 }
 
 /**
+ * Capture current workspace state and write it through `store`, bypassing
+ * any diff-against-last-write. Used by the admin editor's "Refresh from
+ * current workspace" button and reusable from commands. Returns the
+ * captured snapshot on success, undefined when there are no folders to
+ * capture, throws on write failure.
+ */
+export async function captureAndWriteSnapshot(store: SnapshotStore): Promise<Snapshot | undefined> {
+  const captured = captureCurrent();
+  if (!captured) {
+    log('snapshot: captureAndWriteSnapshot — no workspace folders, nothing to capture');
+    return undefined;
+  }
+  const targetUri = vscode.workspace.workspaceFolders![0].uri;
+  const finalUri = await store.writeSnapshot(targetUri, captured);
+  await store.setPointer({
+    uri: finalUri.toString(),
+    lastWriteAt: captured.capturedAt,
+  });
+  log(
+    `snapshot: force-captured to ${finalUri.toString()} — ` +
+      `${captured.folders.length} folder(s), ${Object.keys(captured.settings).length} setting(s)`,
+  );
+  return captured;
+}
+
+/**
  * Subscribe to topology changes and rewrite the snapshot when the captured
  * shape differs from what's on disk. Initial state is read from disk so
  * the first event after activation doesn't blindly rewrite.

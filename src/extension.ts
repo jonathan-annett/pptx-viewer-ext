@@ -8,8 +8,9 @@ import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
 import { SyncConfigEditorProvider } from './sync/configEditor';
+import { AdminEditorProvider } from './sync/adminEditor';
 import { registerProbe } from './sync/probe';
-import { SnapshotStore } from './sync/snapshotStore';
+import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
   maybeRestore,
@@ -58,6 +59,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   createStatusBarItem(context, manager);
   context.subscriptions.push(SyncConfigEditorProvider.register());
   log('activate: .sync.jsonc custom editor registered');
+  context.subscriptions.push(AdminEditorProvider.register(snapshotStore));
+  log('activate: .admin-sync.jsonc custom editor registered');
   context.subscriptions.push(
     vscode.commands.registerCommand('folderSync.showTopology', () => {
       log('sync: showTopology invoked');
@@ -89,6 +92,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('folderSync.clearSnapshot', async () => {
       log('snapshot: clearSnapshot invoked');
       await clearSnapshotCommand(context, snapshotStore);
+    }),
+    vscode.commands.registerCommand('folderSync.openAdminConfig', async () => {
+      log('admin-editor: openAdminConfig invoked');
+      const folders = vscode.workspace.workspaceFolders ?? [];
+      if (folders.length === 0) {
+        void vscode.window.showWarningMessage(
+          'Cannot open admin config — no workspace folders are open.',
+        );
+        return;
+      }
+      // Prefer the pointer's URI if present (handles the case where the
+      // user has moved/renamed workspaceFolders[0] but the snapshot still
+      // lives where it was). Fall back to workspaceFolders[0]/.admin-sync.jsonc.
+      const pointer = snapshotStore.getPointer();
+      const target = pointer
+        ? vscode.Uri.parse(pointer.uri)
+        : snapshotUri(folders[0].uri);
+      await vscode.commands.executeCommand(
+        'vscode.openWith',
+        target,
+        'folderSync.adminEditor',
+      );
     }),
   );
   log('activate: folder sync manager initialised');

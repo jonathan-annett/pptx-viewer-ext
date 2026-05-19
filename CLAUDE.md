@@ -45,7 +45,7 @@ schemas/
 test/
   parse.test.ts  Node-runnable smoke tests via tsx — `npm run test:parse`
   sync-*.test.ts pure-module sync tests, one per concern (jsonc, glob, plan,
-                 planview, executor, config-editor)
+                 planview, executor, config-editor, snapshot)
 scripts/
   fix-cpus.cjs        Termux compat shim (clamps os.cpus() for vsce)
   fix-platform.cjs    Termux compat shim (spoofs process.platform for playwright)
@@ -158,7 +158,8 @@ Things tried and found wrong. Don't propose them again without new evidence:
 - **"Install Extension from Location…" in vscode.dev does NOT work for github.io URLs.** vscode.dev's CSP `connect-src` blocks fetches to non-allowlisted origins. The VPS test harness sidesteps this entirely; we don't need github.io.
 - **Signing is not the issue.** `vsce` signing is for marketplace distribution, not sideloading or self-hosted test-web.
 - **Web extensions DO use CJS.** A previous diagnosis claiming they require ESM was wrong. Don't change the bundle format.
-- **`activationEvents` do not need explicit entries.** They're auto-inferred from `contributes.customEditors` since VS Code 1.74. Don't add them.
+- **`activationEvents` mostly auto-infer — except `onStartupFinished`.** Events derived from `contributes.customEditors`, `contributes.commands`, etc. are added implicitly since VS Code 1.74. The exception is anything that needs to fire on a folderless cold start (no file open, no folder mounted, no command invoked yet). M4.6 silent restore needs `"onStartupFinished"` explicitly because nothing else triggers activation in a folderless tab. Rule of thumb: don't add events that duplicate implicit ones; do add events that no contribution implies.
+- **Adding the first folder via `updateWorkspaceFolders` does NOT restart the extension host in vscode.dev (the web host).** Desktop VS Code docs warn about a host restart when `workspaceFolders[0]` is created, removed, or changed (the deprecated `rootPath` updates). Empirically (M4.6 silent restore validation, 2026-05-19), the web host keeps the activation alive — settings applied *after* `updateWorkspaceFolders` in the same async function persist normally. The "pending-settings flag" pattern in `src/sync/restoreFlow.ts` is defensive against the desktop behaviour; the same-activation branch always runs on vscode.dev. If/when the project ever publishes to desktop, the flag becomes load-bearing.
 - **`vscode.workspace.fs.readFile` against `context.extensionUri` hangs in the web-extension host.** The web worker hosting the extension has no FS provider registered for the scheme backing `extensionUri`, so the promise never resolves *or* rejects — error-handling catch blocks never fire. Diagnostic data that needs to live alongside the bundle should be inlined into the bundle (see the build-info placeholder pattern in `esbuild.config.js`), not read at runtime.
 - **esbuild's `define` substitution is frozen at watch-mode context creation.** Mutating `build.initialOptions.define` in `onStart` has no effect on subsequent rebuilds. The build-info logging uses a post-build `onEnd` hook that text-replaces a placeholder string in `dist/extension.js` — that fires per rebuild and the rewrite target isn't in esbuild's watch graph, so no feedback loop.
 - **`main.vscode-cdn.net` CORS errors in the browser console are not from this extension.** VS Code Web itself fetches `extensions/marketplace.json` and `extensions/chat.json` from Microsoft's CDN to populate the "Featured" extensions tab and Copilot Chat surfaces. The CDN returns 200 without `Access-Control-Allow-Origin`, the browser blocks reading, the affected UI tabs stay empty. The requests go browser → CDN directly, bypassing Caddy and our Koa server, so we can't intercept them with a middleware. Cosmetic; ignore unless something downstream actually needs that data.
@@ -179,6 +180,17 @@ Things tried and found wrong. Don't propose them again without new evidence:
 - **Folder Sync — M1 through M4.5 shipped.** `.sync.jsonc` (post-M4.5 pivot from `.sync.yaml`) discovery, topology resolution with hot reload, status bar item, and a categorised plan webview (`folderSync.openPlan` — palette only for now). The webview renders all six operation categories as collapsible `<details>` sections, with a traffic-light footer: green Proceed wired (clean plans), orange + red on collisions (orange not yet wired — lands in M5). The Output Channel still has `folderSync.dryRunPlan` for text-form debugging. Execution (writes + manifest persistence) shipped in M4.
 
   M4.5 added a custom text editor for `.sync.jsonc` (`folderSync.configEditor`): form fields for destinations (dropdowns of workspace folder names), subpath, include/exclude textareas, with form↔text two-way sync via `jsonc-parser`'s `modify()` API. A bundled JSON Schema at `schemas/sync.schema.json` provides IntelliSense + red squiggles in the raw-text editor. "Dry run" from the editor opens the workspace-wide plan webview in a separate panel.
+
+- **Folder Sync — M4.6 silent restore + admin editor shipped.** A workspace snapshot system that persists the open-folder set + known workspace settings to `.admin-sync.jsonc` at the root of `workspaceFolders[0]`, with a `context.globalState.folderSync.snapshotPointer` cold-start hint. On a folderless activation (the state vscode.dev refreshes into) the extension reads the pointer, re-mounts the folders via `updateWorkspaceFolders`, applies known settings, and surfaces a single `Workspace restored from snapshot · Undo` toast. The capture path subscribes to `SyncManager.onDidChange` and atomically writes (tmp + rename) when the captured shape differs from on-disk — no-op writes are skipped via `snapshotsEqual`. Settings capture is currently restricted to `KNOWN_WORKSPACE_KEYS` (`files.readonlyInclude`, `files.readonlyExclude`); full-blob capture is M4.6 follow-up work.
+
+  Module layout follows the pure/wired convention:
+  - `src/sync/snapshot.ts` — types, marshal/parse JSONC, equality. tsx-testable, no vscode import.
+  - `src/sync/snapshotStore.ts` — globalState pointer + atomic file I/O + `captureCurrent()` from vscode state.
+  - `src/sync/restoreFlow.ts` — orchestrates cold-restore + post-restart settings apply + the topology-change writer + the Show/Clear commands. Exports `captureAndWriteSnapshot()` for force-recapture (used by the admin editor's Refresh button).
+  - `src/sync/adminEditorHtml.ts` / `src/sync/adminEditor.ts` — pure renderer + wired `CustomTextEditorProvider` for `.admin-sync.jsonc`. View-only by design (file is managed automatically); affordances are Rename-folder per row (routes through `updateWorkspaceFolders` then the writer rewrites the file), Refresh, Clear, and Reopen as text.
+  - `src/sync/probe.ts` — throwaway `folderSync.probeColdRead` diagnostic; stays in the tree until M4.6 is fully signed off in case a regression needs the same flow.
+
+  Commands: `folderSync.showSnapshot`, `folderSync.clearSnapshot`, `folderSync.openAdminConfig`.
 
 ---
 

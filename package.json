@@ -44,6 +44,16 @@
           }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "folderSync.adminEditor",
+        "displayName": "Folder Sync workspace snapshot",
+        "selector": [
+          {
+            "filenamePattern": ".admin-sync.jsonc"
+          }
+        ],
+        "priority": "default"
       }
     ],
     "jsonValidation": [
@@ -82,6 +92,11 @@
         "command": "folderSync.clearSnapshot",
         "title": "Folder Sync: Clear Workspace Snapshot",
         "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.openAdminConfig",
+        "title": "Folder Sync: Open Admin Config",
+        "category": "Folder Sync"
       }
     ]
   },
@@ -99,6 +114,7 @@
     "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
     "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",
     "test:sync-snapshot": "node --import tsx test/sync-snapshot.test.ts",
+    "test:sync-admin-editor": "node --import tsx test/sync-admin-editor.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"

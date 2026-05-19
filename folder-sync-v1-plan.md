@@ -407,7 +407,15 @@ A `CustomTextEditor` for `.sync.jsonc` files. Just enough surface that a user ca
 - All existing pure tests pass against the new parser path
 - `yaml-mini.ts` and `test/sync-yaml.test.ts` are gone from the tree
 
-### M4.6 — Workspace snapshot + silent restore *(active target)*
+### M4.6 — Workspace snapshot + silent restore *(shipped)*
+
+**Status (2026-05-19):** Probe + snapshot capture + silent restore + Clear/Show commands shipped in commits `6b45c4e`, `c62500f`. Admin custom editor (`folderSync.adminEditor`) + `folderSync.openAdminConfig` shipped in this commit. Empirically validated end-to-end on the VPS: a 4-folder snapshot restored in 134 ms with zero diagnostics, the restore now fires automatically on every refresh of `vscode.sophtwhere.com`. The admin editor's Rename / Refresh / Clear surface still needs in-browser dogfooding — the underlying machinery is the same `updateWorkspaceFolders` + snapshot-writer loop that's already known to work, so risk is low.
+
+**Observed reality from the live runs:**
+
+- Adding folders via `updateWorkspaceFolders` to a previously-folderless tab does **not** restart the extension host in vscode.dev. The pending-settings flag pattern documented below was defensive; the simpler same-activation path always runs. Flag still set + cleared for safety (and for any future desktop publish), but it's never read across activations in practice.
+- vscode.dev surfaces FSA-granted folders as `file:` URIs. `vscode.Uri.parse(snapshot.folders[N].uri)` round-trips cleanly into `updateWorkspaceFolders`.
+- Cold reads via captured URIs work without re-mounting first — one-step restore architecture is correct.
 
 **Starting point for the next session:** Spec below is signed off. The first concrete step is the cold-read URI probe (first bullet under "Open design questions") — it's load-bearing for the whole architecture. Run it on the VPS before writing any snapshot module. The "Snapshot shape" and "Restore path" sections assume the probe succeeds; the fallback (if it fails) is noted under that bullet.
 
