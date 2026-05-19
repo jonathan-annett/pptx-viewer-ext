@@ -5,7 +5,13 @@
 //   - Builds the view model by parsing the document text + asking the store
 //     for pointer info
 //   - Handles command messages: renameFolder, refreshSnapshot, clearSnapshot,
-//     openAsText
+//     openAsText, refreshPlan, runSync
+//   - Maintains an embedded **workspace-wide** dry-run plan. Auto-runs on
+//     open, on topology changes, on workspace-folder add/remove, and when the
+//     user clicks Refresh on the plan card or "Refresh from current
+//     workspace". Run Sync calls the same machinery as
+//     `folderSync.openPlan` → Proceed, with the same green/orange/red gate
+//     logic so collisions block execution.
 //
 // Folder renames re-apply through vscode.workspace.updateWorkspaceFolders;
 // the snapshot writer (in restoreFlow) reacts to that topology event and
@@ -22,12 +28,25 @@ import {
 import { parseSnapshot, KNOWN_WORKSPACE_KEYS, type Snapshot } from './snapshot';
 import { SnapshotStore } from './snapshotStore';
 import { captureAndWriteSnapshot } from './restoreFlow';
+import {
+  renderPlanChips,
+  renderPlanPairs,
+  toViewModel,
+  type PlanTotals,
+} from './planHtml';
+import type { PlanForDestination } from './planner';
+import { buildDryRunPlan } from './planner';
+import { runSync, formatRunSummary } from './runSync';
+import type { SyncManager } from './manager';
 
 const VIEW_TYPE = 'folderSync.adminEditor';
 
+/** Debounce window for plan rebuilds after workspace/topology changes. */
+const PLAN_DEBOUNCE_MS = 500;
+
 export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
-  static register(store: SnapshotStore): vscode.Disposable {
-    const provider = new AdminEditorProvider(store);
+  static register(store: SnapshotStore, manager: SyncManager): vscode.Disposable {
+    const provider = new AdminEditorProvider(store, manager);
     return vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
       // Keep edit-state across hide/show; the form has per-row "Rename" mode
       // we don't want to lose when the user switches tabs.
@@ -36,7 +55,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     });
   }
 
-  constructor(private readonly store: SnapshotStore) {}
+  constructor(
+    private readonly store: SnapshotStore,
+    private readonly manager: SyncManager,
+  ) {}
 
   async resolveCustomTextEditor(
     document: vscode.TextDocument,
@@ -47,6 +69,53 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     panel.webview.html = this.renderFor(document);
     log(`admin-editor: opened ${document.uri.toString()}`);
 
+    // ───── plan state + scheduler ─────────────────────────────────────
+    // Same pattern as src/sync/configEditor.ts: per-editor debounced rebuild
+    // + monotonic run-token so a burst of triggers can't let an older walk's
+    // result overwrite a newer one. The most recent plan is also retained so
+    // Run Sync can hand it to runSync() without re-walking.
+    let planTimer: ReturnType<typeof setTimeout> | undefined;
+    let planRunToken = 0;
+    let lastPlans: PlanForDestination[] = [];
+    let lastPlanBlocking = 0;
+    let lastPlanHasWork = false;
+    let disposed = false;
+    let syncInFlight = false;
+
+    const rebuildPlan = async (): Promise<void> => {
+      if (disposed) return;
+      const myToken = ++planRunToken;
+      void panel.webview.postMessage({ type: 'planStatus', status: 'scanning' });
+      try {
+        const plans = await buildDryRunPlan(this.manager.getTopology());
+        if (disposed || myToken !== planRunToken) return; // stale
+        lastPlans = plans;
+        void postPlanResult(panel, plans, (totals, hasWork) => {
+          lastPlanBlocking = totals.updateCollision + totals.warnings;
+          lastPlanHasWork = hasWork;
+        });
+      } catch (err) {
+        if (disposed || myToken !== planRunToken) return;
+        const message = err instanceof Error ? err.message : String(err);
+        log(`admin-editor: plan build failed — ${message}`);
+        void panel.webview.postMessage({
+          type: 'planStatus',
+          status: 'error',
+          error: message,
+        });
+      }
+    };
+
+    const schedulePlan = (): void => {
+      if (planTimer) clearTimeout(planTimer);
+      planTimer = setTimeout(() => {
+        planTimer = undefined;
+        void rebuildPlan();
+      }, PLAN_DEBOUNCE_MS);
+    };
+
+    schedulePlan();
+
     // Re-render when the document text changes (the snapshot writer rewrites
     // the file on every topology event). We never edit the document from
     // this editor, so there's no own-edit to suppress.
@@ -56,19 +125,30 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
       void panel.webview.postMessage({ type: 'docChanged', payload: vm });
     });
 
-    // Topology changes don't always rewrite the file in the same tick — for
-    // example, a rename has to go through updateWorkspaceFolders → writer →
-    // disk → onDidChangeTextDocument. Subscribing here too gives the panel
-    // an early hint that something is in flight (the writer's rewrite will
-    // arrive shortly via docSub).
+    // Workspace folder changes — affect both the folder list AND the plan
+    // (new destinations become reachable, removed sources stop appearing).
     const folderSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      // No-op for now; left as a hook for future pre-write feedback (e.g.
-      // disabling the rename buttons while a rewrite is in flight).
+      schedulePlan();
+    });
+
+    // Topology changes (manager reload after a .sync.jsonc edit, workspace
+    // folder changes). The manager fires once on subscribe — suppress that
+    // first emit so we don't duplicate the schedulePlan() call above.
+    let firstTopologyEmit = true;
+    const topologySub = this.manager.onDidChange(() => {
+      if (firstTopologyEmit) {
+        firstTopologyEmit = false;
+        return;
+      }
+      schedulePlan();
     });
 
     panel.onDidDispose(() => {
+      disposed = true;
+      if (planTimer) clearTimeout(planTimer);
       docSub.dispose();
       folderSub.dispose();
+      topologySub.dispose();
     });
 
     panel.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
@@ -77,10 +157,40 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
           await this.renameFolder(msg.index, msg.name);
         } else if (msg.type === 'refreshSnapshot') {
           await this.refreshSnapshot(panel, document);
+          // Also kick off a plan rebuild — the snapshot capture itself doesn't
+          // change topology, but the user clicking Refresh signals they want
+          // the most current view of everything on the page.
+          schedulePlan();
         } else if (msg.type === 'clearSnapshot') {
           await vscode.commands.executeCommand('folderSync.clearSnapshot');
         } else if (msg.type === 'openAsText') {
           await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
+        } else if (msg.type === 'refreshPlan') {
+          // Bypass the debounce — user-initiated refresh.
+          if (planTimer) {
+            clearTimeout(planTimer);
+            planTimer = undefined;
+          }
+          void rebuildPlan();
+        } else if (msg.type === 'runSync') {
+          if (syncInFlight) return;
+          if (lastPlanBlocking > 0) {
+            log('admin-editor: runSync ignored — collisions present');
+            return;
+          }
+          if (!lastPlanHasWork) {
+            log('admin-editor: runSync ignored — nothing to do');
+            return;
+          }
+          syncInFlight = true;
+          try {
+            await runSyncFromAdmin(panel, lastPlans);
+          } finally {
+            syncInFlight = false;
+            // Refresh the plan post-run — the manifest changes mean the next
+            // plan will show "Skip (unchanged)" for things we just placed.
+            schedulePlan();
+          }
         }
       } catch (err) {
         log(
@@ -147,7 +257,9 @@ type WebviewMessage =
   | { type: 'renameFolder'; index: number; name: string }
   | { type: 'refreshSnapshot' }
   | { type: 'clearSnapshot' }
-  | { type: 'openAsText' };
+  | { type: 'openAsText' }
+  | { type: 'refreshPlan' }
+  | { type: 'runSync' };
 
 function buildViewModel(document: vscode.TextDocument, store: SnapshotStore): AdminEditorViewModel {
   const text = document.getText();
@@ -176,6 +288,98 @@ function valueSummary(v: unknown): string {
   if (Array.isArray(v)) return `[${v.length} item(s)]`;
   if (v && typeof v === 'object') return `{${Object.keys(v as object).length} key(s)}`;
   return JSON.stringify(v);
+}
+
+/**
+ * Build the totals + pairs HTML from the planner output and post it to the
+ * webview. The `gate` callback receives the totals and a hasWork flag so the
+ * caller can stash them for Run Sync's eligibility check.
+ */
+function postPlanResult(
+  panel: vscode.WebviewPanel,
+  plans: PlanForDestination[],
+  gate: (totals: PlanTotals, hasWork: boolean) => void,
+): Thenable<boolean> {
+  const vm = toViewModel(plans, (plan) => {
+    const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
+    return rel || plan.source.sourceFolderUri.toString();
+  });
+  const t = vm.totals;
+  const chipsHtml = renderPlanChips(t);
+  const pairsHtml = renderPlanPairs(vm);
+  const empty = vm.pairs.length === 0;
+  const hasWork = t.create + t.updateTracked + t.deleteTracked + t.updateCollision > 0;
+  const blocking = t.updateCollision + t.warnings;
+  gate(t, hasWork);
+  return panel.webview.postMessage({
+    type: 'planStatus',
+    status: 'ready',
+    chipsHtml,
+    pairsHtml,
+    empty,
+    totals: t,
+    hasWork,
+    blocking,
+  });
+}
+
+/**
+ * Run the green-path sync from inside the admin editor. Mirrors planView's
+ * `runProceed` notification UX — total success / partial / manifest-failure
+ * messages — but keeps the panel open so the user can continue working.
+ */
+async function runSyncFromAdmin(
+  panel: vscode.WebviewPanel,
+  plans: PlanForDestination[],
+): Promise<void> {
+  log('admin-editor: runSync — starting execution');
+  void panel.webview.postMessage({ type: 'syncStatus', status: 'running' });
+
+  let summary;
+  try {
+    summary = await runSync(plans);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`admin-editor: sync execution threw — ${message}`);
+    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
+    void panel.webview.postMessage({ type: 'syncStatus', status: 'error', error: message });
+    return;
+  }
+
+  for (const line of formatRunSummary(summary).split('\n')) log(line);
+
+  const total = summary.ok + summary.failed;
+  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
+    if (total === 0) {
+      void vscode.window.showInformationMessage('Folder Sync: nothing to do.');
+    } else {
+      void vscode.window.showInformationMessage(`Folder Sync: ${summary.ok} operation(s) completed.`);
+    }
+  } else if (summary.failed > 0) {
+    void vscode.window
+      .showWarningMessage(
+        `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
+        'Show details',
+      )
+      .then((choice) => {
+        if (choice === 'Show details') {
+          void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+        }
+      });
+  } else {
+    void vscode.window.showWarningMessage(
+      `Folder Sync: files placed, but ${summary.manifestWriteFailures.length} manifest write(s) failed. ` +
+        `Re-run will re-detect these as already-placed-but-untracked files.`,
+    );
+  }
+
+  void panel.webview.postMessage({
+    type: 'syncStatus',
+    status: 'done',
+    ok: summary.ok,
+    failed: summary.failed,
+    manifestFailures: summary.manifestWriteFailures.length,
+  });
 }
 
 function makeNonce(): string {

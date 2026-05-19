@@ -9,11 +9,17 @@
 //   - View captured settings (read-only summary)
 //   - Refresh (force a recapture) / Clear (delete pointer + file)
 //   - Reopen as text (escape hatch into raw JSONC)
+//   - Embedded **workspace-wide** dry-run plan + Run Sync — the same engine
+//     as `folderSync.openPlan`, but rendered in-place so the admin editor is
+//     a single pane for "snapshot + sync this workspace". Run Sync is gated
+//     by the same green/orange/red logic as the standalone plan panel.
 //
 // The file itself is managed automatically — direct text edits get
 // clobbered on the next topology change. The header comment in the file
 // says so; this editor's intro panel says so. Edits flow through the
 // snapshot writer rather than through onDidChangeTextDocument.
+
+import { planContentStyles } from './planHtml';
 
 export interface AdminEditorFolder {
   uri: string;
@@ -66,7 +72,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';">
 <title>Workspace snapshot</title>
-<style>${STYLE}</style>
+<style>${STYLE}${planContentStyles()}${EMBEDDED_PLAN_STYLE}</style>
 </head>
 <body>
   <header class="page-header">
@@ -96,6 +102,21 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
     <p class="hint">Workspace-scope settings captured at snapshot time. v1 captures a known-key allowlist (<code>files.readonlyInclude</code>, <code>files.readonlyExclude</code>); other keys are restored if present but flagged as unknown for follow-up.</p>
     <ul id="setting-list" class="setting-list"></ul>
     <p id="setting-empty" class="hint" hidden><em>No settings captured.</em></p>
+  </section>
+
+  <section class="card plan-card">
+    <div class="plan-card-head">
+      <h2>Full dry-run plan — this workspace</h2>
+      <button id="plan-refresh" class="btn btn-secondary btn-sm" type="button" title="Re-scan every source folder and rebuild the plan">Refresh</button>
+    </div>
+    <p class="hint">Auto-runs whenever any <code>.sync.jsonc</code> in the workspace changes, and when workspace folders are added or removed. Run Sync below executes the green-path operations (create / update-tracked / delete-tracked); collisions block execution.</p>
+    <div id="plan-status" class="plan-status plan-scanning">Scanning…</div>
+    <div id="plan-totals" class="totals" hidden></div>
+    <div id="plan-pairs" class="plan-pairs"></div>
+    <div class="plan-actions">
+      <button id="run-sync" class="btn btn-green" type="button" disabled title="Apply the green-path operations from the plan above">Run Sync</button>
+      <span id="run-sync-hint" class="hint plan-actions-hint"></span>
+    </div>
   </section>
 
   <section class="actions">
@@ -261,6 +282,69 @@ input[type="text"] {
 }
 .actions { display: flex; gap: 8px; margin: 16px 0 8px; flex-wrap: wrap; }
 .editing { background: var(--vscode-editor-selectionBackground, rgba(127,127,127,0.15)); }
+`;
+
+// Styles that complement planContentStyles() inside the embedded plan card.
+// Mirrors the embedded styling from configEditorHtml.ts so the two editors
+// feel consistent.
+const EMBEDDED_PLAN_STYLE = `
+.plan-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.plan-card-head h2 { margin: 0; }
+.btn-sm { padding: 3px 10px; font-size: 0.9em; }
+.plan-status {
+  font-size: 0.9em;
+  margin: 6px 0 10px;
+  color: var(--vscode-descriptionForeground);
+}
+.plan-scanning::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--vscode-progressBar-background, var(--vscode-foreground));
+  opacity: 0.55;
+  animation: plan-pulse 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+@keyframes plan-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.85; }
+}
+.plan-error { color: var(--vscode-errorForeground); }
+.plan-error .plan-retry { margin-left: 8px; }
+.plan-card .totals { margin-bottom: 8px; }
+.plan-card .pair {
+  /* Tighten the pair card so it sits more naturally inside the section */
+  margin: 8px 0;
+  padding: 8px 12px;
+}
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.plan-actions-hint { margin: 0; }
+.btn-green {
+  background: var(--vscode-charts-green, #4caf50);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.btn-green:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.btn-green:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 `;
 
 // ───── client-side JS ──────────────────────────────────────────────────
@@ -429,6 +513,101 @@ const CLIENT_JS = `
     vscode.postMessage({ type: 'openAsText' });
   });
 
+  // ───── embedded full dry-run plan ─────────────────────────────────
+  const planStatusEl = document.getElementById('plan-status');
+  const planTotalsEl = document.getElementById('plan-totals');
+  const planPairsEl = document.getElementById('plan-pairs');
+  const planRefreshBtn = document.getElementById('plan-refresh');
+  const runSyncBtn = document.getElementById('run-sync');
+  const runSyncHintEl = document.getElementById('run-sync-hint');
+
+  function setPlanScanning() {
+    planStatusEl.className = 'plan-status plan-scanning';
+    planStatusEl.textContent = 'Scanning…';
+    planRefreshBtn.disabled = true;
+    runSyncBtn.disabled = true;
+    runSyncHintEl.textContent = '';
+  }
+
+  function setPlanReady(msg) {
+    planRefreshBtn.disabled = false;
+    if (msg.empty) {
+      planStatusEl.className = 'plan-status';
+      planStatusEl.textContent =
+        'No source/destination pairs configured. Add a .sync.jsonc to a source folder, and add the named destination to the workspace.';
+      planTotalsEl.innerHTML = '';
+      planTotalsEl.hidden = true;
+      planPairsEl.innerHTML = '';
+      runSyncBtn.disabled = true;
+      runSyncBtn.textContent = 'Run Sync';
+      runSyncHintEl.textContent = 'Nothing to sync.';
+      return;
+    }
+    planStatusEl.className = 'plan-status';
+    const t = msg.totals || {};
+    const parts = [];
+    if (t.create) parts.push(t.create + ' to create');
+    if (t.updateTracked) parts.push(t.updateTracked + ' to update');
+    if (t.updateCollision) parts.push(t.updateCollision + ' collision' + (t.updateCollision === 1 ? '' : 's'));
+    if (t.deleteTracked) parts.push(t.deleteTracked + ' to delete');
+    if (t.destinationOnly) parts.push(t.destinationOnly + ' destination-only');
+    if (parts.length === 0) parts.push('in sync');
+    planStatusEl.textContent = 'Plan: ' + parts.join(', ') + '.';
+    planTotalsEl.innerHTML = msg.chipsHtml || '';
+    planTotalsEl.hidden = !msg.chipsHtml;
+    planPairsEl.innerHTML = msg.pairsHtml || '';
+
+    // Run Sync gating mirrors the standalone plan panel's traffic-light.
+    // Blocking > 0 → button disabled with explanatory hint. No work → "Nothing
+    // to do". Otherwise enabled in green.
+    runSyncBtn.textContent = 'Run Sync';
+    if (msg.blocking > 0) {
+      runSyncBtn.disabled = true;
+      runSyncHintEl.textContent =
+        msg.blocking + ' collision' + (msg.blocking === 1 ? '' : 's') +
+        ' must be resolved before sync. Inline decisions land in M5.';
+    } else if (!msg.hasWork) {
+      runSyncBtn.disabled = true;
+      runSyncHintEl.textContent = 'Nothing to sync — destinations are up to date.';
+    } else {
+      runSyncBtn.disabled = false;
+      runSyncHintEl.textContent = '';
+    }
+  }
+
+  function setPlanError(errorMsg) {
+    planRefreshBtn.disabled = false;
+    runSyncBtn.disabled = true;
+    runSyncHintEl.textContent = '';
+    planStatusEl.className = 'plan-status plan-error';
+    planStatusEl.innerHTML =
+      'Error: ' +
+      String(errorMsg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') +
+      ' <button type="button" class="btn btn-secondary btn-sm plan-retry">Retry</button>';
+    const retry = planStatusEl.querySelector('.plan-retry');
+    if (retry) retry.addEventListener('click', () => {
+      setPlanScanning();
+      vscode.postMessage({ type: 'refreshPlan' });
+    });
+    planTotalsEl.innerHTML = '';
+    planTotalsEl.hidden = true;
+    planPairsEl.innerHTML = '';
+  }
+
+  planRefreshBtn.addEventListener('click', () => {
+    setPlanScanning();
+    vscode.postMessage({ type: 'refreshPlan' });
+  });
+
+  runSyncBtn.addEventListener('click', () => {
+    if (runSyncBtn.disabled) return;
+    runSyncBtn.disabled = true;
+    runSyncBtn.textContent = 'Syncing…';
+    planRefreshBtn.disabled = true;
+    runSyncHintEl.textContent = '';
+    vscode.postMessage({ type: 'runSync' });
+  });
+
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (msg.type === 'docChanged') {
@@ -441,6 +620,23 @@ const CLIENT_JS = `
       }
       saveLocal();
       renderAll();
+    } else if (msg.type === 'planStatus') {
+      if (msg.status === 'scanning') setPlanScanning();
+      else if (msg.status === 'ready') setPlanReady(msg);
+      else if (msg.status === 'error') setPlanError(msg.error || 'unknown error');
+    } else if (msg.type === 'syncStatus') {
+      if (msg.status === 'running') {
+        runSyncBtn.disabled = true;
+        runSyncBtn.textContent = 'Syncing…';
+      } else if (msg.status === 'done') {
+        // Extension follows up with a fresh planStatus shortly — the chips
+        // strip will update accordingly. Keep the button disabled until then.
+        runSyncBtn.textContent = 'Run Sync';
+      } else if (msg.status === 'error') {
+        runSyncBtn.textContent = 'Run Sync';
+        runSyncBtn.disabled = false;
+        runSyncHintEl.textContent = 'Sync failed: ' + (msg.error || 'unknown error');
+      }
     }
   });
 

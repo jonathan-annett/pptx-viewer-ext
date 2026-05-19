@@ -76,6 +76,25 @@ test('renders the standard sections + action buttons', () => {
   assert.match(html, /id="open-text"/);
 });
 
+test('renders the embedded workspace-wide plan section', () => {
+  // M4.7 added a Full Dry-Run plan card to the admin editor. The plan card
+  // hosts the auto-running workspace-wide dry-run + Run Sync button. Initial
+  // state is "Scanning…" — the extension posts a `planStatus` once the walk
+  // completes (or fails).
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  assert.match(html, /<h2>Full dry-run plan — this workspace<\/h2>/);
+  assert.match(html, /id="plan-status"/);
+  assert.match(html, /id="plan-totals"/);
+  assert.match(html, /id="plan-pairs"/);
+  assert.match(html, /id="plan-refresh"/);
+  assert.match(html, /id="run-sync"/);
+  // Initial banner is the scanning indicator — the page-load state.
+  assert.match(html, /class="plan-status plan-scanning">Scanning/);
+  // Run Sync starts disabled — it's enabled by setPlanReady when the plan
+  // finishes with hasWork && !blocking.
+  assert.match(html, /id="run-sync"[^>]*disabled/);
+});
+
 test('settings unknown flag is preserved in payload', () => {
   const html = renderAdminEditorHtml(
     baseVm({

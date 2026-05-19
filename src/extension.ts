@@ -59,7 +59,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   createStatusBarItem(context, manager);
   context.subscriptions.push(SyncConfigEditorProvider.register(manager));
   log('activate: .sync.jsonc custom editor registered');
-  context.subscriptions.push(AdminEditorProvider.register(snapshotStore));
+  context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
   log('activate: .admin-sync.jsonc custom editor registered');
   context.subscriptions.push(
     vscode.commands.registerCommand('folderSync.showTopology', () => {
