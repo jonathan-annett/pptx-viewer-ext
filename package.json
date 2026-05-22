@@ -120,6 +120,7 @@
     "test:sync-warnings": "node --import tsx test/sync-warnings.test.ts",
     "test:sync-decisions": "node --import tsx test/sync-decisions.test.ts",
     "test:sync-hash-cache": "node --import tsx test/sync-hash-cache.test.ts",
+    "test:sync-parse-cache": "node --import tsx test/sync-parse-cache.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",

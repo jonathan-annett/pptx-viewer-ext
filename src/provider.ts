@@ -15,7 +15,8 @@
 //     dry-run plan with attribution
 
 import * as vscode from 'vscode';
-import { parsePptx, type ParseResult, type ParseTimings } from './pptx';
+import { type ParseResult, type ParseTimings } from './pptx';
+import { getParseCacheSingleton, parsePptxCached } from './sync/parseCache';
 import { renderHtml, renderError, type RenderOptions } from './webview';
 import { log } from './log';
 import type { SyncManager } from './sync/manager';
@@ -270,11 +271,11 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         vscode.workspace.fs.stat(document.uri),
       ]);
       const readMs = performance.now() - tReadStart;
-      const result = await parsePptx(bytes, {
-        fileName,
-        size: stat.size,
-        mtime: stat.mtime,
-      });
+      const { result, cacheHit } = await parsePptxCached(
+        bytes,
+        { fileName, size: stat.size, mtime: stat.mtime },
+        getParseCacheSingleton(),
+      );
       const warnCount = [
         result.flags.linkedMedia.ok,
         result.flags.showType.ok,
@@ -287,7 +288,8 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         `parsed: ${fileName} — ${result.size} bytes, ${result.slideCount} slides ` +
           `(${result.hiddenSlideCount} hidden), ${warnCount} warning(s), ` +
           `thumbnail: ${thumbDesc}` +
-          (result.parseError ? `, parseError: ${result.parseError}` : ''),
+          (result.parseError ? `, parseError: ${result.parseError}` : '') +
+          (cacheHit ? ' (cached)' : ''),
       );
       if (result.timings) logParseTimings(fileName, '', result.timings, readMs);
       await renderWithSyncTarget(result);
@@ -376,12 +378,19 @@ async function handleIngest(
   // Parse the candidate. parsePptx itself doesn't throw on malformed input
   // (it returns parseError instead), but the synthetic FileInfo is harmless.
   let candidate: ParseResult;
+  let candidateCached = false;
   try {
-    candidate = await parsePptx(bytes, {
-      fileName: ingestFileName,
-      size: bytes.byteLength,
-      mtime: Date.now(),
-    });
+    const outcome = await parsePptxCached(
+      bytes,
+      {
+        fileName: ingestFileName,
+        size: bytes.byteLength,
+        mtime: Date.now(),
+      },
+      getParseCacheSingleton(),
+    );
+    candidate = outcome.result;
+    candidateCached = outcome.cacheHit;
     if (candidate.timings) logParseTimings(ingestFileName, `ingest[${source}]: `, candidate.timings);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -406,7 +415,8 @@ async function handleIngest(
 
   log(
     `ingest[${source}]: ${ingestFileName} parsed — ` +
-      `${bytes.byteLength} bytes, sha256=${candidate.sha256.slice(0, 12)}…`,
+      `${bytes.byteLength} bytes, sha256=${candidate.sha256.slice(0, 12)}…` +
+      (candidateCached ? ' (cached)' : ''),
   );
 
   if (currentResult && candidate.sha256 === currentResult.sha256) {
@@ -502,12 +512,13 @@ async function writeAndRender(
   log(`update: ${ingestFileName} → ${document.uri.toString()} (${bytes.byteLength} bytes)`);
 
   const stat = await vscode.workspace.fs.stat(document.uri);
-  const refreshed = await parsePptx(bytes, {
-    fileName: targetName,
-    size: stat.size,
-    mtime: stat.mtime,
-  });
+  const { result: refreshed, cacheHit: refreshedCached } = await parsePptxCached(
+    bytes,
+    { fileName: targetName, size: stat.size, mtime: stat.mtime },
+    getParseCacheSingleton(),
+  );
   if (refreshed.timings) logParseTimings(targetName, 'refresh: ', refreshed.timings);
+  if (refreshedCached) log(`refresh: ${targetName} served from parse-cache`);
   await renderWithSyncTarget(refreshed, 'Updated');
 }
 

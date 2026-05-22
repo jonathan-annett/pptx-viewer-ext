@@ -12,6 +12,7 @@ import { AdminEditorProvider } from './sync/adminEditor';
 import { registerProbe } from './sync/probe';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
+import { InMemoryParseCache, setParseCacheSingleton } from './sync/parseCache';
 import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
@@ -71,6 +72,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `hash-cache: init failed — ${err instanceof Error ? err.message : String(err)} (continuing without cache)`,
     );
   }
+
+  // M5.3 Phase A — content-hashed parse cache (sha256 → ParseResult).
+  // In-memory only for this phase; Phase B adds an IDB tier with thumbnail
+  // split. Wired into the pptx viewer's three parse sites (open/ingest/
+  // refresh) via getParseCacheSingleton. Phase C will plug the same
+  // singleton into the planner's source-walk validator pass.
+  setParseCacheSingleton(new InMemoryParseCache());
+  log('parse-cache: idb=unavailable in-memory=0 (Phase A — in-memory only)');
 
   // Sync feature — M1: config layer + diagnostics. The manager owns config
   // discovery, hot-reload, and topology resolution. The status bar and the

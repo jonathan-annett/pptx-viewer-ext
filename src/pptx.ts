@@ -240,7 +240,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join('');
 }
 
-function humanSize(n: number): string {
+export function humanSize(n: number): string {
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
   let value = n / 1024;
@@ -252,7 +252,7 @@ function humanSize(n: number): string {
   return `${value.toFixed(value < 10 ? 2 : 1)} ${units[i]}`;
 }
 
-function formatTime(ms: number): string {
+export function formatTime(ms: number): string {
   if (!ms) return UNKNOWN;
   try {
     return new Date(ms).toISOString();
