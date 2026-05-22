@@ -782,11 +782,20 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 - Output Channel diagnostic surfaces hit/miss counts per session and per sync run.
 - `src/sync/probeStat.ts` + `folderSync.probeStat` command + package.json contribution removed as part of sign-off.
 
-### M5.3 — Content-hashed parse cache + identity store *(planned — paused before start)*
+### M5.3 — Content-hashed parse cache + identity store *(in flight — Phases A & B shipped)*
 
-**Status: not started.** Promoted from the post-v1 roadmap into M5 because: (a) the validator pass is now exercised across every embedded preview surface introduced in M5.1, multiplying the cost; (b) the focus-following panel (currently post-v1) needs this as a prerequisite and the user is keen to land that surface; (c) M5.2's timing data will arrive before we start, so the design can be empirically grounded.
+**Status: Phases A & B shipped, Phases C & D pending.** Promoted from the post-v1 roadmap into M5 because: (a) the validator pass is now exercised across every embedded preview surface introduced in M5.1, multiplying the cost; (b) the focus-following panel (currently post-v1) needs this as a prerequisite and the user is keen to land that surface; (c) M5.2's timing data informed the design empirically before any cache code was written.
 
-**The user explicitly wants to pause and restart before doing this work** — these milestones are locked in here so the scope doesn't drift in the interim.
+**Phase status (for session-restart clarity):**
+
+| Phase | Scope | Status | Key commits |
+|---|---|---|---|
+| **A** | Pure module `src/sync/parseCache.ts`: `InMemoryParseCache` LRU, `project` / `hydrate` round-trip, `parsePptxCached` entrypoint, module singleton. Wired into pptx viewer's three parse sites (open / ingest / refresh) via `getParseCacheSingleton`. `(cached)` suffix on parse log lines for hit visibility. tsx tests in `test/sync-parse-cache.test.ts`. | **Shipped.** Live-confirmed on the PWA: Pfleger 184ms → 71ms on repeat open. | `bf1f3f3` |
+| **B** | IDB-backed `IndexedDbParseCache` in `src/sync/parseCacheIdb.ts`, two object stores under `folderSync.parseCache`: `parseResults` (dense metadata, identity-index foundation) + `thumbnails` (heavy data URLs, splittable under future memory pressure). Write-through over the in-memory LRU. `openParseCache` factory degrades silently to in-memory if IDB unavailable. Activation log: `parse-cache: idb=<…> warm-entries=N`. Fake-IdbStore tests cover lookup/record/forget/error paths. | **Shipped, awaiting live confirmation** that `warm-entries` climbs across PWA refresh. | `81a948f` |
+| **C** | Wire `getParseCacheSingleton()` into the planner's validator pass (`src/sync/validators.ts` + the call sites in `planner.ts` that pass `validate: true`). Source walks today re-parse every pptx on every plan build; with the cache, a plan rebuild after a focus change is O(read + hash) for unchanged decks. Composes with M5.2.5 — the URI hash cache short-circuits the read+hash itself; the parse cache short-circuits the unzip + scan. | **Pending.** Entry point: every `parsePptx(...)` call inside `src/sync/validators.ts` becomes `parsePptxCached(bytes, info, getParseCacheSingleton())`. Per-run log: hit/miss counters alongside the existing hash-cache log line. | — |
+| **D** | Identity store + misfiling guard. Destination walks (which hash but don't parse — `planner.ts:165-167` leaves `validate: false`) populate the `parseResults` store with identity-only records keyed by sha256, carrying `knownAt: relPath[]`. At update/dry-run time, a sha256 hit at a *different* relPath surfaces a soft "these bytes already exist at <other path>" warning, routed through the same per-file `warning-override` decision pattern that M5 (D-adj) introduced for the media-controls warning. | **Pending.** Schema decision deferred to Phase D: extend `ParseResultRecord` with an optional `knownAt` field, or add a third object store. Lean is extend — `parseResults` is already the index. | — |
+
+**Workflow note:** the user explicitly chose to pause and restart between phases so each one gets a clean live-test pass before the next lands. Sign-off cleanup (substrate diff into `CLAUDE.md`, any final probe removal) waits until Phase D is signed off — until then this section is the source of truth for what's shipped.
 
 **Cache shape** — `sha256 → ParseResult` keying (not URI-keyed). `parsePptx` already computes sha256 of the input bytes at the top of the function (`src/pptx.ts:59`) before any other work, so the key is free. Content-addressed means no invalidation: same bytes → same result, forever.
 
