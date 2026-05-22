@@ -48,6 +48,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log(`snapshot: maybeRestore threw — ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  // Register the pptx custom editor BEFORE the rest of activation. On PWA
+  // refresh VS Code restores .pptx editor tabs as soon as workspace folders
+  // are mounted (just above, by maybeRestore). If the provider isn't
+  // registered by then, VS Code drops the tab and shows the welcome page —
+  // user has to click the file in the explorer to re-open it. Previously
+  // this registration sat after ensureWorkspaceLockSettings + cache opens +
+  // SyncManager.create, far enough into activate() for VS Code to give up.
+  //
+  // The provider needs SyncManager for the "Sync target" section but
+  // nothing else, so we hand it a Promise and resolve it later.
+  let resolveManager!: (m: SyncManager) => void;
+  const managerPromise = new Promise<SyncManager>((res) => {
+    resolveManager = res;
+  });
+  context.subscriptions.push(
+    PptxEditorProvider.register(managerPromise, context.globalState),
+  );
+  log('activate: custom editor registered for *.pptx');
+
   // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
   // if missing — destinations are read-only by default; the source folder
   // (workspaceFolders[0]) is the writable carve-out. No-op when the user has
@@ -94,14 +113,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // discovery, hot-reload, and topology resolution. The status bar and the
   // showTopology command are surface layers over the manager's state.
   const manager = await SyncManager.create(context);
-
-  // pptx viewer registers AFTER the sync manager exists so the viewer's
-  // "Sync target" section (M4.7 Phase D) can read live topology + manifest.
-  // Registration order doesn't otherwise matter — the custom editor isn't
-  // invoked until the user opens a .pptx, which can only happen after
-  // activation returns.
-  context.subscriptions.push(PptxEditorProvider.register(manager, context.globalState));
-  log('activate: custom editor registered for *.pptx');
+  // Unblock any resolveCustomEditor calls that landed during activation —
+  // they've been awaiting this since the provider was registered above.
+  resolveManager(manager);
 
   // Snapshot writer subscribes to topology changes — every config edit or
   // workspace folder add/remove recaptures and rewrites .admin-sync.jsonc

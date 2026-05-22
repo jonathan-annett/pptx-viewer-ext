@@ -51,17 +51,25 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
   public static readonly viewType = 'pptxViewer.viewer';
 
   constructor(
-    private readonly manager: SyncManager,
+    // Promise rather than a resolved manager so the provider can be registered
+    // at the top of activate() before SyncManager.create runs. On PWA refresh
+    // VS Code restores .pptx editor tabs as soon as workspace folders are
+    // mounted (by our maybeRestore) — if the provider isn't registered by
+    // then, VS Code drops the tab and shows the welcome page. We await the
+    // promise inside resolveCustomEditor only at the point the manager is
+    // actually needed (sync-target rendering); the read+parse+render path
+    // doesn't depend on it.
+    private readonly managerPromise: Promise<SyncManager>,
     private readonly globalState: vscode.Memento,
   ) {}
 
   public static register(
-    manager: SyncManager,
+    managerPromise: Promise<SyncManager>,
     globalState: vscode.Memento,
   ): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       PptxEditorProvider.viewType,
-      new PptxEditorProvider(manager, globalState),
+      new PptxEditorProvider(managerPromise, globalState),
       {
         webviewOptions: { retainContextWhenHidden: false },
         supportsMultipleEditorsPerDocument: false,
@@ -82,6 +90,14 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
+
+    // Await the manager. On a normal user-initiated open (after activate()
+    // returned) this resolves synchronously. On a PWA-refresh restore where
+    // resolveCustomEditor fires before SyncManager.create completes, we
+    // block here briefly — the panel stays empty for that window, then
+    // populates as normal. Crucially we are NOT blocked at registration
+    // time, so VS Code does not drop the editor tab.
+    const manager = await this.managerPromise;
 
     // Single-slot candidate cache for the ingest → confirm-update flow. The
     // drop path posts bytes once, waits for the user to click Update inside
@@ -111,7 +127,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       result: ParseResult,
       initialStatus?: string,
     ): Promise<void> => {
-      const syncTarget = await buildSyncTargetHtml(this.manager, document.uri);
+      const syncTarget = await buildSyncTargetHtml(manager, document.uri);
       lastPerFilePlans = syncTarget?.plans ?? [];
       lastPerFileBlocking = syncTarget?.blocking ?? 0;
       lastPerFileHasWork = syncTarget?.hasWork ?? false;
