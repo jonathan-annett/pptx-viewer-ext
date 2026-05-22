@@ -31,6 +31,27 @@ export interface IdbOpenOptions {
   version?: number;
 }
 
+export interface IdbOpenMultiOptions {
+  dbName: string;
+  /**
+   * Object stores to create on first open. All are created in a single
+   * onupgradeneeded transaction. Opening the same DB twice for different
+   * store names doesn't work (the second open sees the existing DB at the
+   * same version, skips the upgrade, and can't find its store). When you
+   * need more than one store under one DB, use {@link openIdbStores}.
+   */
+  storeNames: string[];
+  /** Schema version; bump to add new stores to an existing DB. */
+  version?: number;
+}
+
+export interface IdbMultiStore {
+  /** Get a typed view over one of the stores opened together. */
+  store<V>(storeName: string): IdbStore<V>;
+  /** Close the underlying DB connection. Idempotent. */
+  close(): void;
+}
+
 /**
  * True when an IndexedDB factory is reachable from `globalThis`. The
  * vscode.dev extension host runs in a Web Worker context; `globalThis`
@@ -83,12 +104,68 @@ export function openIdbStore<V>(opts: IdbOpenOptions): Promise<IdbStore<V>> {
         reject(new Error(`IDB store '${storeName}' missing in '${dbName}'`));
         return;
       }
-      resolve(wrap<V>(db, storeName));
+      // Owning store: close() releases the DB.
+      resolve(makeStoreView<V>(db, storeName, true));
     };
   });
 }
 
-function wrap<V>(db: IDBDatabase, storeName: string): IdbStore<V> {
+/**
+ * Open one DB with multiple object stores. All stores are created in a
+ * single onupgradeneeded so they exist on the same version — opening the
+ * same DB twice for different store names doesn't work (second open sees
+ * the DB at the same version, skips the upgrade, can't find its store).
+ *
+ * Bump `version` to add a new store to an existing DB: the upgrade
+ * transaction creates any missing stores, leaves existing ones alone.
+ */
+export function openIdbStores(opts: IdbOpenMultiOptions): Promise<IdbMultiStore> {
+  const idb = (globalThis as { indexedDB?: IDBFactory }).indexedDB;
+  if (!idb) {
+    return Promise.reject(new Error('IndexedDB is not available in this host'));
+  }
+  const { dbName, storeNames } = opts;
+  const version = opts.version ?? 1;
+
+  return new Promise<IdbMultiStore>((resolve, reject) => {
+    const req = idb.open(dbName, version);
+    req.onerror = () => reject(req.error ?? new Error('IDB open failed'));
+    req.onblocked = () => reject(new Error(`IDB open blocked for ${dbName}`));
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      for (const name of storeNames) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name);
+        }
+      }
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      for (const name of storeNames) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.close();
+          reject(new Error(`IDB store '${name}' missing in '${dbName}'`));
+          return;
+        }
+      }
+      let closed = false;
+      resolve({
+        store<V>(storeName: string): IdbStore<V> {
+          // Non-owning views: their close() is a no-op. The multi-store
+          // owns the DB connection; tearing it down is multi.close()'s job.
+          return makeStoreView<V>(db, storeName, false);
+        },
+        close() {
+          if (closed) return;
+          closed = true;
+          db.close();
+        },
+      });
+    };
+  });
+}
+
+function makeStoreView<V>(db: IDBDatabase, storeName: string, ownsConnection: boolean): IdbStore<V> {
   let closed = false;
   function tx(mode: IDBTransactionMode): IDBObjectStore {
     if (closed) throw new Error('IDB store closed');
@@ -133,7 +210,10 @@ function wrap<V>(db: IDBDatabase, storeName: string): IdbStore<V> {
     close() {
       if (closed) return;
       closed = true;
-      db.close();
+      // Only the owning view releases the DB. Views handed out by a
+      // multi-store wrapper share one connection — the multi-store's
+      // close() owns the teardown.
+      if (ownsConnection) db.close();
     },
   };
 }

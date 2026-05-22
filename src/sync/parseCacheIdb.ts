@@ -11,7 +11,8 @@
 // and the thumbnail (if any) to their respective IDB stores. Best-effort:
 // IDB failures (quota, transient disconnect) are logged-and-swallowed.
 //
-// Schema rationale — two object stores:
+// Schema rationale — one DB, two object stores (opened via openIdbStores
+// so the upgrade transaction creates both atomically):
 //
 //   parseResults: dense metadata. Cheap to enumerate, no megabyte-scale
 //   payloads. The Phase D identity store will piggyback on this — every
@@ -40,7 +41,7 @@ import {
 } from './parseCache';
 import {
   isIdbAvailable,
-  openIdbStore,
+  openIdbStores,
   type IdbStore,
 } from './idbAdapter';
 import type { Thumbnail } from '../pptx';
@@ -48,7 +49,12 @@ import type { Thumbnail } from '../pptx';
 const DB_NAME = 'folderSync.parseCache';
 const RESULTS_STORE = 'parseResults';
 const THUMBNAILS_STORE = 'thumbnails';
-const DB_VERSION = 1;
+// Bumped from 1 to 2 because v0.0.3 first-released a broken open path that
+// created the DB at version 1 with only the parseResults store. Bumping
+// triggers onupgradeneeded against stale-state users; the loop in
+// openIdbStores creates whatever stores are missing (thumbnails here).
+// New users go straight from oldVersion=0 to newVersion=2 and get both.
+const DB_VERSION = 2;
 
 /**
  * IDB payload for the parseResults store. Identical to CachedParseResult
@@ -88,30 +94,31 @@ export class IndexedDbParseCache implements ParseResultCache {
   }
 
   static async open(opts: IdbParseCacheOptions = {}): Promise<IndexedDbParseCache> {
-    const openResults =
-      opts.openResults ??
-      (() =>
-        openIdbStore<ParseResultRecord>({
-          dbName: DB_NAME,
-          storeName: RESULTS_STORE,
-          version: DB_VERSION,
-        }));
-    const openThumbnails =
-      opts.openThumbnails ??
-      (() =>
-        openIdbStore<Thumbnail>({
-          dbName: DB_NAME,
-          storeName: THUMBNAILS_STORE,
-          version: DB_VERSION,
-        }));
-    // Two opens against the same DB at the same version. The first open
-    // creates the database with both stores via onupgradeneeded; the second
-    // sees the existing version. Sequenced rather than parallel because
-    // running two concurrent open requests at the same DB_VERSION can race
-    // the upgrade transaction in some browsers (Safari has been observed
-    // to reject the second one as "blocked").
-    const results = await openResults();
-    const thumbnails = await openThumbnails();
+    let results: IdbStore<ParseResultRecord>;
+    let thumbnails: IdbStore<Thumbnail>;
+    if (opts.openResults || opts.openThumbnails) {
+      // Test path: explicit factories. Both must be provided together —
+      // partial injection isn't supported (and isn't used by any test).
+      if (!opts.openResults || !opts.openThumbnails) {
+        throw new Error('parseCacheIdb: provide both openResults and openThumbnails, or neither');
+      }
+      results = await opts.openResults();
+      thumbnails = await opts.openThumbnails();
+    } else {
+      // Production path: one DB open creates BOTH stores in a single
+      // onupgradeneeded transaction. Opening the same DB twice for
+      // different store names at the same version doesn't work — the
+      // second open sees an existing DB, skips the upgrade, and can't
+      // find its store. (That was the v0.0.3 first-cut bug — fixed by
+      // routing through openIdbStores.)
+      const multi = await openIdbStores({
+        dbName: DB_NAME,
+        storeNames: [RESULTS_STORE, THUMBNAILS_STORE],
+        version: DB_VERSION,
+      });
+      results = multi.store<ParseResultRecord>(RESULTS_STORE);
+      thumbnails = multi.store<Thumbnail>(THUMBNAILS_STORE);
+    }
     return new IndexedDbParseCache(results, thumbnails, opts.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
