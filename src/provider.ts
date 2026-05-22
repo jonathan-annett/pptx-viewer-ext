@@ -601,6 +601,20 @@ async function handleIngest(
   // Drop — stash + open the compare modal (user affirms via Update button).
   if (source === 'picker') {
     try {
+      // PDF→PPTX import is the only producer of source='picker' today, and
+      // re-importing the same PDF reproduces the same sha256. If a previous
+      // import landed before the in-file thumbnail change (or any other
+      // content-determined behaviour we've since added to the parser), its
+      // cached entry would shadow the freshly-written file's parse and the
+      // panel would render against the stale shape. Forget the sha before
+      // writing so the post-write re-parse inside writeAndRender repopulates
+      // the cache from scratch. Import is already the slow path — paying for
+      // one extra parse is well below the user-noticeable threshold.
+      const cache = getParseCacheSingleton();
+      if (cache) {
+        await cache.forget(candidate.sha256);
+        log(`ingest[picker]: forgot parse-cache entry for sha256=${candidate.sha256.slice(0, 12)}…`);
+      }
       await writeAndRender(document, webviewPanel, bytes, ingestFileName, renderWithSyncTarget);
       webviewPanel.webview.postMessage({ type: 'picker-result', outcome: 'updated' });
     } catch (err) {

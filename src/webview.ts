@@ -987,17 +987,27 @@ function css(): string {
       word-break: break-all;
     }
     /* Thumbnail styling:
-       - max-width:100% keeps the image from overflowing the panel on narrow widths.
-       - height:auto preserves the aspect ratio while max-width shrinks it.
-       - max-height clamps very tall thumbnails (rare, but Office can produce them).
-       - The subtle border + radius matches the rest of the panel's chrome and
-         keeps a near-white slide image from bleeding into a light theme background.
+       - Fixed height (240px) with width:auto gives every thumbnail the same
+         vertical footprint while preserving aspect ratio. Landscape slides
+         (the overwhelming common case) all render at 240px tall, width
+         scaling by their native aspect — no more "small file = small thumb,
+         big file = big thumb" inconsistency.
+       - max-width:100% is the safety hatch for the rare portrait or
+         extreme-aspect image inside a narrow panel.
+       - object-fit:contain is belt-and-braces for any future case where
+         both dimensions get constrained simultaneously; it does nothing
+         when width:auto is in play, but means we won't ever squish the
+         aspect ratio if a future change adds a width constraint.
+       - The subtle border + radius matches the rest of the panel's chrome
+         and keeps a near-white slide image from bleeding into a light
+         theme background.
     */
     .thumbnail {
       display: block;
+      height: 240px;
+      width: auto;
       max-width: 100%;
-      max-height: 360px;
-      height: auto;
+      object-fit: contain;
       margin: 0 0 16px;
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
       border-radius: 4px;
