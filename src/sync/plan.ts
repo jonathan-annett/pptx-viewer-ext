@@ -50,13 +50,25 @@ export interface FileInfo {
  *                 override; the user must fix the source and re-plan.
  *  - 'override' — a quality concern that doesn't break the file, but the
  *                 user should acknowledge before shipping (e.g. media
- *                 controls visible over an embedded video at a conference).
+ *                 controls visible over an embedded video at a conference,
+ *                 or content also present at a different rel-path).
  *                 Surfaced in the plan webview with a "Sync anyway" checkbox
  *                 + "Don't ask again"; armed rows flow through the executor.
+ *
+ * Codes:
+ *  - 'linked-media'      — pptx slide references externally-linked media.
+ *  - 'show-type'         — pptx is set to kiosk/browse mode.
+ *  - 'media-controls'    — pptx will render media-controls bar over an
+ *                          embedded video at playback.
+ *  - 'misfiled-content'  — same bytes have been observed at one or more
+ *                          other rel-paths (M5.3 Phase D). Generic — not
+ *                          pptx-specific — but only recorded for
+ *                          content-addressed filetypes that benefit from
+ *                          identity tracking (.pptx today).
  */
 export interface PlanWarning {
   severity: 'block' | 'override';
-  code: 'linked-media' | 'show-type' | 'media-controls';
+  code: 'linked-media' | 'show-type' | 'media-controls' | 'misfiled-content';
   message: string;
 }
 

@@ -461,6 +461,146 @@ async function run(): Promise<void> {
     ok(`DEFAULT_MAX_ENTRIES is positive (${DEFAULT_MAX_ENTRIES})`);
   }
 
+  // ---------- InMemoryParseCache: identity index basic ops ----------
+  {
+    const cache = new InMemoryParseCache();
+    assert.equal(await cache.lookupIdentity('zzz'), undefined, 'empty index returns undefined');
+    await cache.recordIdentity('zzz', 'a/file.pptx');
+    assert.deepEqual(await cache.lookupIdentity('zzz'), ['a/file.pptx']);
+    await cache.recordIdentity('zzz', 'b/file.pptx');
+    assert.deepEqual(await cache.lookupIdentity('zzz'), ['a/file.pptx', 'b/file.pptx']);
+    // De-duplicated on repeat call.
+    await cache.recordIdentity('zzz', 'a/file.pptx');
+    assert.deepEqual(await cache.lookupIdentity('zzz'), ['a/file.pptx', 'b/file.pptx']);
+    ok('InMemoryParseCache: recordIdentity appends, lookupIdentity returns list, dedup on repeat');
+  }
+
+  // ---------- InMemoryParseCache: identity and parse-data are independent ----------
+  {
+    const cache = new InMemoryParseCache();
+    // Identity-only record: no parse data yet, but lookupIdentity should find it.
+    await cache.recordIdentity('iso1', 'only/path.pptx');
+    assert.equal(await cache.lookup('iso1'), undefined, 'no parse data → lookup miss');
+    assert.deepEqual(await cache.lookupIdentity('iso1'), ['only/path.pptx']);
+    // Now record parse data — identity must survive.
+    const sample = makeSampleCached('iso1', false);
+    await cache.record('iso1', sample);
+    assert.ok(await cache.lookup('iso1'), 'parse-data hit after record');
+    assert.deepEqual(await cache.lookupIdentity('iso1'), ['only/path.pptx'], 'identity preserved');
+    // And forget drops both.
+    await cache.forget('iso1');
+    assert.equal(await cache.lookup('iso1'), undefined);
+    assert.equal(await cache.lookupIdentity('iso1'), undefined);
+    ok('InMemoryParseCache: identity and parse-data are independent, forget drops both');
+  }
+
+  // ---------- IndexedDbParseCache: recordIdentity stores knownAt on parseResults ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    await cache.recordIdentity('idb1', 'first.pptx');
+    const stored1 = results.backing.get('idb1');
+    assert.deepEqual(stored1?.knownAt, ['first.pptx'], 'identity-only record has knownAt');
+    assert.equal(stored1?.flags, undefined, 'identity-only record has no flags (the discriminator)');
+    // Second identity record appends.
+    await cache.recordIdentity('idb1', 'second.pptx');
+    assert.deepEqual(results.backing.get('idb1')?.knownAt, ['first.pptx', 'second.pptx']);
+    // Repeat is a no-op against IDB (skips the put).
+    results.ops.length = 0;
+    await cache.recordIdentity('idb1', 'first.pptx');
+    assert.equal(
+      results.ops.some((op) => op.startsWith('put ')),
+      false,
+      'repeat recordIdentity skips IDB put',
+    );
+    ok('IndexedDbParseCache: recordIdentity writes knownAt, dedups, skips redundant put');
+  }
+
+  // ---------- IndexedDbParseCache: lookupIdentity reads from IDB and warms in-memory ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    // Pre-populate as if a prior session recorded identity.
+    results.backing.set('idb2', { knownAt: ['cold/x.pptx', 'cold/y.pptx'] });
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    results.ops.length = 0;
+    const first = await cache.lookupIdentity('idb2');
+    assert.deepEqual(first, ['cold/x.pptx', 'cold/y.pptx']);
+    assert.deepEqual(results.ops, ['get idb2'], 'cold lookupIdentity hits IDB once');
+    // Second call served from warm in-memory — no extra IDB op.
+    results.ops.length = 0;
+    const second = await cache.lookupIdentity('idb2');
+    assert.deepEqual(second, ['cold/x.pptx', 'cold/y.pptx']);
+    assert.deepEqual(results.ops, [], 'warm in-memory hit, no IDB op');
+    ok('IndexedDbParseCache: lookupIdentity reads cold IDB then warms in-memory');
+  }
+
+  // ---------- IndexedDbParseCache: record() preserves existing knownAt ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    // Prior session left an identity-only record.
+    results.backing.set('idb3', { knownAt: ['existing.pptx'] });
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    // Now full parse arrives — record() must merge knownAt rather than overwrite.
+    await cache.record('idb3', makeSampleCached('idb3', false));
+    const stored = results.backing.get('idb3');
+    assert.deepEqual(stored?.knownAt, ['existing.pptx'], 'knownAt survives record()');
+    assert.ok(stored?.flags, 'flags now present from the parse');
+    assert.equal(stored?.slideCount, 7, 'parse data is the new payload');
+    ok('IndexedDbParseCache: record() merges new parse data with existing knownAt');
+  }
+
+  // ---------- IndexedDbParseCache: recordIdentity preserves existing parse data ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    // First the parse, then the identity arrives. Parse data must survive.
+    await cache.record('idb4', makeSampleCached('idb4', false));
+    await cache.recordIdentity('idb4', 'late/path.pptx');
+    const stored = results.backing.get('idb4');
+    assert.equal(stored?.slideCount, 7, 'parse data preserved');
+    assert.ok(stored?.flags);
+    assert.deepEqual(stored?.knownAt, ['late/path.pptx']);
+    ok('IndexedDbParseCache: recordIdentity preserves existing parse data');
+  }
+
+  // ---------- IndexedDbParseCache: identity-only record returns undefined from lookup() ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    // Identity-only — no flags. Should NOT satisfy a parse-data lookup.
+    results.backing.set('idb5', { knownAt: ['only.pptx'] });
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    const parseHit = await cache.lookup('idb5');
+    assert.equal(parseHit, undefined, 'identity-only record is not a parse-data hit');
+    assert.equal(cache.stats().misses, 1, 'counted as a parse-data miss');
+    // But lookupIdentity finds it — and the side effect of lookup() warmed
+    // the identity map (so no extra IDB op needed).
+    results.ops.length = 0;
+    const identityHit = await cache.lookupIdentity('idb5');
+    assert.deepEqual(identityHit, ['only.pptx']);
+    assert.deepEqual(results.ops, [], 'identity warmed by prior lookup, no IDB op');
+    ok('IndexedDbParseCache: identity-only record yields lookup miss + lookupIdentity hit');
+  }
+
   console.log('all tests passed');
 }
 

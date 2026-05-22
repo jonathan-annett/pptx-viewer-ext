@@ -32,6 +32,7 @@ import {
   scopeFromRelPath,
 } from './scopedPlan';
 import { isPptxPath, validatePptxBytes } from './validators';
+import { checkMisfile } from './misfile';
 import { log } from '../log';
 
 export interface PlanForDestination {
@@ -236,9 +237,14 @@ async function planForSource(
         {
           exclude: destExclude,
           include: destInclude,
+          // M5.3 Phase D: destination walks populate the identity index for
+          // misfile detection. No validate=true here — destinations don't
+          // need the parse pass, just the (sha → relPath) observation.
+          recordIdentity: true,
         },
         cache,
         destStats,
+        parseCache,
       );
     } catch (err) {
       log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
@@ -347,8 +353,21 @@ interface WalkAndHashOpts {
    * When true, run per-filetype validators against each file's bytes during
    * the walk. Reuses the bytes already in scope for hashing — no second read.
    * Only meaningful on the source walk; the destination walk leaves this off.
+   *
+   * Source-walk only: also consults the parseCache identity index to attach
+   * `misfiled-content` warnings for content observed at other rel-paths.
    */
   validate?: boolean;
+  /**
+   * When true, populate the parseCache identity index — record that this
+   * file's sha was observed at its rel-path. Destination-walk only; source
+   * walks use `validate` instead and don't pollute the index with their own
+   * paths (a source file living at its expected path is not "misfiled").
+   *
+   * Gated by the same `isPptxPath` filter as `validate`: identity tracking
+   * for shared text files would generate false positives.
+   */
+  recordIdentity?: boolean;
 }
 
 async function walkAndHash(
@@ -394,6 +413,24 @@ async function walkAndHash(
         // content-hashed cache instead of re-parsing on every plan build.
         const warnings = await runValidators(e.relPath, result.bytes, result.sha256, parseCache);
         if (warnings.length > 0) info.warnings = warnings;
+      }
+      // M5.3 Phase D — identity index. Gated by isPptxPath today: identity
+      // tracking on shared text files (license boilerplate, etc.) would
+      // generate noise; pptx is the content-addressed binary case where
+      // duplicate placement is genuinely a "did the user mean this?" signal.
+      if (parseCache && isPptxPath(e.relPath)) {
+        if (opts.validate) {
+          // Source side — consult the index to detect misfile.
+          const misfileWarning = await checkMisfile(e.relPath, result.sha256, parseCache);
+          if (misfileWarning) {
+            info.warnings = info.warnings ? [...info.warnings, misfileWarning] : [misfileWarning];
+          }
+        }
+        if (opts.recordIdentity) {
+          // Destination side — populate the index. Best-effort; failures
+          // don't propagate (the cache implementations swallow IDB errors).
+          await parseCache.recordIdentity(result.sha256, e.relPath);
+        }
       }
       out.push(info);
     } catch (err) {

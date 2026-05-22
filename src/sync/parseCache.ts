@@ -39,6 +39,32 @@ export interface ParseResultCache {
   record(sha256: string, value: CachedParseResult): Promise<void>;
   forget(sha256: string): Promise<void>;
   stats(): ParseCacheStats;
+
+  /**
+   * Identity index lookup (M5.3 Phase D). Returns the list of rel-paths
+   * where this content (sha256) has been observed via `recordIdentity`,
+   * or undefined when no observations are recorded. Independent of the
+   * parse-data cache: an "identity-only" record (no full parse data
+   * cached) still resolves here.
+   *
+   * The planner uses this on source walks to detect misfiled content —
+   * when bytes appear at a rel-path different from one or more known
+   * rel-paths in the same destination, the file gets a
+   * `misfiled-content` warning.
+   */
+  lookupIdentity(sha256: string): Promise<string[] | undefined>;
+
+  /**
+   * Record that `sha256` was observed at `relPath` (M5.3 Phase D).
+   * Idempotent: repeated calls with the same (sha, relPath) don't add
+   * duplicates. Implementations preserve any existing parse data for the
+   * sha; this is purely an identity-index update.
+   *
+   * Called by destination walks for content-addressed filetypes (.pptx
+   * today) to build the index that source walks consult for misfile
+   * detection.
+   */
+  recordIdentity(sha256: string, relPath: string): Promise<void>;
 }
 
 export interface ParseCacheStats {
@@ -99,6 +125,13 @@ export interface InMemoryParseCacheOptions {
 
 export class InMemoryParseCache implements ParseResultCache {
   private readonly map = new Map<string, CachedParseResult>();
+  /**
+   * Identity index (M5.3 Phase D): rel-paths where each sha has been
+   * observed. Lives alongside `map` rather than baked into CachedParseResult
+   * because identity entries can exist for content that has never been
+   * fully parsed (destination-walk observations).
+   */
+  private readonly identityMap = new Map<string, string[]>();
   private hits = 0;
   private misses = 0;
   private readonly maxEntries: number;
@@ -123,10 +156,27 @@ export class InMemoryParseCache implements ParseResultCache {
 
   async forget(sha256: string): Promise<void> {
     this.map.delete(sha256);
+    this.identityMap.delete(sha256);
   }
 
   stats(): ParseCacheStats {
     return { entries: this.map.size, hits: this.hits, misses: this.misses, idb: false };
+  }
+
+  async lookupIdentity(sha256: string): Promise<string[] | undefined> {
+    const list = this.identityMap.get(sha256);
+    if (!list || list.length === 0) return undefined;
+    return [...list];
+  }
+
+  async recordIdentity(sha256: string, relPath: string): Promise<void> {
+    const current = this.identityMap.get(sha256);
+    if (!current) {
+      this.identityMap.set(sha256, [relPath]);
+      return;
+    }
+    if (current.includes(relPath)) return;
+    current.push(relPath);
   }
 }
 

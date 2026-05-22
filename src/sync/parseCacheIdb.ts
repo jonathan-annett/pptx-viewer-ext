@@ -15,9 +15,13 @@
 // so the upgrade transaction creates both atomically):
 //
 //   parseResults: dense metadata. Cheap to enumerate, no megabyte-scale
-//   payloads. The Phase D identity store will piggyback on this — every
-//   sha256 known to the cache is "content we've seen", regardless of
-//   whether it carried a thumbnail.
+//   payloads. Doubles as the Phase D identity index — every record carries
+//   an optional `knownAt: string[]` of rel-paths where this sha256 has
+//   been observed. A record with `flags` set is "fully parsed" (cache hit
+//   for validation); a record with only `knownAt` is "identity-only" (we
+//   saw these bytes at a destination but never parsed them). The single
+//   store doubles as both indexes because identity and parse data are
+//   keyed by the same sha256 — no third store needed.
 //
 //   thumbnails: heavy data URLs (up to ~200KB). Split out so future
 //   memory-pressure handling can drop just the thumbnail and keep the
@@ -53,15 +57,35 @@ const THUMBNAILS_STORE = 'thumbnails';
 // created the DB at version 1 with only the parseResults store. Bumping
 // triggers onupgradeneeded against stale-state users; the loop in
 // openIdbStores creates whatever stores are missing (thumbnails here).
-// New users go straight from oldVersion=0 to newVersion=2 and get both.
-const DB_VERSION = 2;
+//
+// Bumped 2 → 3 for M5.3 Phase D: the parseResults record gained an optional
+// `knownAt: string[]` identity field. No schema change is required for IDB
+// itself (records are JSON-shaped), but the version bump is the contract
+// signal that existing entries may now grow the new field on write. Old v2
+// entries without `knownAt` continue to read correctly (treated as
+// "identity-only=absent" until a recordIdentity call lights them up).
+const DB_VERSION = 3;
 
 /**
- * IDB payload for the parseResults store. Identical to CachedParseResult
- * minus the thumbnail (which lives in the thumbnails store). Exported so
- * tests can construct fake IdbStores with the correct value type.
+ * IDB payload for the parseResults store. All parse fields are optional so
+ * an "identity-only" record — one populated by a destination walk that
+ * observed the bytes but never parsed them — is a valid shape. The
+ * discriminator is `flags`: present iff we have fully-parsed data; absent
+ * iff the record is identity-only. `knownAt` carries the M5.3 Phase D
+ * identity index, an array of rel-paths where this sha256 has been seen.
+ *
+ * Exported so tests can construct fake IdbStores with the correct value
+ * type.
  */
-export type ParseResultRecord = Omit<CachedParseResult, 'thumbnail'>;
+export type ParseResultRecord = Partial<Omit<CachedParseResult, 'thumbnail'>> & {
+  /**
+   * Rel-paths where this content (sha256) has been observed. Populated by
+   * destination walks via `recordIdentity`; consulted by source walks to
+   * surface a `misfiled-content` warning when bytes appear at multiple
+   * paths. De-duplicated by the writer; order is insertion order.
+   */
+  knownAt?: string[];
+};
 
 export interface IdbParseCacheOptions {
   /** Soft cap on the in-memory tier. IDB tier is bounded by browser quota. */
@@ -77,6 +101,14 @@ export interface IdbParseCacheOptions {
 
 export class IndexedDbParseCache implements ParseResultCache {
   private readonly map = new Map<string, CachedParseResult>();
+  /**
+   * In-memory warm tier for the Phase D identity index. Populated by
+   * lookup (on a record-with-knownAt read), lookupIdentity, and
+   * recordIdentity. Lives alongside `map` rather than baked into it
+   * because the two indexes have different lifetimes — identity hits are
+   * cheap and useful even when full parse data is unavailable.
+   */
+  private readonly identityMap = new Map<string, string[]>();
   private hits = 0;
   private misses = 0;
   private readonly maxEntries: number;
@@ -147,7 +179,19 @@ export class IndexedDbParseCache implements ParseResultCache {
       this.misses++;
       return undefined;
     }
-    const cached: CachedParseResult = { ...result, thumbnail };
+    // Side-effect: warm the identity index from any knownAt the record
+    // carries. Cheap and means a subsequent lookupIdentity() avoids IDB.
+    if (result.knownAt && result.knownAt.length > 0) {
+      this.identityMap.set(sha256, [...result.knownAt]);
+    }
+    // Identity-only records (no `flags`) are not full parse data — return
+    // undefined so the caller falls through to parsing. Count as a miss
+    // for parse-data stats, matching the no-record case.
+    if (!result.flags) {
+      this.misses++;
+      return undefined;
+    }
+    const cached: CachedParseResult = hydrateCached(result, thumbnail);
     // Warm the in-memory tier so subsequent same-session lookups skip IDB.
     lruPut(this.map, sha256, cached, this.maxEntries);
     this.hits++;
@@ -158,10 +202,16 @@ export class IndexedDbParseCache implements ParseResultCache {
     lruPut(this.map, sha256, value, this.maxEntries);
     const { thumbnail, ...rest } = value;
     try {
-      // Two writes; parallel is fine because they target different stores
-      // and the IDB adapter creates one transaction per call.
+      // Read-modify-write the parseResults record so we don't trample any
+      // identity-only knownAt left by an earlier destination walk. The
+      // thumbnail store is independent and writes in parallel.
+      const existingKnownAt = await this.readKnownAt(sha256);
+      const merged: ParseResultRecord = { ...rest };
+      if (existingKnownAt && existingKnownAt.length > 0) {
+        merged.knownAt = existingKnownAt;
+      }
       await Promise.all([
-        this.resultsStore.put(sha256, rest),
+        this.resultsStore.put(sha256, merged),
         thumbnail ? this.thumbnailsStore.put(sha256, thumbnail) : Promise.resolve(),
       ]);
     } catch {
@@ -172,6 +222,7 @@ export class IndexedDbParseCache implements ParseResultCache {
 
   async forget(sha256: string): Promise<void> {
     this.map.delete(sha256);
+    this.identityMap.delete(sha256);
     try {
       await Promise.all([
         this.resultsStore.delete(sha256),
@@ -179,6 +230,71 @@ export class IndexedDbParseCache implements ParseResultCache {
       ]);
     } catch {
       /* ignore */
+    }
+  }
+
+  /**
+   * Identity index lookup. Returns the list of rel-paths where these
+   * bytes have been observed, or undefined if none. Independent of the
+   * parse-data cache: an identity-only IDB record yields a hit here even
+   * though `lookup()` returns undefined for it.
+   *
+   * In-memory tier first; on a miss, probe IDB and warm the identity map.
+   */
+  async lookupIdentity(sha256: string): Promise<string[] | undefined> {
+    const memHit = this.identityMap.get(sha256);
+    if (memHit) return memHit.length > 0 ? [...memHit] : undefined;
+    let record: ParseResultRecord | undefined;
+    try {
+      record = await this.resultsStore.get(sha256);
+    } catch {
+      record = undefined;
+    }
+    const knownAt = record?.knownAt;
+    if (!knownAt || knownAt.length === 0) return undefined;
+    this.identityMap.set(sha256, [...knownAt]);
+    return [...knownAt];
+  }
+
+  /**
+   * Record that we observed `sha256` at `relPath`. Read-modify-write to
+   * preserve any existing parse data and to de-duplicate the rel-path. If
+   * `relPath` is already in the knownAt list, this is a no-op (we don't
+   * even issue the put, to avoid burning IDB write quota on redundant
+   * data). Tolerates IDB failures — in-memory identityMap still warms.
+   */
+  async recordIdentity(sha256: string, relPath: string): Promise<void> {
+    // In-memory first so a subsequent lookupIdentity in the same session
+    // sees the update even if the IDB put below fails.
+    const memCurrent = this.identityMap.get(sha256) ?? [];
+    if (!memCurrent.includes(relPath)) {
+      this.identityMap.set(sha256, [...memCurrent, relPath]);
+    }
+    try {
+      const existing = await this.resultsStore.get(sha256);
+      const existingKnownAt = existing?.knownAt ?? [];
+      if (existingKnownAt.includes(relPath)) {
+        // Already recorded at this path in IDB — nothing to do.
+        return;
+      }
+      const merged: ParseResultRecord = {
+        ...(existing ?? {}),
+        knownAt: [...existingKnownAt, relPath],
+      };
+      await this.resultsStore.put(sha256, merged);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private async readKnownAt(sha256: string): Promise<string[] | undefined> {
+    const mem = this.identityMap.get(sha256);
+    if (mem) return mem;
+    try {
+      const record = await this.resultsStore.get(sha256);
+      return record?.knownAt;
+    } catch {
+      return undefined;
     }
   }
 
@@ -199,6 +315,28 @@ export class IndexedDbParseCache implements ParseResultCache {
       return 0;
     }
   }
+}
+
+/**
+ * Reassemble a CachedParseResult from a `flags`-bearing record. Only valid
+ * when `record.flags` is present — callers must check before calling. The
+ * `knownAt` identity field is dropped here; it lives on the in-memory
+ * identityMap, not on CachedParseResult.
+ */
+function hydrateCached(record: ParseResultRecord, thumbnail: Thumbnail | undefined): CachedParseResult {
+  // `flags` presence is the "fully parsed" discriminator. We assert at the
+  // call site so the cast below is safe.
+  return {
+    sha256: record.sha256!,
+    slideCount: record.slideCount!,
+    hiddenSlideCount: record.hiddenSlideCount!,
+    author: record.author!,
+    lastModifiedBy: record.lastModifiedBy!,
+    embeddedMedia: record.embeddedMedia!,
+    thumbnail,
+    flags: record.flags!,
+    parseError: record.parseError,
+  };
 }
 
 /**
