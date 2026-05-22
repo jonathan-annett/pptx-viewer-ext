@@ -606,14 +606,19 @@ async function handleIngest(
       // import landed before the in-file thumbnail change (or any other
       // content-determined behaviour we've since added to the parser), its
       // cached entry would shadow the freshly-written file's parse and the
-      // panel would render against the stale shape. Forget the sha before
-      // writing so the post-write re-parse inside writeAndRender repopulates
-      // the cache from scratch. Import is already the slow path — paying for
-      // one extra parse is well below the user-noticeable threshold.
+      // panel would render against the stale shape.
+      //
+      // Evict the entry for *this one sha* (scoped, not a full cache flush)
+      // so the post-write re-parse inside writeAndRender misses and then
+      // records the fresh result via parsePptxCached → cache.record. Net
+      // effect: the cache entry for the imported file is replaced with the
+      // up-to-date parse; every other file's entry stays intact. Import is
+      // already the slow path — paying for one extra parse is well below
+      // the user-noticeable threshold.
       const cache = getParseCacheSingleton();
       if (cache) {
         await cache.forget(candidate.sha256);
-        log(`ingest[picker]: forgot parse-cache entry for sha256=${candidate.sha256.slice(0, 12)}…`);
+        log(`ingest[picker]: evicted stale cache entry for sha256=${candidate.sha256.slice(0, 12)}… (will be repopulated by post-write re-parse)`);
       }
       await writeAndRender(document, webviewPanel, bytes, ingestFileName, renderWithSyncTarget);
       webviewPanel.webview.postMessage({ type: 'picker-result', outcome: 'updated' });
