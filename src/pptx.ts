@@ -40,6 +40,36 @@ export interface MediaFileEntry {
 export interface Thumbnail {
   mime: string;   // image/jpeg | image/png | image/gif | image/webp
   dataUrl: string;
+  /**
+   * True when this thumbnail was synthesised by the M-VE-3 fallback path
+   * (coloured box + title text) rather than extracted from
+   * `docProps/thumbnail.*` in the zip. Diagnostic only — the viewer treats
+   * both kinds identically. Absent on real thumbnails extracted from the
+   * file; absent on records written before M-VE-3 landed (interpreted as
+   * "real" by the renderer).
+   */
+  synthesised?: boolean;
+}
+
+/**
+ * Hint emitted by parsePptx when a file has no embeddable thumbnail in the
+ * zip (no `docProps/thumbnail.{jpg,jpeg,png,gif,webp}`, or only an .emf the
+ * viewer can't render). The webview consumes the hint, renders a fallback
+ * thumbnail on canvas, and posts the result back; the extension caches the
+ * synthesised data URL into the parse cache keyed by sha256 so subsequent
+ * opens of the same content don't re-render.
+ *
+ * Set ONLY when `thumbnail` is undefined AND `parseError` is undefined —
+ * a file the parser couldn't unzip at all has nothing meaningful to title.
+ */
+export interface SynthesisHint {
+  /**
+   * Slide-1 title text if `extractFirstSlideTitle` found one; absent
+   * otherwise. The webview falls back to the filename (minus extension)
+   * then "Untitled" — those display-side decisions don't belong in the
+   * cached content-determined shape.
+   */
+  title?: string;
 }
 
 export interface Flag {
@@ -104,6 +134,13 @@ export interface ParseResult {
    */
   mediaFiles: MediaFileEntry[];
   thumbnail?: Thumbnail;
+  /**
+   * M-VE-3 fallback hint. Emitted when the zip has no usable thumbnail and
+   * the parser otherwise succeeded — the webview uses it to render a
+   * coloured box + title on canvas. Content-determined, so it rides
+   * through the parse cache via parseCache.project/hydrate.
+   */
+  synthesisHint?: SynthesisHint;
   flags: {
     linkedMedia: Flag;
     showType: Flag;
@@ -178,6 +215,18 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
   const mediaFiles = buildMediaFileEntries(contentTypes, entries);
   const thumbnail = extractThumbnail(entries);
   const linkedMediaFound = anyLinkedMedia(entries);
+  // M-VE-3: when there's no in-file thumbnail and parsing otherwise worked,
+  // emit a hint so the webview can synthesise a fallback. Extraction is
+  // best-effort — extractFirstSlideTitle returns undefined for missing /
+  // malformed slide XML and we just drop the title from the hint, leaving
+  // the webview to fall back to the filename.
+  const synthesisHint: SynthesisHint | undefined =
+    !thumbnail && !parseError
+      ? (() => {
+          const title = extractFirstSlideTitle(entries);
+          return title ? { title } : {};
+        })()
+      : undefined;
   const mediaMs = performance.now() - tMediaStart;
 
   const tShowStart = performance.now();
@@ -204,6 +253,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
     embeddedMedia,
     mediaFiles,
     thumbnail,
+    synthesisHint,
     flags: {
       linkedMedia: linkedMediaFound
         ? { ok: false, label: 'Linked media', detail: 'External video/audio/media relationship present on at least one slide' }
@@ -618,6 +668,67 @@ function extractThumbnail(entries: Record<string, Uint8Array>): Thumbnail | unde
     const bytes = entries[name];
     if (!bytes || bytes.length === 0) continue;
     return { mime, dataUrl: `data:${mime};base64,${bytesToBase64(bytes)}` };
+  }
+  return undefined;
+}
+
+/**
+ * Pull the slide-1 title text from `ppt/slides/slide1.xml`, if it has one.
+ *
+ * Used by the M-VE-3 synthesised-thumbnail path: when the zip lacks a usable
+ * thumbnail, the webview renders a coloured box with the title text on it,
+ * falling back to the filename (caller's responsibility) when this returns
+ * undefined.
+ *
+ * Heuristic, not a full slide-XML parser:
+ *   - Walk every <p:sp> element on slide 1.
+ *   - Pick the first one whose nvSpPr block contains
+ *     `<p:ph type="title"/>` or `<p:ph type="ctrTitle"/>`. PowerPoint uses
+ *     these placeholder types for the slide title; layout-defined titles
+ *     without an explicit type are deliberately skipped (we can't tell
+ *     them apart from arbitrary text shapes without a deeper parse).
+ *   - Concatenate the text content of every `<a:t>` run inside that shape,
+ *     separated by spaces so paragraph breaks don't glue runs together.
+ *   - Decode XML entities, collapse whitespace, cap at 120 chars to dodge
+ *     pathological inputs that would dominate the canvas.
+ *
+ * Tolerant of:
+ *   - Missing slide1.xml → undefined.
+ *   - Slides without a title placeholder → undefined.
+ *   - Malformed XML — regex over the bytes; broken tags just fail to match.
+ *   - Empty title text → undefined (treat as "no title").
+ */
+export function extractFirstSlideTitle(entries: Record<string, Uint8Array>): string | undefined {
+  const slideXml = readText(entries['ppt/slides/slide1.xml']);
+  if (!slideXml) return undefined;
+  // Iterate every <p:sp>...</p:sp> shape on the slide. The shape's full
+  // content (including nested nvSpPr + txBody) lives between the tags;
+  // self-closing <p:sp/> is not a valid shape so we skip it.
+  const shapeRe = /<p:sp\b[^>]*>([\s\S]*?)<\/p:sp>/g;
+  let shapeMatch: RegExpExecArray | null;
+  while ((shapeMatch = shapeRe.exec(slideXml))) {
+    const shape = shapeMatch[1];
+    // Title or centred-title placeholder. Match both self-closing and
+    // open-form ph tags — both exist in the wild. Anchor on the type
+    // attribute so we don't pick up body placeholders.
+    if (!/<p:ph\b[^>]*\btype="(?:title|ctrTitle)"/.test(shape)) continue;
+    // Collect every text run. <a:t>…</a:t> wraps the human-readable text;
+    // <a:p> wraps paragraphs. Joining runs with a space is a deliberate
+    // compromise — "Hello" + "world" → "Hello world", which reads correctly
+    // even when the original was a single run that got split for styling.
+    const runRe = /<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g;
+    const parts: string[] = [];
+    let runMatch: RegExpExecArray | null;
+    while ((runMatch = runRe.exec(shape))) {
+      const text = decodeXmlEntities(runMatch[1]);
+      if (text.length > 0) parts.push(text);
+    }
+    if (parts.length === 0) return undefined;
+    // Join with a single space, collapse internal whitespace runs, trim.
+    let joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+    if (joined.length === 0) return undefined;
+    if (joined.length > 120) joined = joined.slice(0, 120);
+    return joined;
   }
   return undefined;
 }

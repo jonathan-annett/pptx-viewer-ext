@@ -17,7 +17,7 @@
 import * as vscode from 'vscode';
 import { unzipSync } from 'fflate';
 import { type ParseResult, type ParseTimings } from './pptx';
-import { getParseCacheSingleton, parsePptxCached } from './sync/parseCache';
+import { getParseCacheSingleton, parsePptxCached, project } from './sync/parseCache';
 import { renderHtml, renderError, type RenderOptions } from './webview';
 import { log } from './log';
 import type { SyncManager } from './sync/manager';
@@ -160,6 +160,53 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
       if (m.type === 'save-as') {
         await handleSaveAs(document, webviewPanel, fileName);
+        return;
+      }
+
+      if (m.type === 'thumbnail-synthesised') {
+        // M-VE-3: the webview rendered a fallback thumbnail on canvas. We
+        // update the in-memory currentResult so any subsequent render this
+        // session reflects the new thumbnail, and write through the parse
+        // cache so future opens of the same content (sha256) skip the
+        // synthesis pass entirely. The webview has already swapped its
+        // placeholder eagerly — the thumbnail-set ACK we post back is a
+        // belt-and-braces refresh, not the primary display path.
+        const tm = msg as {
+          sha256?: unknown;
+          dataUrl?: unknown;
+          mime?: unknown;
+        };
+        const sha = typeof tm.sha256 === 'string' ? tm.sha256 : '';
+        const dataUrl = typeof tm.dataUrl === 'string' ? tm.dataUrl : '';
+        const mime = typeof tm.mime === 'string' ? tm.mime : 'image/jpeg';
+        if (!sha || !dataUrl) {
+          log(`viewer[${fileName}]: thumbnail-synthesised — missing sha/dataUrl`);
+          return;
+        }
+        if (!currentResult || currentResult.sha256 !== sha) {
+          // The user may have updated the file between render and synthesis
+          // (sha changes → cached entry no longer matches). Skip silently;
+          // the new render will trigger its own synthesis if needed.
+          log(`viewer[${fileName}]: thumbnail-synthesised — sha mismatch (cur=${currentResult?.sha256?.slice(0, 12) ?? 'none'} got=${sha.slice(0, 12)}), discarding`);
+          return;
+        }
+        currentResult.thumbnail = { mime, dataUrl, synthesised: true };
+        // Clear the hint — the next hydrate of this sha should yield a
+        // result that already has a thumbnail, so no re-synthesis fires.
+        currentResult.synthesisHint = undefined;
+        const cache = getParseCacheSingleton();
+        if (cache) {
+          try {
+            await cache.record(sha, project(currentResult));
+            log(`thumbnail: synthesised sha=${sha.slice(0, 12)}… (${dataUrl.length} chars, cached)`);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            log(`viewer[${fileName}]: thumbnail-synthesised cache write failed — ${message}`);
+          }
+        } else {
+          log(`thumbnail: synthesised sha=${sha.slice(0, 12)}… (${dataUrl.length} chars, no cache)`);
+        }
+        webviewPanel.webview.postMessage({ type: 'thumbnail-set', dataUrl });
         return;
       }
 

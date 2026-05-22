@@ -72,7 +72,20 @@ const THUMBNAILS_STORE = 'thumbnails';
 // touch); the version bump is the signal. Old v3 entries without
 // `mediaFiles` hydrate to `[]` so the Extract UI simply stays hidden for
 // content that was cached before the upgrade — a fresh parse repopulates.
-const DB_VERSION = 4;
+//
+// Bumped 4 → 5 for M-VE-3 (synthesised fallback thumbnails): two additive
+// record-shape changes — `synthesisHint?: SynthesisHint` on the
+// parseResults record (set when the file has no in-file thumbnail, so the
+// webview knows to render a fallback), and `synthesised?: boolean` on the
+// thumbnails store entry (diagnostic flag distinguishing a synthesised
+// fallback from a real extracted thumbnail). Both are optional. Old v4
+// entries without synthesisHint will render without a fallback thumbnail
+// until the LRU rotates them out and the next miss re-parses; the webview
+// uses synthesisHint's *presence* as the signal that fallback synthesis is
+// wanted, so absence is the safe default. Same for synthesised — old
+// records hydrate without the flag (treated as real, which is correct
+// since pre-M-VE-3 we never wrote synthesised entries).
+const DB_VERSION = 5;
 
 /**
  * IDB payload for the parseResults store. All parse fields are optional so
@@ -346,6 +359,9 @@ function hydrateCached(record: ParseResultRecord, thumbnail: Thumbnail | undefin
     // silently lacks the affordance until that bytes' next miss-and-reparse.
     mediaFiles: record.mediaFiles ?? [],
     thumbnail,
+    // v4 → v5 added synthesisHint. Optional — old records hydrate without
+    // it (no fallback thumbnail until they rotate out and re-parse).
+    synthesisHint: record.synthesisHint,
     flags: record.flags!,
     parseError: record.parseError,
   };

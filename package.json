@@ -127,6 +127,8 @@
     "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
     "test:pdf-import-layout": "node --import tsx test/pdf-import-layout.test.ts",
     "test:pdf-import-config-html": "node --import tsx test/pdf-import-config-html.test.ts",
+    "test:pptx-title-extract": "node --import tsx test/pptx-title-extract.test.ts",
+    "test:thumbnail-synth": "node --import tsx test/thumbnail-synth.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"

@@ -92,6 +92,9 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     : '';
 
   const initialStatus = opts.initialStatus ? escapeHtml(opts.initialStatus) : '';
+  // Compute the synth-hint payload once. Emitted as its own nonced <script>
+  // before viewerScript so the latter can read window.__pptxSynthHint on init.
+  const synthHint = synthHintScript(r);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -133,6 +136,7 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     </div>
   </div>
   <script nonce="${nonce}">${PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER}</script>
+  ${synthHint ? `<script nonce="${nonce}">${synthHint}</script>` : ''}
   <script nonce="${nonce}">${viewerScript()}</script>
   <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
@@ -206,10 +210,53 @@ function basename(path: string): string {
 }
 
 function thumbnailImg(r: ParseResult): string {
-  if (!r.thumbnail) return '';
-  // alt="" because the image is decorative — the filename above already labels
-  // the content. A non-empty alt would just be read twice by a screen reader.
-  return `<img class="thumbnail" src="${r.thumbnail.dataUrl}" alt="">`;
+  if (r.thumbnail) {
+    // alt="" because the image is decorative — the filename above already labels
+    // the content. A non-empty alt would just be read twice by a screen reader.
+    return `<img id="thumbnail-img" class="thumbnail" src="${r.thumbnail.dataUrl}" alt="">`;
+  }
+  // M-VE-3: no in-file thumbnail but parsePptx emitted a synthesisHint —
+  // emit a placeholder element the viewer script will fill with the
+  // canvas-rendered fallback once it's done. aspect-ratio: 16/9 reserves
+  // the same visual footprint a real thumbnail would occupy so the page
+  // layout doesn't jump when the image swaps in.
+  if (r.synthesisHint) {
+    return `<div id="thumbnail-host" class="thumbnail thumbnail-placeholder" aria-hidden="true"></div>`;
+  }
+  return '';
+}
+
+/**
+ * Inline <script> that publishes the synthesised-thumbnail hint payload to
+ * the page so the viewerScript can read it on load. Emitted only when the
+ * parse result actually wants a fallback (synthesisHint present, no real
+ * thumbnail), so the typical case adds zero bytes to the page.
+ *
+ * The fileName-without-extension is computed here at render time because
+ * it's a display-side decision; the cached synthesisHint only carries the
+ * content-determined slide title (when found). Order in the page:
+ *
+ *   <div id="thumbnail-host">            ← placeholder
+ *   <script>window.__pptxSynthHint=…<script>   ← THIS — must come BEFORE viewerScript
+ *   <script>${viewerScript()}<script>    ← reads window.__pptxSynthHint on init
+ */
+function synthHintScript(r: ParseResult): string {
+  if (r.thumbnail || !r.synthesisHint) return '';
+  const fileNameNoExt = r.fileName.replace(/\.[a-z0-9]+$/i, '');
+  const payload = {
+    sha256: r.sha256,
+    title: r.synthesisHint.title ?? null,
+    fileNameNoExt,
+  };
+  // JSON.stringify is safe to inline inside a <script> tag here because
+  // CSP forbids any cross-origin script execution and the values come
+  // from parsePptx output (already-decoded XML text) + the file path.
+  // None can contain a literal </script> sequence without first surviving
+  // the parser's XML-entity decode, which doesn't introduce raw '<'. To be
+  // belt-and-braces, escape `<` to `\u003c` so a pathological title can't
+  // close the <script> tag.
+  const safe = JSON.stringify(payload).replace(/</g, '\\u003c');
+  return `window.__pptxSynthHint = ${safe};`;
 }
 
 function row(key: string, value: string): string {
@@ -290,6 +337,158 @@ function viewerScript(): string {
 
   function vlog(msg){
     try { vscode.postMessage({type:'viewer-log', message: msg}); } catch (_) {}
+  }
+
+  // ----- M-VE-3 synthesised-thumbnail render -----
+  // Runs once on script load when window.__pptxSynthHint is set (which the
+  // extension does only when the file lacks an in-file thumbnail and parsing
+  // otherwise succeeded). The render is purely canvas-based — no network,
+  // no DOM beyond the placeholder div — so it's safe to run synchronously
+  // before any other init. We post the resulting data URL back to the
+  // extension; it caches the bytes keyed by sha256, then pings back with
+  // {type:'thumbnail-set'} to swap the placeholder for an <img>.
+  function synthesiseThumbnailFromHint() {
+    var hint = window.__pptxSynthHint;
+    if (!hint || typeof hint !== 'object') return;
+    var host = document.getElementById('thumbnail-host');
+    if (!host) return; // placeholder absent — extension's render didn't ask for synthesis
+    var canvas = document.createElement('canvas');
+    canvas.width = 1920;
+    canvas.height = 1080;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) {
+      vlog('synth: 2d context unavailable; skipping fallback render');
+      return;
+    }
+
+    // Background colour deterministic from sha — first 6 hex chars as hue.
+    // Saturation/lightness fixed at mid-tones so the result reads against
+    // both light and dark themes (the thumbnail can't follow theme — it's
+    // baked into the JPEG once).
+    var sha = String(hint.sha256 || '');
+    var hue = /^[0-9a-fA-F]{6}/.test(sha) ? parseInt(sha.slice(0, 6), 16) % 360 : 200;
+    ctx.fillStyle = 'hsl(' + hue + ', 60%, 45%)';
+    ctx.fillRect(0, 0, 1920, 1080);
+
+    // Title text — fallback chain: parsed title → filename without ext → "Untitled".
+    var title = (typeof hint.title === 'string' && hint.title.trim().length > 0)
+      ? hint.title.trim()
+      : (typeof hint.fileNameNoExt === 'string' && hint.fileNameNoExt.length > 0)
+        ? hint.fileNameNoExt
+        : 'Untitled';
+
+    // Word-wrap inside 90% canvas width; shrink font in 4px steps from
+    // 128 → 32 until lines fit AND lineCount ≤ 4. measureText is the
+    // canvas API — same algorithm as src/thumbnailSynth.ts computeTitleLayout,
+    // inlined here because the webview can't import TS modules at runtime.
+    var maxWidth = 1920 * 0.9;
+    var maxLines = 4;
+    var startFontPx = 128;
+    var minFontPx = 32;
+    function fontSpec(px) {
+      return '600 ' + px + 'px system-ui, -apple-system, "Segoe UI", sans-serif';
+    }
+    function measureAt(text, px) {
+      ctx.font = fontSpec(px);
+      return ctx.measureText(text).width;
+    }
+    function wrapAt(words, px) {
+      var lines = [];
+      var current = '';
+      for (var i = 0; i < words.length; i++) {
+        var candidate = current ? current + ' ' + words[i] : words[i];
+        if (measureAt(candidate, px) <= maxWidth) {
+          current = candidate;
+        } else {
+          if (current) lines.push(current);
+          current = words[i];
+        }
+      }
+      if (current) lines.push(current);
+      return lines;
+    }
+    var words = title.split(/\\s+/).filter(function(w){ return w.length > 0; });
+    if (words.length === 0) words = ['Untitled'];
+    var lines = [title];
+    var fontPx = minFontPx;
+    for (var px = startFontPx; px >= minFontPx; px -= 4) {
+      var attempt = wrapAt(words, px);
+      var fits = attempt.length <= maxLines;
+      if (fits) {
+        for (var l = 0; l < attempt.length; l++) {
+          if (measureAt(attempt[l], px) > maxWidth) { fits = false; break; }
+        }
+      }
+      if (fits) { lines = attempt; fontPx = px; break; }
+      // Floor: even if it doesn't fit, retain the minFontPx attempt clipped
+      // to maxLines — better to show something than nothing.
+      if (px === minFontPx) { lines = attempt.slice(0, maxLines); fontPx = minFontPx; }
+    }
+
+    // Draw text — white with a 1px dark drop shadow so anti-aliased edges
+    // stay legible against any background hue we picked.
+    ctx.font = fontSpec(fontPx);
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 2;
+    ctx.shadowOffsetY = 2;
+    var lineHeight = Math.round(fontPx * 1.25);
+    var totalH = lineHeight * lines.length;
+    var startY = 540 - totalH / 2 + lineHeight / 2;
+    for (var li = 0; li < lines.length; li++) {
+      ctx.fillText(lines[li], 960, startY + li * lineHeight);
+    }
+
+    var dataUrl;
+    try {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    } catch (err) {
+      vlog('synth: toDataURL failed: ' + (err && err.message || err));
+      return;
+    }
+    vlog('synth: rendered ' + lines.length + ' line(s) at ' + fontPx + 'px, ' + dataUrl.length + ' chars');
+    // Swap the placeholder immediately so the user sees the result without
+    // waiting for the extension round-trip. The extension's reply
+    // (thumbnail-set) is redundant for this render but still useful because
+    // the extension caches the bytes keyed by sha256 for next time.
+    setHostToImage(host, dataUrl);
+    try {
+      vscode.postMessage({
+        type: 'thumbnail-synthesised',
+        sha256: sha,
+        dataUrl: dataUrl,
+        mime: 'image/jpeg',
+      });
+    } catch (err) {
+      vlog('synth: postMessage failed: ' + (err && err.message || err));
+    }
+  }
+
+  function setHostToImage(host, dataUrl) {
+    // Replace the placeholder div with an <img>. Re-use the .thumbnail
+    // class so the post-swap render matches a real in-file thumbnail
+    // visually — same height/border/radius treatment. Give the img the
+    // 'thumbnail-img' id so subsequent thumbnail-set messages can find
+    // and update it (the host element is gone after replaceWith).
+    var img = document.createElement('img');
+    img.id = 'thumbnail-img';
+    img.className = 'thumbnail';
+    img.alt = '';
+    img.src = dataUrl;
+    host.replaceWith(img);
+  }
+
+  // Kick off synthesis on next tick so the rest of the page wiring (modal,
+  // buttons, drag/drop) finishes first. Canvas + measureText on a 1920×1080
+  // box is fast (≪50ms in practice) but defer anyway — the placeholder
+  // background tint covers the gap.
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(synthesiseThumbnailFromHint);
+  } else {
+    setTimeout(synthesiseThumbnailFromHint, 0);
   }
   window.addEventListener('error', function(ev){
     vlog('window error: ' + (ev.message || ev.error || 'unknown'));
@@ -933,6 +1132,21 @@ function viewerScript(): string {
       return;
     }
 
+    if (m.type === 'thumbnail-set' && typeof m.dataUrl === 'string') {
+      // Extension ACK / cache-hit push. The webview may have already
+      // swapped the placeholder (setHostToImage runs eagerly after synth),
+      // so we re-resolve the host element each time: if the placeholder
+      // is still around, swap; otherwise update the existing <img>.
+      var host = document.getElementById('thumbnail-host');
+      if (host) {
+        setHostToImage(host, m.dataUrl);
+      } else {
+        var img = document.getElementById('thumbnail-img');
+        if (img) img.src = m.dataUrl;
+      }
+      return;
+    }
+
     if (m.type === 'drop-result') {
       setBusy(false);
       if (m.outcome === 'invalid') {
@@ -1012,6 +1226,17 @@ function css(): string {
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
       border-radius: 4px;
       background: var(--vscode-editor-background);
+    }
+    /* Synthesised-thumbnail placeholder (M-VE-3):
+       The viewer reserves a 16:9 box at the thumbnail's natural height so
+       the page layout doesn't reflow when the canvas-rendered fallback
+       lands. aspect-ratio + height work together — width auto-computes to
+       240 * 16/9 ≈ 427px, matching what the eventual <img> will occupy.
+       Background is a subtle theme-tinted shade until the image swaps in
+       (not a flash of bright white in light themes). */
+    .thumbnail-placeholder {
+      aspect-ratio: 16 / 9;
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
     }
     h2 {
       font-size: 1.05em;

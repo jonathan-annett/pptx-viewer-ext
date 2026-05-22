@@ -247,6 +247,10 @@ export function project(r: ParseResult): CachedParseResult {
     embeddedMedia: r.embeddedMedia,
     mediaFiles: r.mediaFiles,
     thumbnail: r.thumbnail,
+    // synthesisHint is content-determined (same bytes → same hint) so it
+    // belongs in the cache alongside the rest of the parsed fields. The
+    // webview reads it to decide whether to render a fallback thumbnail.
+    synthesisHint: r.synthesisHint,
     flags: r.flags,
     parseError: r.parseError,
   };
@@ -272,6 +276,7 @@ export function hydrate(c: CachedParseResult, info: FileInfo): ParseResult {
     embeddedMedia: c.embeddedMedia,
     mediaFiles: c.mediaFiles,
     thumbnail: c.thumbnail,
+    synthesisHint: c.synthesisHint,
     flags: c.flags,
     parseError: c.parseError,
     // timings deliberately omitted on a cache hit — see CachedParseResult.
