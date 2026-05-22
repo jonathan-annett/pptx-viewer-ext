@@ -31,6 +31,16 @@
 import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
 import { compareModalCss } from './sync/compareModalHtml';
 import { decisionWiringScript } from './sync/planHtml';
+import { pdfImportConfigCss } from './pdfImportConfigHtml';
+
+// Placeholder string. esbuild's pdfimport-webview-bundle plugin substitutes
+// the entire quoted literal (quotes included) with a JSON.stringify of the
+// dist/pdfImport.webview.js source after every build, so the viewer can serve
+// pdfjs-dist + the import pipeline inline inside a nonced <script> tag. Keep
+// this constant's literal value in sync with esbuild.config.js's
+// PDF_IMPORT_BUNDLE_PLACEHOLDER.
+const PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER =
+  '__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__';
 
 export interface RenderOptions {
   /** Pre-rendered HTML for the "Sync target" section, or null/undefined for
@@ -99,7 +109,7 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
       <button id="update-btn" class="action-btn action-btn-secondary" type="button">Update\u2026</button>
       <span id="action-status" class="action-status" aria-live="polite">${initialStatus}</span>
     </div>
-    <input id="update-input" type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" style="display:none">
+    <input id="update-input" type="file" accept=".pptx,.pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/pdf" style="display:none">
     ${extractMediaRow(r)}
     ${thumbnailImg(r)}
     ${errorBanner}
@@ -118,10 +128,11 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
   <div id="modal-host" class="modal-host" aria-hidden="true"></div>
   <div id="drop-overlay" class="drop-overlay" aria-hidden="true">
     <div class="drop-overlay-inner">
-      <div class="drop-overlay-title">Drop a .pptx to compare or update</div>
+      <div class="drop-overlay-title">Drop a .pptx or .pdf to compare or update</div>
       <div class="drop-overlay-sub">Hold <kbd>Shift</kbd> while dropping &mdash; otherwise VS Code opens it as a new tab</div>
     </div>
   </div>
+  <script nonce="${nonce}">${PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER}</script>
   <script nonce="${nonce}">${viewerScript()}</script>
   <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
@@ -348,6 +359,13 @@ function viewerScript(): string {
       const file = updateInput.files && updateInput.files[0];
       if (!file) return;
       vlog('picker → ' + file.name + ' (' + file.size + ' bytes)');
+      // PDF branch: open the import config modal instead of round-tripping
+      // the bytes to the extension. The pdfjs+pipeline bundle lives in
+      // window.__pptxPdfImport (inlined by esbuild — see esbuild.config.js).
+      if (/\\.pdf$/i.test(file.name)) {
+        await handlePdfFile(file, 'picker');
+        return;
+      }
       setBusy(true);
       setStatus('Checking\u2026');
       try {
@@ -382,6 +400,350 @@ function viewerScript(): string {
     });
   }
 
+  // ----- PDF import (drop or picker) -----
+  // The PDF→PPTX pipeline lives in window.__pptxPdfImport — bundled by
+  // esbuild as a separate IIFE and inlined into the viewer HTML by the
+  // pdfimport-webview-bundle plugin (see esbuild.config.js).
+  //
+  // Flow:
+  //   1. Snapshot PDF bytes.
+  //   2. Open the config modal with default settings (16:9, 1920, letterbox,
+  //      JPEG q=0.85). The modal renderer also lives on the api global.
+  //   3. First render: PDF.js → canvases → encode → PPTX bytes. Status row
+  //      reports progress at each phase.
+  //   4. User tweaks knobs:
+  //        - format/quality change → re-encode only (cheap; canvases cached)
+  //        - aspect/resolution/letterbox change → enable Re-render button
+  //   5. Import → post bytes through the existing 'ingest' channel as if a
+  //      .pptx had been picked. The extension's ingest handler does its
+  //      usual sha256/identical/different check and routes from there.
+  async function handlePdfFile(file, source){
+    const api = window.__pptxPdfImport;
+    if (!api) {
+      setStatus('PDF import not available (bundle missing)');
+      vlog('pdfimport: window.__pptxPdfImport is undefined');
+      return;
+    }
+
+    var pdfBytes;
+    try {
+      pdfBytes = new Uint8Array(await file.arrayBuffer());
+    } catch (err) {
+      setStatus('Could not read PDF');
+      vlog('pdfimport: read error: ' + (err && err.message || err));
+      return;
+    }
+
+    // Derived pptx filename — sample.pdf → sample.pptx. Used both for the
+    // ingest message and for the eventual Save As suggestion downstream.
+    var pptxFileName = file.name.replace(/\\.pdf$/i, '') + '.pptx';
+
+    // The mutable state for this import session. Re-rendered on every UI
+    // event; never crosses async boundaries with unchecked staleness because
+    // we serialise async operations via state.* "in progress" flags.
+    var state = {
+      config: Object.assign({}, api.DEFAULT_PDF_IMPORT_CONFIG),
+      pageCount: undefined,         // undefined until first render
+      rendered: null,               // RenderedPage[] from phase 1
+      encoded: null,                // EncodedImage[] from phase 2
+      pptxBytes: null,              // Uint8Array from phase 3
+      rendering: false,
+      encoding: false,
+      building: false,
+      // Key identifying the last (aspect|resolution|letterbox) combination
+      // that has been rendered. When the current config's key differs, the
+      // Re-render button is enabled.
+      lastRenderKey: null,
+    };
+
+    // Effective long-edge pixel width of the device's screen, factoring in
+    // devicePixelRatio. Surfaces a "Device (NNNN)" radio if it's not already
+    // one of the fixed presets — useful for matching a HiDPI projector.
+    var devicePxW = window.screen && window.screen.width
+      ? Math.round(window.screen.width * (window.devicePixelRatio || 1))
+      : undefined;
+
+    function renderKeyOf(cfg){
+      return cfg.aspect + '|' + cfg.resolution + '|' + (cfg.letterbox ? 'L' : 'S');
+    }
+
+    function formatBytes(n){
+      if (n < 1024) return n + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+      return (n / 1024 / 1024).toFixed(1) + ' MB';
+    }
+
+    function totalSize(arr){
+      var t = 0;
+      for (var i = 0; i < arr.length; i++) t += arr[i].sizeBytes;
+      return t;
+    }
+
+    function buildStatusLine(progress){
+      if (progress) return progress;
+      if (state.rendering) return 'Rendering PDF\u2026';
+      if (state.encoding) return 'Encoding\u2026';
+      if (state.building) return 'Packaging .pptx\u2026';
+      var cfg = state.config;
+      var pages = state.rendered ? state.rendered.length : 0;
+      if (state.encoded && state.encoded.length === pages && pages > 0) {
+        var size = formatBytes(totalSize(state.encoded));
+        var label = cfg.format.toUpperCase() +
+          (cfg.format === 'jpeg' ? ' q=' + Math.round(cfg.quality * 100) : '');
+        return pages + ' pages \u00B7 ' + cfg.aspect + ' \u00B7 ' +
+          cfg.resolution + 'px \u00B7 ' + label + ' \u2014 ' + size;
+      }
+      if (pages > 0) return pages + ' pages rendered.';
+      return '';
+    }
+
+    // Selector helpers ------------------------------------------------------
+    // Calls into modalHost rather than document so the lookups are scoped to
+    // our modal even if other parts of the viewer reuse similar ids later.
+    function $(id){ return modalHost ? modalHost.querySelector('#' + id) : null; }
+    function $$(name){ return modalHost ? modalHost.querySelectorAll('input[name="' + name + '"]') : []; }
+
+    // Re-renders the modal HTML from current state. Called after every event
+    // that changes the visible config or the pipeline phase. Re-building the
+    // HTML is cheaper than fine-grained DOM patching at this scale (~50 nodes)
+    // and keeps the renderer pure for testing.
+    var rerenderingDom = false;
+    function rerenderModal(progress){
+      if (!modalHost) return;
+      rerenderingDom = true;
+      var html = api.renderPdfImportConfigHtml({
+        fileName: file.name,
+        pageCount: state.pageCount,
+        config: state.config,
+        status: buildStatusLine(progress),
+        rerenderDisabled: state.rendering || state.encoding || state.building ||
+          state.lastRenderKey === renderKeyOf(state.config),
+        importDisabled: state.rendering || state.encoding || state.building ||
+          !state.pptxBytes,
+        devicePxW: devicePxW,
+      });
+      modalHost.innerHTML = html;
+      modalHost.classList.add('open');
+      modalHost.setAttribute('aria-hidden', 'false');
+      bindEvents();
+      rerenderingDom = false;
+    }
+
+    function readConfigFromDom(){
+      var cfg = Object.assign({}, state.config);
+      var aspectRadios = $$('pdfimport-aspect');
+      for (var i = 0; i < aspectRadios.length; i++) {
+        if (aspectRadios[i].checked) { cfg.aspect = aspectRadios[i].value; break; }
+      }
+      var resRadios = $$('pdfimport-resolution');
+      for (var j = 0; j < resRadios.length; j++) {
+        if (resRadios[j].checked) { cfg.resolution = parseInt(resRadios[j].value, 10); break; }
+      }
+      var fitRadios = $$('pdfimport-fit');
+      for (var k = 0; k < fitRadios.length; k++) {
+        if (fitRadios[k].checked) { cfg.letterbox = fitRadios[k].value === 'letterbox'; break; }
+      }
+      var fmtRadios = $$('pdfimport-format');
+      for (var l = 0; l < fmtRadios.length; l++) {
+        if (fmtRadios[l].checked) { cfg.format = fmtRadios[l].value; break; }
+      }
+      var qSlider = $('pdfimport-quality');
+      if (qSlider) cfg.quality = parseFloat(qSlider.value);
+      return cfg;
+    }
+
+    function bindEvents(){
+      var cancelBtn = $('pdfimport-cancel-btn');
+      if (cancelBtn) cancelBtn.addEventListener('click', function(){
+        vlog('pdfimport: cancel');
+        closeModal();
+      });
+
+      var rerenderBtn = $('pdfimport-rerender-btn');
+      if (rerenderBtn) rerenderBtn.addEventListener('click', function(){
+        if (rerenderBtn.disabled) return;
+        runRenderEncodeBuild();
+      });
+
+      var importBtn = $('pdfimport-import-btn');
+      if (importBtn) importBtn.addEventListener('click', function(){
+        if (importBtn.disabled || !state.pptxBytes) return;
+        vlog('pdfimport: import → ' + pptxFileName + ' (' + state.pptxBytes.byteLength + ' bytes)');
+        closeModal();
+        // Always go through the 'picker' source: the modal was the user's
+        // explicit confirmation; we skip the compare-modal step the 'drop'
+        // source would trigger.
+        try {
+          vscode.postMessage({
+            type: 'ingest',
+            source: 'picker',
+            fileName: pptxFileName,
+            bytes: state.pptxBytes
+          });
+        } catch (err) {
+          vlog('pdfimport: postMessage failed: ' + (err && err.message || err));
+        }
+      });
+
+      // Form change → cascade. Format/quality affect only the encode+build
+      // phases; aspect/resolution/letterbox affect render too (gated behind
+      // Re-render button).
+      var quality = $('pdfimport-quality');
+      var qualityValueEl = $('pdfimport-quality-value');
+      if (quality && qualityValueEl) {
+        quality.addEventListener('input', function(){
+          if (rerenderingDom) return;
+          var q = parseFloat(quality.value);
+          qualityValueEl.textContent = Math.round(q * 100) + '%';
+        });
+        quality.addEventListener('change', function(){
+          if (rerenderingDom) return;
+          onConfigChanged();
+        });
+      }
+
+      // All radios → onConfigChanged on change. The radio set is small so a
+      // single delegated listener on the form would be cleaner, but per-input
+      // wiring keeps this loop a flat tree we can grep for.
+      var radios = modalHost ? modalHost.querySelectorAll('input[type="radio"]') : [];
+      for (var i = 0; i < radios.length; i++) {
+        radios[i].addEventListener('change', function(){
+          if (rerenderingDom) return;
+          onConfigChanged();
+        });
+      }
+    }
+
+    function onConfigChanged(){
+      var prev = state.config;
+      state.config = readConfigFromDom();
+      // Render-key change → just enable Re-render. Don't auto-rerender —
+      // PDF render is the slow phase, user clicks the button explicitly.
+      var rkOld = renderKeyOf(prev);
+      var rkNew = renderKeyOf(state.config);
+      if (rkOld !== rkNew) {
+        // Render-affecting knob changed. Rerender the modal so the button
+        // gets enabled and the placement preview (status line) updates.
+        rerenderModal();
+        return;
+      }
+      // Format/quality change → re-encode only when we have cached canvases.
+      if (state.rendered && !state.rendering && !state.encoding && !state.building) {
+        runEncodeAndBuild();
+      } else {
+        rerenderModal();
+      }
+    }
+
+    async function runRenderEncodeBuild(){
+      if (state.rendering || state.encoding || state.building) return;
+      state.rendering = true;
+      state.encoded = null;
+      state.pptxBytes = null;
+      rerenderModal('Rendering page 1\u2026');
+
+      // Per-page layout — fixes slide size, derives renderScale + EMU offsets.
+      var slideSizeEmu = state.config.aspect === '4:3'
+        ? api.SLIDE_SIZE_4x3_EMU
+        : api.SLIDE_SIZE_16x9_EMU;
+      var targetPxW = api.targetPxWFor(slideSizeEmu, state.config.resolution);
+
+      try {
+        // Read page sizes first via a temporary getDocument call. PDF.js
+        // doesn't expose page sizes without instantiating a doc, so we open
+        // it once for the layout pass and discard. The render pass below
+        // does its own getDocument call (pdfImport.ts encapsulates that).
+        var doc = await api.pdfjsLib.getDocument({ data: pdfBytes.slice(), disableWorker: true }).promise;
+        state.pageCount = doc.numPages;
+        var perPageLayouts = [];
+        var perPageScales = [];
+        for (var i = 1; i <= doc.numPages; i++) {
+          var p = await doc.getPage(i);
+          var vp = p.getViewport({ scale: 1 });
+          var layout = api.computePageLayout(
+            { widthPt: vp.width, heightPt: vp.height },
+            slideSizeEmu,
+            { targetPxW: targetPxW, letterbox: state.config.letterbox }
+          );
+          perPageLayouts.push(layout);
+          perPageScales.push(layout.renderScale);
+        }
+        try { doc.destroy(); } catch (_) {}
+
+        // Phase 1: render each page to a canvas.
+        var rendered = await api.renderPdfPages(pdfBytes.slice(), {
+          pdfjsLib: api.pdfjsLib,
+          renderScale: perPageScales,
+          onProgress: function(p){
+            rerenderModal('Rendering page ' + p.current + ' of ' + p.total + '\u2026');
+          }
+        });
+        state.rendered = rendered;
+        state.rendering = false;
+        state.lastRenderKey = renderKeyOf(state.config);
+        // Stash the layouts alongside each rendered page so the build phase
+        // can read them back without re-deriving.
+        for (var k = 0; k < rendered.length; k++) {
+          rendered[k]._placement = perPageLayouts[k].placement;
+          rendered[k]._slideSizeEmu = slideSizeEmu;
+        }
+        await runEncodeAndBuild();
+      } catch (err) {
+        state.rendering = false;
+        vlog('pdfimport: render error: ' + (err && err.message || err));
+        rerenderModal('Render failed: ' + (err && err.message || 'unknown'));
+      }
+    }
+
+    async function runEncodeAndBuild(){
+      if (!state.rendered || state.encoding || state.building) return;
+      state.encoding = true;
+      state.pptxBytes = null;
+      rerenderModal();
+      var cfg = state.config;
+      try {
+        var encoded = await api.encodeCanvasesToBlobs(state.rendered, {
+          format: cfg.format,
+          quality: cfg.quality,
+          onProgress: function(p){
+            rerenderModal('Encoding page ' + p.current + ' of ' + p.total + '\u2026');
+          }
+        });
+        state.encoded = encoded;
+        state.encoding = false;
+        state.building = true;
+        rerenderModal();
+
+        var placements = [];
+        for (var i = 0; i < encoded.length; i++) {
+          placements.push(Object.assign({}, encoded[i], {
+            placement: state.rendered[i]._placement
+          }));
+        }
+        var pptxBytes = await api.buildPptxFromImages(placements, {
+          format: cfg.format,
+          slideSizeEmu: state.rendered[0]._slideSizeEmu,
+          letterbox: cfg.letterbox
+        });
+        state.pptxBytes = pptxBytes;
+        state.building = false;
+        rerenderModal();
+      } catch (err) {
+        state.encoding = false;
+        state.building = false;
+        vlog('pdfimport: encode/build error: ' + (err && err.message || err));
+        rerenderModal('Encode failed: ' + (err && err.message || 'unknown'));
+      }
+    }
+
+    vlog('pdfimport: opening config for ' + file.name + ' (' + file.size + ' bytes, source=' + source + ')');
+    // First open — modal shows "Reading…" until the initial render completes.
+    rerenderModal();
+    // Kick off the initial render immediately. The user can change knobs
+    // while it runs; once it lands, format/quality changes re-encode in place.
+    runRenderEncodeBuild();
+  }
+
   // ----- Drag and drop -----
   // dragenter/dragover need preventDefault to opt into a drop. We toggle a
   // body class so the overlay shows; dragleave is debounced via a counter
@@ -409,25 +771,40 @@ function viewerScript(): string {
     hideOverlay();
     const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (!file) return;
-    // First gate: extension. Lets us bail on obvious junk (.png, .pdf, …)
+    // First gate: extension. Accept .pptx and .pdf. Anything else bails
     // without round-tripping bytes through the extension host.
-    if (!/\\.pptx$/i.test(file.name)) {
-      vlog('drop: ignored non-pptx ' + file.name);
+    const isPptx = /\\.pptx$/i.test(file.name);
+    const isPdf = /\\.pdf$/i.test(file.name);
+    if (!isPptx && !isPdf) {
+      vlog('drop: ignored non-pptx/non-pdf ' + file.name);
       return;
     }
-    // Second gate: zip magic bytes PK\\x03\\x04. Tells us the file is at least
-    // structurally a zip; the extension's full parser confirms it's a pptx.
+    // Second gate: magic bytes. PPTX is a zip (PK\\x03\\x04); PDF starts with
+    // "%PDF-". Catches mismatched extensions and gives us a sane error
+    // before the heavier parsing pipeline runs.
     try {
-      const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-      if (head[0] !== 0x50 || head[1] !== 0x4B || head[2] !== 0x03 || head[3] !== 0x04) {
-        vlog('drop: ignored bad magic ' + file.name);
-        return;
+      const head = new Uint8Array(await file.slice(0, 5).arrayBuffer());
+      if (isPptx) {
+        if (head[0] !== 0x50 || head[1] !== 0x4B || head[2] !== 0x03 || head[3] !== 0x04) {
+          vlog('drop: ignored bad pptx magic ' + file.name);
+          return;
+        }
+      } else {
+        // %PDF-  →  0x25 0x50 0x44 0x46 0x2D
+        if (head[0] !== 0x25 || head[1] !== 0x50 || head[2] !== 0x44 || head[3] !== 0x46 || head[4] !== 0x2D) {
+          vlog('drop: ignored bad pdf magic ' + file.name);
+          return;
+        }
       }
     } catch (err) {
       vlog('drop: head read error: ' + (err && err.message || err));
       return;
     }
     vlog('drop → ' + file.name + ' (' + file.size + ' bytes)');
+    if (isPdf) {
+      await handlePdfFile(file, 'drop');
+      return;
+    }
     setBusy(true);
     setStatus('Checking\u2026');
     try {
@@ -907,6 +1284,9 @@ function css(): string {
 
     /* ----- Modal overlay (compare / identical) --------------------------- */
     ${compareModalCss()}
+
+    /* ----- PDF import config modal --------------------------------------- */
+    ${pdfImportConfigCss()}
   `;
 }
 

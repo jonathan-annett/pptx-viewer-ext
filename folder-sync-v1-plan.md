@@ -945,7 +945,7 @@ Adds an "Extract media:" row to the pptx viewer that lists embedded videos with 
 - Per-deck filename hint pattern (e.g. `${pptxBasename}-slide${N}-${basename}` in place of bare basename).
 - In-memory media cache during the document's open session (only worth it if users repeatedly extract from the same deck).
 
-### M-VE-1 — PDF → PPTX import *(planned)*
+### M-VE-1 — PDF → PPTX import *(Phases A–D done, Phase E pending VPS validation)*
 
 #### What the user does
 
@@ -990,8 +990,8 @@ Letterboxing in slide XML: each `<p:pic>` carries `<a:off>` + `<a:ext>` sized to
 - **Defaults**: 16:9, target 1920×1080, letterbox, JPEG, quality 0.85, oversample 1.0.
 - **Slide size fixed across the deck** with letterboxing for off-aspect pages. (Per-page slide-size overrides are OOXML-legal but poorly supported by viewers — don't go there.)
 - **Render in the webview**, post `.pptx` bytes to the extension via the existing `ingest` channel.
-- **Lazy-load pdfjs-dist** via dynamic `import()`. Main bundle stays lean for users who never import PDFs.
-- **PDF.js fake-worker mode** for v1 (no `workerSrc` config). Slower than a real worker, but no asset-URL plumbing inside vscode.dev's webview sandbox. If conversion of large PDFs blocks the UI unacceptably, revisit and ship a worker file as a `vscode-resource:` URL.
+- **Two-bundle layout (revised from "lazy `import()`")**: pdfjs-dist + the pipeline + the config-modal renderer live in a separate IIFE bundle (`dist/pdfImport.webview.js`), text-inlined into `dist/extension.js` via an esbuild post-build placeholder rewrite, and served as a nonced inline `<script>` in the viewer HTML. *Why not lazy `import()`:* runtime asset fetches from the webview against extension-owned URLs hit CSP friction on vscode.dev, and the readFile-against-extensionUri dead end rules out the extension host streaming the bytes. Inlining sidesteps both. The cost is eager bundle size (~431KB minified webview bundle inlined as a JSON string into extension.js); acceptable because the bundle lands only when the viewer panel is open, not on extension activation.
+- **PDF.js fake-worker mode** for v1 (`GlobalWorkerOptions.workerSrc = ''` + `disableWorker: true` on each getDocument). Slower than a real worker, but no asset-URL plumbing inside vscode.dev's webview sandbox. If conversion of large PDFs blocks the UI unacceptably, revisit and ship a worker file as a `vscode-resource:` URL.
 - **Letterbox bar color**: white (matches PowerPoint default slide background). Customisation deferred.
 
 #### Module layout
@@ -1003,14 +1003,16 @@ New:
   - `encodeCanvasesToBlobs(canvases, { format, quality, onProgress })` → `Array<{ bytes: Uint8Array, sizeBytes, widthPx, heightPx, widthPt, heightPt }>`.
   - `buildPptxFromImages(pages, { format, slideSizeEmu: {cx, cy}, letterbox: boolean })` → `Uint8Array` (raw, not Blob — caller wraps if needed).
   - The original tool packs render+encode+build into one function. The split lets the webview's live preview re-run only `encodeCanvasesToBlobs` when the user changes format/quality, which is the cheap operation.
+- **`src/pdfImportLayout.ts`** — pure helper: `computePageLayout(page, slide, opts)` → `{ imagePxW, imagePxH, renderScale, placement }`, plus `targetPxWFor(slide, longEdgePx)` and `estimateCanvasBytes(layout)`. No DOM imports; imports `EMU_PER_POINT` + `PageEmuPlacement` from `pdfImport.ts`. Letterbox model: `pageAspect >= slideAspect → width-bound (T/B bars)`, else `height-bound (side bars)`; stretch mode bypasses letterbox entirely.
 - **`src/pdfImportConfigHtml.ts`** — pure renderer for the config panel modal HTML (radios, sliders, size estimate row, action buttons). Pattern follows `planHtml.ts` / `adminEditorHtml.ts`. tsx-testable, no vscode import.
+- **`src/pdfImportWebviewEntry.ts`** — the webview-side IIFE bundle entry. Imports `pdfjs-dist` + the three-phase pipeline + the layout helpers + the config renderer and exposes them as `globalThis.__pptxPdfImport`. Sets `GlobalWorkerOptions.workerSrc = ''` and shims `renderPdfPages` to inject `disableWorker: true` on every `getDocument` call (the base function stays generic — it doesn't know about pdf.js worker semantics).
 
 Modified:
 
-- **`src/webview.ts`** — widen drop and Update… gates to accept `.pdf` (magic bytes `%PDF-`). On PDF detection, render the config panel HTML into the existing modal-host div; wire change handlers to call into `pdfImport.ts`; on Import, post the final `.pptx` bytes through `ingest` with a `.pptx` filename. The drop-overlay copy ("Drop a .pptx to compare or update") becomes "Drop a .pptx or .pdf …" when Phase D lands.
-- **`src/provider.ts`** — no change required. The `ingest` handler doesn't care that the bytes originated from a PDF; it only sees `.pptx` bytes coming in. (Confirm during implementation; if the filename routing makes assumptions, surface them.)
-- **`package.json`** — add `pdfjs-dist` as a dep. Pin the version. Verify esbuild splits it via dynamic import.
-- **`esbuild.config.js`** — confirm code-splitting is enabled for dynamic imports (`splitting: true`, `format: 'esm'` — but the bundle is currently CJS, so `import()` may be transformed to a Promise wrapper that still bundles eagerly; investigate during Phase A).
+- **`src/webview.ts`** — widened drop and Update… gates to accept `.pdf` (magic bytes `%PDF-`). On PDF detection, renders the config panel HTML into the existing modal-host div via `window.__pptxPdfImport.renderPdfImportConfigHtml`, wires change handlers, runs render → encode → build through the API surface, and on Import posts the final `.pptx` bytes through `ingest` with a `${basename}.pptx` filename (always `source: 'picker'` to skip the compare-modal step — the bytes are freshly derived, there's no "previous version" to diff against). Carries a `__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__` constant whose quoted literal is substituted by the esbuild plugin at build time. Drop-overlay copy: "Drop a .pptx or .pdf to compare or update".
+- **`src/provider.ts`** — no change required. The `ingest` handler sees `.pptx` bytes coming in regardless of input format; confirmed during Phase D wiring.
+- **`package.json`** — added `pdfjs-dist: ^5.7.284` as a dep. Three new test scripts: `test:pdf-import`, `test:pdf-import-layout`, `test:pdf-import-config-html`.
+- **`esbuild.config.js`** — rewritten for two-bundle layout. `buildOptionsWebview` builds the IIFE bundle first (minified, no sourcemap). `buildOptionsExtension` builds the CJS extension bundle with two post-build plugins: `buildInfoPlugin` (existing) and `pdfImportBundlePlugin` (new) which regex-matches the quoted placeholder literal in the output and replaces it with `JSON.stringify(bundleSrc)` — robust to either single- or double-quoted output from esbuild, and JSON.stringify handles all string-literal escaping. Watch mode polls the webview output's mtime every 500ms and triggers an extension rebuild when the webview bundle changes, so an edit in either source tree refreshes the inlined copy.
 
 Deletable after the port lands and is verified:
 
@@ -1018,11 +1020,11 @@ Deletable after the port lands and is verified:
 
 #### Phases (suggested order)
 
-- **Phase A — TS port + pure tests.** Move pdf2pptx.js to `src/pdfImport.ts` with the three-phase split. Replace the all-in-one `pdfToPptx(file, opts)` with the trio. Add `test/pdf-import.test.ts` exercising `buildPptxFromImages` with synthetic 1×1 PNG buffers — verifies OOXML rels, slide count, picture offsets, slide-size EMU values, letterbox geometry. PDF.js itself is browser-only and isn't tested here.
-- **Phase B — Letterbox math + slide-size derivation.** Implement the `(slideAspect, targetPxW, pageAspectR) → (imagePxW, imagePxH, renderScale, offsetEmu)` function as a pure helper; unit test letterbox geometry for landscape/portrait/exact-match cases.
-- **Phase C — Config panel renderer.** `src/pdfImportConfigHtml.ts` + `test/pdf-import-config-html.test.ts`. Snapshot-style test on the rendered HTML for default state + JPEG/PNG toggle + non-default resolution.
-- **Phase D — Webview integration.** Widen drop/picker gates to accept PDF; render config panel into modal host; lazy `import('pdfjs-dist')`; wire render → encode → build pipeline; live preview re-encode loop; Import → existing `ingest` post.
-- **Phase E — VPS validation + sign-off.** Real PDFs through the live test harness; bundle-size check; update `CLAUDE.md` "What's currently shipping" with a bullet for PDF→PPTX import (defaults, lazy-load note, `pdfjs-dist` dep added) and the "Codebase / runtime dependencies" paragraph; drop a "Dead end" entry if anything surprising came up during integration (e.g., PDF.js worker URL constraints in vscode.dev); delete `pdf2pptx/` tree.
+- **Phase A — TS port + pure tests.** *Done.* Moved `pdf2pptx/pdfToPptx.js` to `src/pdfImport.ts` with the three-phase split. `test/pdf-import.test.ts` exercises `buildPptxFromImages` with synthetic 1×1 PNG buffers — verifies OOXML rels, slide count, picture offsets, slide-size EMU values, letterbox geometry. PDF.js itself is browser-only and isn't tested here.
+- **Phase B — Letterbox math + slide-size derivation.** *Done.* `src/pdfImportLayout.ts` + `test/pdf-import-layout.test.ts` (14 tests). Confirmed during testing that A4 landscape (aspect ≈ 1.414) is *narrower* than 16:9 (1.778) and so gets side bars on 16:9, not top/bottom bars; the genuinely-panoramic case uses a 2:1 synthetic page for the T/B bar test.
+- **Phase C — Config panel renderer.** *Done.* `src/pdfImportConfigHtml.ts` + `test/pdf-import-config-html.test.ts` (17 tests). Snapshot-style assertions over structural ids, checked-radio state, and the device-resolution row's appear/hide rules.
+- **Phase D — Webview integration.** *Done.* Two-bundle layout in `esbuild.config.js` (replaces the planned lazy `import()`), `src/pdfImportWebviewEntry.ts` as the IIFE entry, `handlePdfFile()` flow added to `src/webview.ts`, drop/picker gates widened to accept PDF with magic-byte detection. Final placeholder-substitution gotcha resolved: replace the entire quoted literal via `JSON.stringify` so the inlined bundle's embedded quotes don't break the host string. `node --check dist/extension.js` passes; all four affected test suites (`test:pdf-import`, `test:pdf-import-layout`, `test:pdf-import-config-html`, `test:parse`) pass locally.
+- **Phase E — VPS validation + sign-off.** *Pending.* On the VPS: `git pull --ff-only`; `npm install` (new `pdfjs-dist` dep — confirm with user first); `pm2 restart pptx-watch` (esbuild config changed; the watcher caches the config on startup); reload the PWA and exercise a couple of real PDFs end-to-end. Then: update `CLAUDE.md` "What's currently shipping" with a PDF→PPTX import bullet (defaults, two-bundle architecture, `pdfjs-dist` dep added), add the dead-end entries that surfaced (placeholder-substitution quote-style trap, possibly the pdfjs worker URL story), delete `pdf2pptx/` tree. Bundle-size check: `dist/extension.js` is now ~822KB (was ~366KB pre-M-VE-1) — the +456KB is the inlined webview bundle (~431KB minified, expanded ~6% by JSON-stringify escaping).
 
 #### Open follow-ups (deferred)
 
@@ -1035,4 +1037,31 @@ Deletable after the port lands and is verified:
 
 #### Workflow note
 
-`npm install` on the VPS is required when Phase A/D lands (`pdfjs-dist` is a new dep). Confirm with the user before running it — it mutates `node_modules` and may need a watcher restart afterwards.
+`npm install` on the VPS is required before Phase E sign-off (`pdfjs-dist` is a new dep in `package.json`). Confirm with the user before running it — it mutates `node_modules`. The watcher (`pptx-watch`) also needs `pm2 restart` because `esbuild.config.js` changed (the watcher loads the config once, on startup).
+
+#### Resume notes (Phases A–D landed locally, not yet pushed)
+
+Working tree state at the time of this note (use `git status` to verify before resuming):
+
+```
+ M  esbuild.config.js          ← two-bundle layout + JSON.stringify substitution
+ M  package.json               ← pdfjs-dist dep + 3 new test scripts
+ M  package-lock.json          ← lockfile for the dep
+ M  src/webview.ts             ← drop/picker PDF gates + handlePdfFile + placeholder
+?? src/pdfImport.ts             ← Phase A
+?? src/pdfImportLayout.ts       ← Phase B
+?? src/pdfImportConfigHtml.ts   ← Phase C
+?? src/pdfImportWebviewEntry.ts ← Phase D (webview IIFE entry)
+?? test/pdf-import.test.ts
+?? test/pdf-import-layout.test.ts
+?? test/pdf-import-config-html.test.ts
+```
+
+Phase E sequence:
+
+1. Commit + push from Termux. Suggested commit message: `Viewer: PDF → PPTX import (M-VE-1 Phases A–D)`.
+2. SSH to VPS, `cd ~/pptx-viewer-ext`, `git pull --ff-only`.
+3. Ask the user before running `npm install`. After install completes, `pm2 restart pptx-watch`. Tail `pm2 logs pptx-watch --nostream` to confirm a clean rebuild and the `[esbuild] inlined pdfImport.webview.js (NNN KB) → extension.js` line.
+4. Reload the PWA on `vscode.sophtwhere.com`. Open a `.pptx`, then drag a `.pdf` into the viewer. Step through the config modal: default render → JPEG quality change (should re-encode only) → aspect/resolution change (should re-render). Click Import → existing ingest flow should accept the bytes and replace the open file.
+5. Sign-off updates: `CLAUDE.md` "What's currently shipping" gets a PDF→PPTX import bullet; add dead-end entries for anything that surprised during VPS validation; delete `pdf2pptx/` (the reference test harness — its working code is now in `src/pdfImport.ts`).
+6. Final commit: `M-VE-1 sign-off: substrate + cleanup`.

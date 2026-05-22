@@ -124,6 +124,9 @@
     "test:sync-misfile": "node --import tsx test/sync-misfile.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
+    "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
+    "test:pdf-import-layout": "node --import tsx test/pdf-import-layout.test.ts",
+    "test:pdf-import-config-html": "node --import tsx test/pdf-import-config-html.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
@@ -135,7 +138,8 @@
   },
   "dependencies": {
     "fflate": "^0.8.2",
-    "jsonc-parser": "^3.3.1"
+    "jsonc-parser": "^3.3.1",
+    "pdfjs-dist": "^5.7.284"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
