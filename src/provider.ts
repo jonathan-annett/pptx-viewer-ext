@@ -15,6 +15,7 @@
 //     dry-run plan with attribution
 
 import * as vscode from 'vscode';
+import { unzipSync } from 'fflate';
 import { type ParseResult, type ParseTimings } from './pptx';
 import { getParseCacheSingleton, parsePptxCached } from './sync/parseCache';
 import { renderHtml, renderError, type RenderOptions } from './webview';
@@ -159,6 +160,11 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
       if (m.type === 'save-as') {
         await handleSaveAs(document, webviewPanel, fileName);
+        return;
+      }
+
+      if (m.type === 'extractMedia') {
+        await handleExtractMedia(msg, document, webviewPanel, fileName);
         return;
       }
 
@@ -332,6 +338,160 @@ async function handleSaveAs(
     log(`save ERROR ${fileName}: ${message}`);
     webviewPanel.webview.postMessage({ type: 'save-as-result', status: 'error', message });
   }
+}
+
+// ───── extract media ────────────────────────────────────────────────────
+
+/**
+ * Pull a specific entry out of the .pptx zip and write it to a user-chosen
+ * location. Same pattern as Save As… (extension-side save dialog rather than
+ * an anchor download in the webview) because vscode.dev's web-webview iframe
+ * silently drops anchor-driven downloads — the round-trip-via-postMessage
+ * approach the original viewer plan described is a confirmed dead end.
+ *
+ * We don't keep video bytes in memory after parse (they'd bloat the cached
+ * ParseResult for no benefit when most users never extract). On click we
+ * re-read + re-unzip; the latency is fine for an explicit user action.
+ */
+async function handleExtractMedia(
+  rawMsg: unknown,
+  document: PptxDocument,
+  webviewPanel: vscode.WebviewPanel,
+  fileName: string,
+): Promise<void> {
+  const msg = (rawMsg && typeof rawMsg === 'object' ? rawMsg : {}) as {
+    mediaPath?: unknown;
+    suggestedName?: unknown;
+  };
+  const mediaPath = typeof msg.mediaPath === 'string' ? msg.mediaPath : '';
+  const suggestedName = typeof msg.suggestedName === 'string' && msg.suggestedName.length > 0
+    ? msg.suggestedName
+    : basenameOf(mediaPath) || 'extracted-media';
+
+  if (!mediaPath) {
+    log(`extract[${fileName}]: missing mediaPath`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'error',
+      message: 'No media selected.',
+    });
+    return;
+  }
+
+  // Re-read + re-unzip from disk on each click. The parse cache hits would
+  // give us metadata but not the raw entry bytes, so there's no shortcut
+  // here. fflate's unzipSync materialises all entries — we then pluck the
+  // requested one.
+  let entry: Uint8Array;
+  try {
+    const fresh = await vscode.workspace.fs.readFile(document.uri);
+    const entries = unzipSync(fresh);
+    const found = entries[mediaPath];
+    if (!found) {
+      log(`extract[${fileName}]: ${mediaPath} not present in zip`);
+      webviewPanel.webview.postMessage({
+        type: 'extract-result',
+        status: 'error',
+        mediaPath,
+        message: `Entry not found in archive: ${mediaPath}`,
+      });
+      return;
+    }
+    entry = found;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`extract[${fileName}]: read/unzip failed — ${message}`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'error',
+      mediaPath,
+      message,
+    });
+    return;
+  }
+
+  // Default the save dialog to the pptx's directory so users land somewhere
+  // recognisable. URI.joinPath handles the directory join across schemes.
+  const parentDir = vscode.Uri.joinPath(document.uri, '..');
+  const defaultUri = vscode.Uri.joinPath(parentDir, suggestedName);
+
+  let target: vscode.Uri | undefined;
+  try {
+    target = await vscode.window.showSaveDialog({
+      defaultUri,
+      saveLabel: 'Extract',
+      filters: filtersForName(suggestedName),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`extract[${fileName}]: showSaveDialog threw — ${message}`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'error',
+      mediaPath,
+      message,
+    });
+    return;
+  }
+
+  if (!target) {
+    log(`extract[${fileName}]: ${mediaPath} cancelled`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'cancelled',
+      mediaPath,
+    });
+    return;
+  }
+
+  try {
+    await vscode.workspace.fs.writeFile(target, entry);
+    log(`extracted: ${mediaPath} — ${entry.byteLength} bytes → ${target.toString()}`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'ok',
+      mediaPath,
+      target: target.toString(),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`extract[${fileName}]: writeFile failed — ${message}`);
+    webviewPanel.webview.postMessage({
+      type: 'extract-result',
+      status: 'error',
+      mediaPath,
+      message,
+    });
+  }
+}
+
+function basenameOf(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
+/**
+ * Heuristic filter for the save dialog based on the file extension of the
+ * suggested name. Just enough to nudge the user toward the right file
+ * extension on platforms whose save dialog enforces filters; we always
+ * include an "All files" escape hatch.
+ */
+function filtersForName(name: string): Record<string, string[]> {
+  const m = /\.([a-z0-9]+)$/i.exec(name);
+  if (!m) return { 'All files': ['*'] };
+  const ext = m[1].toLowerCase();
+  // Mime → friendly label mapping kept small; the goal is just a sensible
+  // default. Unknown extensions still get the typed extension as the label.
+  const label =
+    ext === 'mp4' ? 'MP4 video' :
+    ext === 'mov' ? 'QuickTime video' :
+    ext === 'webm' ? 'WebM video' :
+    ext === 'avi' ? 'AVI video' :
+    ext === 'mp3' ? 'MP3 audio' :
+    ext === 'm4a' ? 'M4A audio' :
+    ext === 'wav' ? 'WAV audio' :
+    ext.toUpperCase();
+  return { [label]: [ext], 'All files': ['*'] };
 }
 
 // ───── ingest (picker + drop) ───────────────────────────────────────────

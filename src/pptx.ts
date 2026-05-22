@@ -15,6 +15,28 @@ export interface MediaEntry {
   count: number;
 }
 
+/**
+ * One row per embedded media part, joined to the slides that reference it.
+ * Sibling of MediaEntry (which stays as a per-mime aggregate used by the
+ * "Embedded media" metadata row + the showMediaControls validator). The
+ * per-file shape is what the viewer's Extract media affordance needs — a
+ * dropdown of individual files, each annotated with the slides that play
+ * them.
+ *
+ * `slides` is sorted ascending; an empty array means the part is in the zip
+ * but no slide rel references it (an "orphan" — still extractable, just
+ * unused by the deck).
+ *
+ * `sizeBytes` reflects the unzipped (inflated) length of the part — fflate
+ * gives us the decompressed bytes, which is what extraction actually writes.
+ */
+export interface MediaFileEntry {
+  mediaPath: string;   // e.g. 'ppt/media/media1.mp4'
+  mime: string;
+  sizeBytes: number;
+  slides: number[];
+}
+
 export interface Thumbnail {
   mime: string;   // image/jpeg | image/png | image/gif | image/webp
   dataUrl: string;
@@ -74,6 +96,13 @@ export interface ParseResult {
   author: string;
   lastModifiedBy: string;
   embeddedMedia: MediaEntry[];
+  /**
+   * Per-file list of embedded media parts joined to the slides that
+   * reference them. Sibling of `embeddedMedia` (which aggregates by mime
+   * type). Consumed by the viewer's Extract media affordance; the validator
+   * and metadata-row paths use `embeddedMedia`.
+   */
+  mediaFiles: MediaFileEntry[];
   thumbnail?: Thumbnail;
   flags: {
     linkedMedia: Flag;
@@ -146,6 +175,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
 
   const tMediaStart = performance.now();
   const embeddedMedia = parseEmbeddedMedia(contentTypes, entries);
+  const mediaFiles = buildMediaFileEntries(contentTypes, entries);
   const thumbnail = extractThumbnail(entries);
   const linkedMediaFound = anyLinkedMedia(entries);
   const mediaMs = performance.now() - tMediaStart;
@@ -172,6 +202,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
     author,
     lastModifiedBy,
     embeddedMedia,
+    mediaFiles,
     thumbnail,
     flags: {
       linkedMedia: linkedMediaFound
@@ -355,6 +386,143 @@ function parseEmbeddedMedia(contentTypesXml: string, entries: Record<string, Uin
   return Array.from(counts.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([mime, count]) => ({ mime, count }));
+}
+
+// Build the per-file media list with slide-of-use annotations.
+//
+// Why this is separate from parseEmbeddedMedia: the aggregate counts there
+// answer "what kinds of media are in the deck and how many of each" (used by
+// the metadata row + the showMediaControls validator). The Extract media UI
+// needs a different shape: one row per part, with the slides that play it.
+// Keeping the two passes separate keeps each readable; the cost is one extra
+// O(entries) loop, which is irrelevant next to unzip + hash.
+//
+// MIME resolution mirrors parseEmbeddedMedia (Override wins per-part; Default
+// fills in by extension). We only emit rows for parts under ppt/media/ with a
+// resolvable audio/* or video/* mime — image parts are ignored here, since
+// the Extract UI is scoped to video for v1 and the aggregate row already
+// shows "image/png × N" for the curious.
+//
+// Slides are joined by parsing each ppt/slides/_rels/slideN.xml.rels:
+// Relationship entries whose Target resolves to a ppt/media/<basename> get
+// pushed into the matching media row's slides[]. Targets are typically
+// '../media/foo.mp4' (relative to ppt/slides/); we resolve them against the
+// rels file's directory before matching against the absolute media path.
+function buildMediaFileEntries(
+  contentTypesXml: string,
+  entries: Record<string, Uint8Array>,
+): MediaFileEntry[] {
+  // Resolve mime for each ppt/media/* part. Same precedence as parseEmbeddedMedia:
+  //   - Override PartName="/ppt/media/foo.mp4" wins
+  //   - else Default Extension="mp4" applies
+  //   - else the part is skipped (we only care about audio/video here)
+  const overrideByPart = new Map<string, string>();
+  if (contentTypesXml) {
+    const overrideRe = /<Override\b([^>]*?)\/?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = overrideRe.exec(contentTypesXml))) {
+      const partName = /\bPartName="([^"]+)"/.exec(m[1])?.[1];
+      const mime = /\bContentType="([^"]+)"/.exec(m[1])?.[1];
+      if (partName && mime) overrideByPart.set(partName, mime);
+    }
+  }
+  const defaultByExt = new Map<string, string>();
+  if (contentTypesXml) {
+    const defaultRe = /<Default\b([^>]*?)\/?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = defaultRe.exec(contentTypesXml))) {
+      const ext = /\bExtension="([^"]+)"/.exec(m[1])?.[1]?.toLowerCase();
+      const mime = /\bContentType="([^"]+)"/.exec(m[1])?.[1];
+      if (ext && mime) defaultByExt.set(ext, mime);
+    }
+  }
+
+  // First pass: collect candidate media parts (audio/video only).
+  const rows = new Map<string, MediaFileEntry>(); // keyed by mediaPath
+  for (const name of Object.keys(entries)) {
+    const em = /^ppt\/media\/[^/]+\.([a-z0-9]+)$/i.exec(name);
+    if (!em) continue;
+    const ext = em[1].toLowerCase();
+    const mime = overrideByPart.get('/' + name) ?? defaultByExt.get(ext);
+    if (!mime) continue;
+    if (!/^audio\//i.test(mime) && !/^video\//i.test(mime)) continue;
+    rows.set(name, {
+      mediaPath: name,
+      mime,
+      sizeBytes: entries[name].byteLength,
+      slides: [],
+    });
+  }
+  if (rows.size === 0) return [];
+
+  // Second pass: walk every slide's rels file, push the slide number onto any
+  // row whose mediaPath the Target resolves to. Slides without rels (some
+  // tooling omits the file when there are no relationships) just don't
+  // contribute.
+  const slidesByMedia = new Map<string, Set<number>>();
+  for (const name of Object.keys(entries)) {
+    const relsMatch = /^ppt\/slides\/_rels\/slide(\d+)\.xml\.rels$/.exec(name);
+    if (!relsMatch) continue;
+    const slideNumber = parseInt(relsMatch[1], 10);
+    const relsXml = readText(entries[name]);
+    if (!relsXml) continue;
+    // Iterate relationships; resolve each Target against the rels file's
+    // directory (ppt/slides/_rels/) so '../media/foo.mp4' becomes
+    // 'ppt/media/foo.mp4' for the lookup. Skip external (TargetMode="External")
+    // — those are handled by anyLinkedMedia and don't refer to zip parts.
+    const relRe = /<Relationship\b([^>]*)\/?>/g;
+    let m: RegExpExecArray | null;
+    while ((m = relRe.exec(relsXml))) {
+      const attrs = m[1];
+      if (/\bTargetMode="External"/.test(attrs)) continue;
+      const target = /\bTarget="([^"]+)"/.exec(attrs)?.[1];
+      if (!target) continue;
+      const resolved = resolveRelTarget('ppt/slides/_rels/', target);
+      if (!rows.has(resolved)) continue;
+      let set = slidesByMedia.get(resolved);
+      if (!set) {
+        set = new Set();
+        slidesByMedia.set(resolved, set);
+      }
+      set.add(slideNumber);
+    }
+  }
+
+  for (const [mediaPath, slideSet] of slidesByMedia) {
+    const row = rows.get(mediaPath);
+    if (row) row.slides = Array.from(slideSet).sort((a, b) => a - b);
+  }
+
+  // Stable order: by mediaPath ascending so output is deterministic across
+  // runs and zip iteration order changes.
+  return Array.from(rows.values()).sort((a, b) =>
+    a.mediaPath.localeCompare(b.mediaPath),
+  );
+}
+
+// Resolve a rels Target (e.g. '../media/foo.mp4') against the directory that
+// contains the rels file ('ppt/slides/_rels/'). Strips leading './', handles
+// '../' by popping a path segment, ignores absolute Targets (starting with
+// '/') by treating them as already-zip-absolute minus the leading slash.
+function resolveRelTarget(relsDir: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  // Normalise relsDir to a trailing slash and split into segments. Rels live
+  // alongside the part they describe: ppt/slides/_rels/slide1.xml.rels →
+  // the Target is resolved from ppt/slides/ (one level up from _rels/), since
+  // the rels file itself "annotates" ppt/slides/slide1.xml. We model this by
+  // popping `_rels/` from the directory before walking.
+  const baseSegs = relsDir.replace(/\/+$/, '').split('/');
+  if (baseSegs[baseSegs.length - 1] === '_rels') baseSegs.pop();
+  const segs = baseSegs.slice();
+  for (const part of target.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (segs.length > 0) segs.pop();
+      continue;
+    }
+    segs.push(part);
+  }
+  return segs.join('/');
 }
 
 function anyLinkedMedia(entries: Record<string, Uint8Array>): boolean {

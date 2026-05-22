@@ -103,6 +103,7 @@ function makeSampleCached(sha: string, withThumbnail: boolean): CachedParseResul
     slideCount: 7, hiddenSlideCount: 2,
     author: 'Carol', lastModifiedBy: 'Dave',
     embeddedMedia: [],
+    mediaFiles: [],
     thumbnail,
     flags: {
       linkedMedia: { ok: true, label: 'Linked media', detail: '' },
@@ -141,6 +142,7 @@ async function run(): Promise<void> {
       author: 'Alice',
       lastModifiedBy: 'Bob',
       embeddedMedia: [],
+      mediaFiles: [],
       thumbnail: undefined,
       flags: {
         linkedMedia: { ok: true, label: 'Linked media', detail: '' },
@@ -193,6 +195,7 @@ async function run(): Promise<void> {
       author: '',
       lastModifiedBy: '',
       embeddedMedia: [],
+      mediaFiles: [],
       flags: {
         linkedMedia: { ok: true, label: '', detail: '' },
         showType: { ok: true, label: '', detail: '' },
@@ -218,6 +221,7 @@ async function run(): Promise<void> {
       fileName: '', size: 0, sizeHuman: '', mtime: 0, mtimeHuman: '',
       sha256: '', slideCount: 0, hiddenSlideCount: 0, author: '', lastModifiedBy: '',
       embeddedMedia: [],
+      mediaFiles: [],
       flags: {
         linkedMedia: { ok: true, label: '', detail: '' },
         showType: { ok: true, label: '', detail: '' },

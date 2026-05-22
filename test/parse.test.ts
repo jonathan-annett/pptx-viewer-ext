@@ -244,6 +244,75 @@ async function testDefaultExtensionMedia() {
   console.log('  ok: default-extension media counts zip parts');
 }
 
+// ---- Test 5e: mediaFiles join — single-use, multi-use, orphan media ----
+// Exercises the buildMediaFileEntries pass: one mp4 referenced from a single
+// slide, one referenced from two slides (reuse), one present in the zip but
+// not referenced from any rels file (orphan). Asserts the join is correct
+// and the orphan still appears in the output with slides=[].
+async function testMediaFilesJoin() {
+  const bytes = makePptx({
+    '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="mp4" ContentType="video/mp4"/>
+    </Types>`,
+    'docProps/core.xml': core('A', 'B'),
+    'ppt/presentation.xml': presentation(),
+    'ppt/slides/slide1.xml': slide(),
+    'ppt/slides/slide2.xml': slide(),
+    'ppt/slides/slide3.xml': slide(),
+    // single-use: only slide1 refs solo.mp4
+    'ppt/slides/_rels/slide1.xml.rels': rels(
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="../media/solo.mp4"/>`,
+    ),
+    // multi-use: slide2 + slide3 both ref reused.mp4
+    'ppt/slides/_rels/slide2.xml.rels': rels(
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="../media/reused.mp4"/>`,
+    ),
+    'ppt/slides/_rels/slide3.xml.rels': rels(
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="../media/reused.mp4"/>`,
+    ),
+    // payloads — sizes asserted below to confirm sizeBytes uses inflated length
+    'ppt/media/solo.mp4': new Uint8Array(7),
+    'ppt/media/reused.mp4': new Uint8Array(13),
+    'ppt/media/orphan.mp4': new Uint8Array(5),
+  });
+  const r = await parsePptx(bytes, info);
+
+  const byPath = Object.fromEntries(r.mediaFiles.map((m) => [m.mediaPath, m]));
+  assert.equal(r.mediaFiles.length, 3, 'three media files including orphan');
+  assert.deepEqual(byPath['ppt/media/solo.mp4'].slides, [1], 'solo: slide 1');
+  assert.deepEqual(byPath['ppt/media/reused.mp4'].slides, [2, 3], 'reused: slides 2, 3 sorted');
+  assert.deepEqual(byPath['ppt/media/orphan.mp4'].slides, [], 'orphan: empty slides');
+  assert.equal(byPath['ppt/media/solo.mp4'].mime, 'video/mp4');
+  assert.equal(byPath['ppt/media/solo.mp4'].sizeBytes, 7, 'sizeBytes = inflated length');
+  assert.equal(byPath['ppt/media/reused.mp4'].sizeBytes, 13);
+  assert.equal(byPath['ppt/media/orphan.mp4'].sizeBytes, 5);
+  console.log('  ok: mediaFiles join (single + reuse + orphan)');
+}
+
+// ---- Test 5f: linked external media is NOT joined as a mediaFile ----
+// External Targets refer to URLs, not zip parts. The join must skip them so
+// they don't pollute the Extract UI with un-extractable rows.
+async function testMediaFilesSkipsExternal() {
+  const bytes = makePptx({
+    '[Content_Types].xml': `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="mp4" ContentType="video/mp4"/>
+    </Types>`,
+    'docProps/core.xml': core('A', 'B'),
+    'ppt/presentation.xml': presentation(),
+    'ppt/slides/slide1.xml': slide(),
+    'ppt/slides/_rels/slide1.xml.rels': rels(
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="https://evil.example.com/clip.mp4" TargetMode="External"/>` +
+      `<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/video" Target="../media/local.mp4"/>`,
+    ),
+    'ppt/media/local.mp4': new Uint8Array(3),
+  });
+  const r = await parsePptx(bytes, info);
+  assert.equal(r.mediaFiles.length, 1, 'only the local part is joined');
+  assert.equal(r.mediaFiles[0].mediaPath, 'ppt/media/local.mp4');
+  assert.deepEqual(r.mediaFiles[0].slides, [1]);
+  console.log('  ok: mediaFiles skips external Targets');
+}
+
 // ---- Test 6: Internal media rel should NOT trigger linked-media warn ----
 async function testInternalMediaIsFine() {
   const bytes = makePptx({
@@ -381,6 +450,8 @@ async function testRealSamples() {
   await testControlsOnWithVideo();
   await testControlsOnWithAudioOnly();
   await testDefaultExtensionMedia();
+  await testMediaFilesJoin();
+  await testMediaFilesSkipsExternal();
   await testInternalMediaIsFine();
   await testGarbage();
   await testThumbnail();

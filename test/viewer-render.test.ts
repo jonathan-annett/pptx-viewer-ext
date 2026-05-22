@@ -26,6 +26,7 @@ function parseResult(overrides: Partial<ParseResult> = {}): ParseResult {
     author: 'Jonathan',
     lastModifiedBy: 'Claude',
     embeddedMedia: [],
+    mediaFiles: [],
     flags: {
       linkedMedia: { ok: true, label: 'Linked media', detail: '' },
       showType: { ok: true, label: 'Show type', detail: '' },
@@ -113,6 +114,60 @@ test('renderHtml: sync target section rendered when syncTargetHtml provided', ()
   assert.ok(/>Sync target</.test(html), 'Sync target heading present');
   assert.ok(html.includes('plan goes here'), 'caller HTML inlined verbatim');
   assert.ok(html.includes('class="sync-target"'), 'caller wrapper preserved');
+});
+
+// ───── extract media row ────────────────────────────────────────────────
+
+test('renderHtml: extract-media row absent when no embedded video', () => {
+  const html = renderHtml(parseResult(), NONCE);
+  assert.ok(!html.includes('id="extract-select"'), 'no select');
+  assert.ok(!html.includes('id="extract-btn"'), 'no button');
+});
+
+test('renderHtml: extract-media row absent when only audio is embedded', () => {
+  const html = renderHtml(
+    parseResult({
+      mediaFiles: [
+        { mediaPath: 'ppt/media/audio1.mp3', mime: 'audio/mpeg', sizeBytes: 100, slides: [1] },
+      ],
+    }),
+    NONCE,
+  );
+  assert.ok(!html.includes('id="extract-select"'), 'audio alone does not render the row');
+});
+
+test('renderHtml: extract-media row rendered when video present, with slide-of-use label', () => {
+  const html = renderHtml(
+    parseResult({
+      mediaFiles: [
+        { mediaPath: 'ppt/media/solo.mp4',   mime: 'video/mp4', sizeBytes: 100, slides: [3] },
+        { mediaPath: 'ppt/media/reused.mp4', mime: 'video/mp4', sizeBytes: 100, slides: [2, 7] },
+        { mediaPath: 'ppt/media/orphan.mp4', mime: 'video/mp4', sizeBytes: 100, slides: [] },
+      ],
+    }),
+    NONCE,
+  );
+  assert.ok(html.includes('id="extract-select"'), 'select rendered');
+  assert.ok(html.includes('id="extract-btn"'), 'button rendered');
+  assert.ok(/solo\.mp4 \u2014 slide 3/.test(html), 'single-use label');
+  assert.ok(/reused\.mp4 \u2014 slides 2, 7/.test(html), 'multi-use label with comma-separated slides');
+  assert.ok(/orphan\.mp4 \u2014 unused/.test(html), 'orphan label');
+  assert.ok(/disabled/.test(html), 'button starts disabled');
+});
+
+test('renderHtml: extract-media option values use the full mediaPath', () => {
+  const html = renderHtml(
+    parseResult({
+      mediaFiles: [
+        { mediaPath: 'ppt/media/clip.mp4', mime: 'video/mp4', sizeBytes: 1, slides: [1] },
+      ],
+    }),
+    NONCE,
+  );
+  // The value attribute is what the extension uses to locate the zip entry —
+  // basename alone wouldn't disambiguate. The label uses the basename for
+  // brevity but the option's value must be the full path.
+  assert.ok(html.includes('value="ppt/media/clip.mp4"'), 'option value = full path');
 });
 
 // ───── modal + drop overlay hosts ───────────────────────────────────────

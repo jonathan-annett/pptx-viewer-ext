@@ -28,7 +28,7 @@
 // src/sync/compareModalHtml.ts) and posted to the webview as a string; the
 // host container is a fixed-position overlay that the script toggles.
 
-import type { Flag, MediaEntry, ParseResult } from './pptx';
+import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
 import { compareModalCss } from './sync/compareModalHtml';
 import { decisionWiringScript } from './sync/planHtml';
 
@@ -100,6 +100,7 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
       <span id="action-status" class="action-status" aria-live="polite">${initialStatus}</span>
     </div>
     <input id="update-input" type="file" accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation" style="display:none">
+    ${extractMediaRow(r)}
     ${thumbnailImg(r)}
     ${errorBanner}
 
@@ -147,6 +148,51 @@ export function renderError(path: string, message: string): string {
 }
 
 // ---------- pieces ----------
+
+// Render the Extract media row when the deck has at least one embedded
+// video. Audio is excluded for v1 (controls flag only warns on video; users
+// asked for video-routing-to-external-playout first). Orphaned videos are
+// included — still extractable, just not referenced by any slide.
+//
+// Affordances:
+//   - <select> populated from videos, with slide-of-use annotations.
+//     The placeholder option (value="") keeps the Extract button disabled
+//     until the user makes a deliberate choice.
+//   - <button> disabled until a real option is selected.
+//   - <span> for transient status text, same affordance as #action-status.
+//
+// The section is omitted entirely when there are no videos, so the page
+// layout is unchanged for the typical no-media deck.
+function extractMediaRow(r: ParseResult): string {
+  const videos = (r.mediaFiles ?? []).filter((m) => /^video\//i.test(m.mime));
+  if (videos.length === 0) return '';
+
+  const options = videos
+    .map((m) => `<option value="${escapeHtml(m.mediaPath)}">${escapeHtml(extractOptionLabel(m))}</option>`)
+    .join('');
+
+  return `<div class="extract-actions">
+    <label class="extract-label" for="extract-select">Extract media:</label>
+    <select id="extract-select" class="extract-select">
+      <option value="">Select a video\u2026</option>
+      ${options}
+    </select>
+    <button id="extract-btn" class="action-btn action-btn-secondary" type="button" disabled>Extract</button>
+    <span id="extract-status" class="action-status" aria-live="polite"></span>
+  </div>`;
+}
+
+function extractOptionLabel(m: MediaFileEntry): string {
+  const base = basename(m.mediaPath);
+  if (m.slides.length === 0) return `${base} \u2014 unused`;
+  if (m.slides.length === 1) return `${base} \u2014 slide ${m.slides[0]}`;
+  return `${base} \u2014 slides ${m.slides.join(', ')}`;
+}
+
+function basename(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i >= 0 ? path.slice(i + 1) : path;
+}
 
 function thumbnailImg(r: ParseResult): string {
   if (!r.thumbnail) return '';
@@ -207,6 +253,10 @@ function viewerScript(): string {
   // The Run Sync buttons + hint live inside the Sync target section, which
   // may or may not be rendered — all nullable. Re-resolved each render
   // because the whole webview HTML is replaced on every renderWithSyncTarget.
+  // Extract media row — null when the section was omitted (no embedded video).
+  const extractSelect = document.getElementById('extract-select');
+  const extractBtn = document.getElementById('extract-btn');
+  const extractStatus = document.getElementById('extract-status');
   const syncRunBtn = document.getElementById('sync-run-btn');
   const syncRunSafeBtn = document.getElementById('sync-run-safe-btn');
   const syncRunHint = document.getElementById('sync-run-hint');
@@ -235,6 +285,7 @@ function viewerScript(): string {
   });
 
   function setStatus(text){ if (status) status.textContent = text || ''; }
+  function setExtractStatus(text){ if (extractStatus) extractStatus.textContent = text || ''; }
 
   function setBusy(busy){
     if (saveBtn) saveBtn.disabled = busy;
@@ -307,6 +358,27 @@ function viewerScript(): string {
         setStatus('Could not read file');
         vlog('picker read error: ' + (err && err.message || err));
       }
+    });
+  }
+
+  // ----- Extract media (dropdown + button) -----
+  // The button starts disabled because the placeholder option (value="") is
+  // the initial selection. Change events flip the disabled state; the actual
+  // round-trip with the extension is wired below in the message listener.
+  if (extractSelect && extractBtn) {
+    extractSelect.addEventListener('change', function(){
+      extractBtn.disabled = !extractSelect.value;
+      setExtractStatus('');
+    });
+    extractBtn.addEventListener('click', function(){
+      if (!extractSelect.value || extractBtn.disabled) return;
+      var mediaPath = extractSelect.value;
+      var suggestedName = mediaPath.replace(/^.*\\//, '');
+      extractBtn.disabled = true;
+      extractSelect.disabled = true;
+      setExtractStatus('Extracting\u2026');
+      vlog('click → extractMedia ' + mediaPath);
+      try { vscode.postMessage({type:'extractMedia', mediaPath: mediaPath, suggestedName: suggestedName}); } catch (_) {}
     });
   }
 
@@ -464,6 +536,22 @@ function viewerScript(): string {
         }
         refreshOrangeButton();
         if (syncRunHint) syncRunHint.textContent = '';
+      }
+      return;
+    }
+
+    if (m.type === 'extract-result') {
+      if (extractBtn) extractBtn.disabled = !extractSelect || !extractSelect.value;
+      if (extractSelect) extractSelect.disabled = false;
+      if (m.status === 'ok') {
+        setExtractStatus('Saved.');
+        vlog('extracted ' + (m.mediaPath || '?') + ' → ' + (m.target || '(unknown)'));
+      } else if (m.status === 'cancelled') {
+        setExtractStatus('');
+        vlog('extract cancelled');
+      } else {
+        setExtractStatus('Extract failed: ' + (m.message || 'unknown'));
+        vlog('extract error: ' + (m.message || 'unknown'));
       }
       return;
     }
@@ -676,6 +764,40 @@ function css(): string {
     .action-status {
       color: var(--vscode-descriptionForeground);
       font-size: 0.9em;
+    }
+
+    /* Extract media row.
+       - Sits directly below the .actions row; same flex layout so the
+         dropdown + button + status read as a sibling affordance.
+       - The <select> uses --vscode-dropdown-* so it picks up VS Code's
+         native dropdown styling in light/dark/high-contrast themes.
+       - The label is muted (--vscode-descriptionForeground) so it doesn't
+         compete visually with the primary Save As / Update buttons above. */
+    .extract-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 16px;
+      flex-wrap: wrap;
+    }
+    .extract-label {
+      color: var(--vscode-descriptionForeground);
+      font-size: 0.95em;
+    }
+    .extract-select {
+      font-family: inherit;
+      font-size: inherit;
+      padding: 4px 8px;
+      color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+      background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+      border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+      border-radius: 2px;
+      min-width: 240px;
+      max-width: 100%;
+    }
+    .extract-select:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
     }
 
     /* ----- Sync target section ------------------------------------------- */

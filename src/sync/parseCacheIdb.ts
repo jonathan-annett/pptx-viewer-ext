@@ -64,7 +64,15 @@ const THUMBNAILS_STORE = 'thumbnails';
 // signal that existing entries may now grow the new field on write. Old v2
 // entries without `knownAt` continue to read correctly (treated as
 // "identity-only=absent" until a recordIdentity call lights them up).
-const DB_VERSION = 3;
+//
+// Bumped 3 → 4 for M-VE-2 (embedded media extract): the parseResults record
+// gained an optional `mediaFiles: MediaFileEntry[]` field — the per-file
+// media→slides join consumed by the viewer's Extract media UI. Like
+// `knownAt`, this is purely an additive record-shape change (no IDB schema
+// touch); the version bump is the signal. Old v3 entries without
+// `mediaFiles` hydrate to `[]` so the Extract UI simply stays hidden for
+// content that was cached before the upgrade — a fresh parse repopulates.
+const DB_VERSION = 4;
 
 /**
  * IDB payload for the parseResults store. All parse fields are optional so
@@ -333,6 +341,10 @@ function hydrateCached(record: ParseResultRecord, thumbnail: Thumbnail | undefin
     author: record.author!,
     lastModifiedBy: record.lastModifiedBy!,
     embeddedMedia: record.embeddedMedia!,
+    // v3 → v4 added mediaFiles. Old records without it hydrate to an empty
+    // array; the Extract UI gates on length > 0 so a v3 cache hit just
+    // silently lacks the affordance until that bytes' next miss-and-reparse.
+    mediaFiles: record.mediaFiles ?? [],
     thumbnail,
     flags: record.flags!,
     parseError: record.parseError,
