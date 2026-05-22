@@ -298,9 +298,16 @@ export async function buildPptxFromImages(
   // [Uint8Array, {level: 0..9}] for per-file overrides. PNG/JPEG payloads are
   // already compressed, so we store them at level 0 to save 5-15% CPU for ~0%
   // size gain. XML compresses well at default level 6.
+  // The first slide's image doubles as the package thumbnail. We re-use the
+  // same encoded bytes (a deliberate ~one-slide-image-sized addition to the
+  // zip) rather than encoding a downsampled variant — keeps the build path
+  // simple and the viewer's docProps/thumbnail.<ext> extractor renders the
+  // result regardless of dimensions. Only the constructed-here pptx ever gets
+  // its thumbnail written this way; other files in the workspace are never
+  // mutated (see plan §M-VE-3).
   const files: AsyncZippable = {
     '[Content_Types].xml': strToU8(contentTypesXml(n, ext, mime)),
-    '_rels/.rels': strToU8(topRelsXml()),
+    '_rels/.rels': strToU8(topRelsXml(ext)),
     'ppt/presentation.xml': strToU8(presentationXml(n, cx, cy)),
     'ppt/_rels/presentation.xml.rels': strToU8(presentationRelsXml(n)),
     'ppt/theme/theme1.xml': strToU8(themeXml()),
@@ -308,6 +315,7 @@ export async function buildPptxFromImages(
     'ppt/slideMasters/_rels/slideMaster1.xml.rels': strToU8(slideMasterRelsXml()),
     'ppt/slideLayouts/slideLayout1.xml': strToU8(slideLayoutXml()),
     'ppt/slideLayouts/_rels/slideLayout1.xml.rels': strToU8(slideLayoutRelsXml()),
+    [`docProps/thumbnail.${ext}`]: [toU8(pages[0].bytes), { level: 0 as const }],
   };
 
   for (let i = 0; i < n; i++) {
@@ -344,10 +352,11 @@ ${slides}
 </Types>`;
 }
 
-function topRelsXml(): string {
+function topRelsXml(thumbnailExt: string): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" Target="docProps/thumbnail.${thumbnailExt}"/>
 </Relationships>`;
 }
 

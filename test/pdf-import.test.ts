@@ -279,6 +279,63 @@ test('buildPptxFromImages: presentation rels carry slideMaster + theme + N slide
   assert.ok(rels.includes('Target="theme/theme1.xml"'), 'theme rel');
 });
 
+test('buildPptxFromImages: writes docProps/thumbnail using first-slide bytes', async () => {
+  // Distinctive payload tail so we can prove the thumbnail is the first slide
+  // verbatim (not a re-encode and not a different slide).
+  const distinctive = new Uint8Array([
+    ...PNG_1x1,
+    0xfe, 0xed, 0xfa, 0xce,
+  ]);
+  const pages = [
+    {
+      ...img(),
+      bytes: distinctive,
+      sizeBytes: distinctive.byteLength,
+      placement: stretchPlacement(SLIDE_SIZE_16x9_EMU),
+    },
+    { ...img(), placement: stretchPlacement(SLIDE_SIZE_16x9_EMU) },
+  ];
+  const bytes = await buildPptxFromImages(pages, {
+    format: 'png',
+    slideSizeEmu: SLIDE_SIZE_16x9_EMU,
+    letterbox: false,
+  });
+  const entries = unzipSync(bytes);
+  const thumb = entries['docProps/thumbnail.png'];
+  assert.ok(thumb, 'docProps/thumbnail.png present');
+  assert.deepEqual(
+    Array.from(thumb),
+    Array.from(distinctive),
+    'thumbnail bytes equal first slide image bytes',
+  );
+  // Same rels file should advertise the thumbnail so PowerPoint / Finder /
+  // Explorer surface the preview through the standard OOXML relationship.
+  const topRels = strFromU8(entries['_rels/.rels']);
+  assert.ok(
+    topRels.includes('Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"'),
+    'top-level rels carry thumbnail relationship type',
+  );
+  assert.ok(
+    topRels.includes('Target="docProps/thumbnail.png"'),
+    'top-level rels point at docProps/thumbnail.png',
+  );
+});
+
+test('buildPptxFromImages: thumbnail extension tracks the format (jpeg)', async () => {
+  const bytes = await buildPptxFromImages(
+    [{ ...img(), placement: stretchPlacement(SLIDE_SIZE_16x9_EMU) }],
+    { format: 'jpeg', slideSizeEmu: SLIDE_SIZE_16x9_EMU, letterbox: false },
+  );
+  const entries = unzipSync(bytes);
+  assert.ok(entries['docProps/thumbnail.jpeg'], 'JPEG thumbnail entry present');
+  assert.ok(!entries['docProps/thumbnail.png'], 'no PNG thumbnail entry for JPEG build');
+  const topRels = strFromU8(entries['_rels/.rels']);
+  assert.ok(
+    topRels.includes('Target="docProps/thumbnail.jpeg"'),
+    'top-level rels point at .jpeg target',
+  );
+});
+
 test('buildPptxFromImages: <p:sldIdLst> has exactly N <p:sldId> children', async () => {
   const n = 4;
   const pages = Array.from({ length: n }, () => ({

@@ -1024,7 +1024,9 @@ Deletable after the port lands and is verified:
 - **Phase B — Letterbox math + slide-size derivation.** *Done.* `src/pdfImportLayout.ts` + `test/pdf-import-layout.test.ts` (14 tests). Confirmed during testing that A4 landscape (aspect ≈ 1.414) is *narrower* than 16:9 (1.778) and so gets side bars on 16:9, not top/bottom bars; the genuinely-panoramic case uses a 2:1 synthetic page for the T/B bar test.
 - **Phase C — Config panel renderer.** *Done.* `src/pdfImportConfigHtml.ts` + `test/pdf-import-config-html.test.ts` (17 tests). Snapshot-style assertions over structural ids, checked-radio state, and the device-resolution row's appear/hide rules.
 - **Phase D — Webview integration.** *Done.* Two-bundle layout in `esbuild.config.js` (replaces the planned lazy `import()`), `src/pdfImportWebviewEntry.ts` as the IIFE entry, `handlePdfFile()` flow added to `src/webview.ts`, drop/picker gates widened to accept PDF with magic-byte detection. Final placeholder-substitution gotcha resolved: replace the entire quoted literal via `JSON.stringify` so the inlined bundle's embedded quotes don't break the host string. `node --check dist/extension.js` passes; all four affected test suites (`test:pdf-import`, `test:pdf-import-layout`, `test:pdf-import-config-html`, `test:parse`) pass locally.
-- **Phase E — VPS validation + sign-off.** *Pending.* On the VPS: `git pull --ff-only`; `npm install` (new `pdfjs-dist` dep — confirm with user first); `pm2 restart pptx-watch` (esbuild config changed; the watcher caches the config on startup); reload the PWA and exercise a couple of real PDFs end-to-end. Then: update `CLAUDE.md` "What's currently shipping" with a PDF→PPTX import bullet (defaults, two-bundle architecture, `pdfjs-dist` dep added), add the dead-end entries that surfaced (placeholder-substitution quote-style trap, possibly the pdfjs worker URL story), delete `pdf2pptx/` tree. Bundle-size check: `dist/extension.js` is now ~822KB (was ~366KB pre-M-VE-1) — the +456KB is the inlined webview bundle (~431KB minified, expanded ~6% by JSON-stringify escaping).
+- **Phase E — VPS validation + sign-off.** *In progress.* On the VPS: `git pull --ff-only`; `npm install` (new `pdfjs-dist` dep — confirm with user first); `pm2 restart pptx-watch` (esbuild config changed; the watcher caches the config on startup); reload the PWA and exercise a couple of real PDFs end-to-end. Then: update `CLAUDE.md` "What's currently shipping" with a PDF→PPTX import bullet (defaults, two-bundle architecture, `pdfjs-dist` dep added), add the dead-end entries that surfaced (placeholder-substitution quote-style trap, the pdfjs-v5 fake-worker fix), delete `pdf2pptx/` tree. Bundle-size note post-fixes: `dist/extension.js` is now ~2.0 MB (was ~366KB pre-M-VE-1) — the +1.6 MB is the inlined webview bundle (the +1.2 MB delta vs the original Phase D ~431KB came from inlining `pdf.worker.min.mjs` to satisfy pdfjs-v5's fake-worker setup). The bundle lands only when the viewer panel is open, so the activation surface is unchanged.
+- **Phase D-fix (2026-05-23) — pdfjs-v5 fake worker.** First live drop hit `No "GlobalWorkerOptions.workerSrc" specified` on every `getDocument`. Root cause: pdfjs-dist v5 dropped `disableWorker` as a getDocument option (the new `PDFWorker` constructor accepts only `name`/`port`/`verbosity`), so the flag was silently ignored and `PDFWorker.#initialize` fell through to reading `workerSrc`, which was `''` → throws. Fix in `src/pdfImportWebviewEntry.ts`: side-effect import `pdfjs-dist/build/pdf.worker.min.mjs`. Its top-level code assigns `globalThis.pdfjsWorker.WorkerMessageHandler`, which `PDFWorker.#initialize` checks before consulting `workerSrc` — fake-worker path is taken without ever loading a URL. The worker module gets bundled into the IIFE (~1.2 MB minified). Committed as `3b73ec9`.
+- **Phase D-thumbnail (2026-05-23) — in-file thumbnail on import.** `buildPptxFromImages` now writes `docProps/thumbnail.${ext}` using the first slide's encoded bytes and adds a `metadata/thumbnail` relationship to `_rels/.rels`. The viewer's existing `extractThumbnail` lookup (path-based, `/^docProps\/thumbnail\.<ext>$/`) picks it up unchanged. Re-uses the first-slide bytes verbatim (level: 0 store-only) rather than encoding a downsampled variant — keeps the build path simple at the cost of ~one slide-image-sized addition to the zip. This is the only place we ever write a thumbnail *into* a pptx; for any other file, see M-VE-3.
 
 #### Open follow-ups (deferred)
 
@@ -1038,6 +1040,58 @@ Deletable after the port lands and is verified:
 #### Workflow note
 
 `npm install` on the VPS is required before Phase E sign-off (`pdfjs-dist` is a new dep in `package.json`). Confirm with the user before running it — it mutates `node_modules`. The watcher (`pptx-watch`) also needs `pm2 restart` because `esbuild.config.js` changed (the watcher loads the config once, on startup).
+
+### M-VE-3 — Synthesised fallback thumbnails *(planned)*
+
+#### Why this exists
+
+The pptx viewer already shows a thumbnail when `docProps/thumbnail.*` is present in the zip — most PowerPoint-authored decks have one, the PDF→PPTX import (M-VE-1) now writes one too. But hand-built pptx files, decks edited by tools that strip the thumbnail, and very old files often have nothing. Today those show just the filename. A synthesised "coloured box + title text" thumbnail closes that gap without anyone editing the underlying file.
+
+Hard constraint, from the user: **never modify the pptx file to add a thumbnail.** The file's sha256 is identity for the parse cache, the URI hash cache, the sync planner, and (forthcoming) the misfiling guard. Writing a thumbnail back would change the hash and break the content-addressing invariant.
+
+So the surface is: read-only file, synthesised image, cached out-of-band, displayed by the viewer.
+
+#### Design
+
+- **Trigger.** During `parsePptx`, when `extractThumbnail` returns undefined (no `docProps/thumbnail.{jpg,jpeg,png,gif,webp}` in the zip — `.emf` still counts as missing). EMF files reach the same branch since the viewer can't render them.
+- **Title extraction.** Pure helper in `src/pptx.ts`: walk `ppt/slides/slide1.xml`, find the `<p:sp>` whose `<p:nvSpPr><p:nvPr><p:ph type="title"/>` (or `type="ctrTitle"`) is set, concatenate its `<a:t>` text runs (joining paragraphs with a space). Strip surrounding whitespace. Cap at ~120 chars to avoid pathological cases. Returns `string | undefined`.
+- **Fallback chain.** Title (if found and non-empty) → filename without extension → literal "Untitled".
+- **Colour selection.** Deterministic from sha256: take the first 6 hex chars of the hash as an HSL hue offset (so the same file always gets the same colour across sessions and across machines). Saturation/lightness fixed at values that read well in both light + dark VS Code themes (the thumbnail is rendered once at synthesis time, so it can't follow theme — pick mid-tones).
+- **Canvas render.** 1920×1080, background colour as above, title text centered in white with a 1px dark shadow for legibility. Font: system-ui sans, weight 600. Auto-fit: start at 96pt, shrink until the longest line fits within 90% of the canvas width and total lines ≤ 4. Wrap on word boundaries via `measureText`. Encode to JPEG q=0.85 (smaller than PNG for solid backgrounds + anti-aliased text).
+- **Storage.** Lives in the existing M5.3 IndexedDB parse cache's `thumbnails` object store, keyed by sha256. Same store the in-file thumbnail uses — the viewer doesn't care where a thumbnail came from, only whether one is cached for this sha256.
+  - On parse-cache hit: thumbnail comes from cache, no synthesis needed.
+  - On parse-cache miss + no in-file thumbnail: synthesise once, write to the cache alongside the `ParseResult` projection, return.
+  - Cache key being content-addressed means: edit the file → sha256 changes → re-synth automatically. No invalidation logic.
+- **Where canvas rendering happens.** Extension host is a worker context, no DOM. Webview is the only place with a canvas. So:
+  - Provider builds the `ParseResult` with `thumbnail: undefined` and adds a `synthesisHint: { title, sha256 }` companion field.
+  - Webview, on receiving the render, sees the hint, renders the canvas, posts `{ type: 'thumbnail-synthesised', sha256, dataUrl }` back.
+  - Extension writes the data URL into the parse cache + the in-memory ParseResult, then sends a `{ type: 'thumbnail-set', dataUrl }` message that swaps the placeholder for the rendered image in-place (no full re-render of the panel).
+  - On the next open of any file with the same sha256, the synthesis hint isn't sent (the cache has a thumbnail), and the placeholder path is skipped.
+- **Distinguishing synthesised vs real in the cache.** Optional `synthesised?: true` flag on the cached thumbnail record. Diagnostic only — the viewer treats them identically.
+
+#### Files (proposed)
+
+- `src/pptx.ts` — add `extractFirstSlideTitle(entries)` pure helper; add `synthesisHint?: { title: string; sha256: string }` to `ParseResult` (set only when thumbnail is absent).
+- `src/thumbnailSynth.ts` *(new, pure)* — `deterministicColourFromSha(sha256: string): { h: number; s: number; l: number }` and a small layout helper (line-fitting + measureText math) that's testable under tsx with a stub `measureText`.
+- `src/webview.ts` — when a `synthesisHint` is present in the rendered result, run the canvas pass and post back.
+- `src/provider.ts` — message handler for `thumbnail-synthesised`; cache write; in-place swap message.
+- `src/sync/parseCacheIdb.ts` — schema bump to add `synthesised?: boolean` to the thumbnail record (additive; old records hydrate as `undefined` = real).
+- `test/pptx-title-extract.test.ts` *(new)* — title extraction across `type="title"`, `type="ctrTitle"`, missing title shape (→ undefined), multiple `<a:t>` runs joined.
+- `test/thumbnail-synth.test.ts` *(new)* — colour determinism (same sha → same colour, different sha → different colour), line-fitting bounds, font-shrink termination.
+
+#### Open design questions
+
+- **DB schema bump.** `parseResults` is currently at v4 (M-VE-2). Adding `synthesised?: boolean` to `thumbnails` entries is additive — likely no version bump needed, but confirm during implementation.
+- **Race conditions.** If two viewer panels open the same file concurrently and both miss the cache, both synthesise. Last-writer-wins on the IDB record; renders are deterministic so the bytes match anyway. No locking needed.
+- **Synthesised-thumbnail visual debug.** Worth a tiny `[pptx-viewer] thumbnail: synthesised sha=…` log line so the user can tell at a glance whether a thumbnail came from the file or our fallback.
+
+#### Done when
+
+- A pptx with no `docProps/thumbnail.*` opens with a synthesised thumbnail (coloured box + title text or filename) instead of a bare filename.
+- Re-opening the same file pulls from cache without re-synthesising (verify via the diagnostic log line + cache stats).
+- Editing the file changes its sha256 and triggers a fresh synthesis automatically.
+- The file's bytes on disk are unchanged before vs after the viewer opens it (sha256 stable).
+- Title extraction returns the slide-1 title when present, falls back to filename when absent, and never crashes on malformed slide XML.
 
 #### Resume notes (Phases A–D landed locally, not yet pushed)
 
