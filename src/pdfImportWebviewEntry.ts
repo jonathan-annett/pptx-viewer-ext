@@ -23,6 +23,21 @@
 // Everything else is internal to this entry.
 
 import * as pdfjsLib from 'pdfjs-dist';
+// Side-effect import: pdfjs-dist v5's pdf.worker.mjs top-level code assigns
+// `globalThis.pdfjsWorker = { WorkerMessageHandler }`. PDFWorker checks for
+// that before trying to load `GlobalWorkerOptions.workerSrc`, so with the
+// handler present in main-thread globals the library uses its fake-worker
+// path without ever fetching a worker URL — which is what we need inside
+// vscode.dev's webview sandbox (no asset URLs reachable for worker fetch).
+//
+// In pdfjs v5, the old `disableWorker: true` getDocument option is no longer
+// honoured (the constructor accepts only `name`/`port`/`verbosity`), so this
+// side-effect import is now the *only* way to get fake-worker mode.
+//
+// Cost: bundles the worker module's code (~1.2MB minified) into this IIFE.
+// Acceptable because the IIFE is text-inlined into the extension bundle and
+// only ever evaluated when the pptx viewer panel is open.
+import 'pdfjs-dist/build/pdf.worker.min.mjs';
 
 import {
   renderPdfPages,
@@ -56,14 +71,10 @@ import {
   type ConfigRenderOptions,
 } from './pdfImportConfigHtml';
 
-// PDF.js v5 wants `workerSrc` to be set. Setting it to an empty string puts
-// the library into its "fake worker" path which runs everything on the main
-// thread inline. We also pass `disableWorker: true` to each getDocument call
-// (in `renderPdfPagesWrapped` below) belt-and-braces. The cost is single-
-// threaded PDF parsing, which is fine for the deck sizes we expect.
-//
-// We assign the empty string rather than leave it unset because some pdfjs
-// builds throw a warning on "Setting up fake worker" without it.
+// Belt-and-braces: pdfjs's static initialiser only sets workerSrc on Node, but
+// some setup paths still read GlobalWorkerOptions.workerSrc. We assign an
+// empty string up-front so any access doesn't throw a "not specified" error
+// before the main-thread WorkerMessageHandler fast-path is reached.
 try {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (pdfjsLib as any).GlobalWorkerOptions.workerSrc = '';
@@ -72,15 +83,16 @@ try {
 }
 
 /**
- * Wraps `renderPdfPages` to always pass `disableWorker: true`. The base
- * function in pdfImport.ts doesn't know about pdf.js worker semantics
- * (it stays generic), so we inject the flag at the boundary.
+ * Wraps `renderPdfPages` to keep the v4-era `disableWorker: true` flag on
+ * each getDocument call. In pdfjs v5 the flag is silently ignored (the
+ * constructor only honours `name`/`port`/`verbosity`), but we leave it for
+ * any future downgrade. The actual fake-worker switch comes from the
+ * `pdf.worker.min.mjs` side-effect import above.
  */
 async function renderPdfPagesWrapped(
   file: Blob | ArrayBuffer | Uint8Array,
   opts: Parameters<typeof renderPdfPages>[1],
 ): ReturnType<typeof renderPdfPages> {
-  // Shim the lib so `getDocument` always carries disableWorker:true.
   const baseLib = opts.pdfjsLib;
   const shimmed: PdfjsLib = {
     getDocument(arg) {
