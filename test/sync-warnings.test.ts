@@ -9,7 +9,14 @@
 
 import { strict as assert } from 'node:assert';
 import { zipSync, strToU8 } from 'fflate';
+import { webcrypto } from 'node:crypto';
 import { isPptxPath, validatePptxBytes } from '../src/sync/validators';
+import { InMemoryParseCache } from '../src/sync/parseCache';
+import { sha256Hex } from '../src/sync/hash';
+
+if (!(globalThis as { crypto?: unknown }).crypto) {
+  (globalThis as { crypto?: unknown }).crypto = webcrypto;
+}
 
 type ZipMap = Record<string, Uint8Array>;
 
@@ -171,6 +178,68 @@ test('kiosk + linked media + controls-with-video → three warnings, all codes p
 test('corrupt zip → empty warnings (parseError swallowed)', async () => {
   const bytes = new Uint8Array([1, 2, 3, 4, 5]); // not a zip
   const warnings = await validatePptxBytes('corrupt.pptx', bytes);
+  assert.deepEqual(warnings, []);
+});
+
+// ───── M5.3 Phase C — cache fast-path ────────────────────────────────────
+
+test('parse cache: miss records, second call hits without re-parsing', async () => {
+  // A kiosk file produces a show-type warning. We're verifying:
+  //   (a) the first call (miss) parses, records, and emits the warning;
+  //   (b) the second call (hit) emits the same warning without re-parsing.
+  // We can't easily intercept parsePptx, so we assert via cache.stats():
+  // misses goes 0→1 on the first call, hits goes 0→1 on the second.
+  const bytes = makePptx({
+    '[Content_Types].xml': TYPES_EMPTY,
+    'docProps/core.xml': core(),
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps('<p:showPr><p:kiosk/></p:showPr>'),
+    'ppt/slides/slide1.xml': slide(),
+  });
+  const sha = await sha256Hex(bytes);
+  const cache = new InMemoryParseCache();
+
+  const first = await validatePptxBytes('kiosk.pptx', bytes, { sha256: sha, cache });
+  assert.equal(first.length, 1);
+  assert.equal(first[0].code, 'show-type');
+  assert.equal(cache.stats().misses, 1);
+  assert.equal(cache.stats().hits, 0);
+  assert.equal(cache.stats().entries, 1);
+
+  const second = await validatePptxBytes('kiosk.pptx', bytes, { sha256: sha, cache });
+  assert.deepEqual(second.map((w) => w.code), ['show-type']);
+  assert.equal(cache.stats().hits, 1, 'second call resolves from cache');
+  assert.equal(cache.stats().misses, 1, 'no extra miss on second call');
+});
+
+test('parse cache: corrupt bytes cache the parseError — second call also empty', async () => {
+  // parseError records into the cache so the same bytes do not re-parse next
+  // time. The validator must continue to return [] on the cache hit too.
+  const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+  const sha = await sha256Hex(bytes);
+  const cache = new InMemoryParseCache();
+
+  const first = await validatePptxBytes('corrupt.pptx', bytes, { sha256: sha, cache });
+  assert.deepEqual(first, []);
+  assert.equal(cache.stats().misses, 1);
+  assert.equal(cache.stats().entries, 1);
+
+  const second = await validatePptxBytes('corrupt.pptx', bytes, { sha256: sha, cache });
+  assert.deepEqual(second, [], 'cached parseError still produces no warnings');
+  assert.equal(cache.stats().hits, 1);
+});
+
+test('parse cache: no cache supplied → same behaviour as pre-Phase-C', async () => {
+  // Backstop: callers that haven't been updated (or contexts without IDB)
+  // continue to get plain parse-every-time semantics. No regression.
+  const bytes = makePptx({
+    '[Content_Types].xml': TYPES_EMPTY,
+    'docProps/core.xml': core(),
+    'ppt/presentation.xml': presentation(),
+    'ppt/presProps.xml': presProps('<p:showPr/>'),
+    'ppt/slides/slide1.xml': slide(),
+  });
+  const warnings = await validatePptxBytes('clean.pptx', bytes);
   assert.deepEqual(warnings, []);
 });
 

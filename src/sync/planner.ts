@@ -19,6 +19,7 @@ import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree } from './walker';
 import { hashFileAtUri } from './hash';
 import { getHashCacheSingleton, type UriHashCache } from './hashCache';
+import { getParseCacheSingleton, type ParseResultCache } from './parseCache';
 import { vscodeFs } from './vscodeFs';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
@@ -48,6 +49,13 @@ export interface PlanForDestination {
    * validation).
    */
   hashCacheStats?: PlanHashCacheStats;
+  /**
+   * Parse cache diagnostics for this plan build (M5.3 Phase C). Counted across
+   * the source walk only — the destination walk skips validation and so never
+   * touches the parse cache. Same delta is reported on every destination row
+   * derived from the same source walk (the cost is paid once, surfaced N).
+   */
+  parseCacheStats?: PlanParseCacheStats;
 }
 
 export interface PlanHashCacheStats {
@@ -59,6 +67,13 @@ export interface PlanHashCacheStats {
   misses: number;
   /** Sum of `size` for files where the cache made the read unnecessary. */
   bytesSaved: number;
+}
+
+export interface PlanParseCacheStats {
+  /** Cache hits served during this walk (no unzip + scan). */
+  hits: number;
+  /** Misses: validator parsed and recorded into the cache. */
+  misses: number;
 }
 
 /**
@@ -158,6 +173,15 @@ async function planForSource(
   // undefined and walkAndHash degrades to stat+read+hash.
   const cache = getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined;
 
+  // Parse cache (M5.3 Phase C): only the source walk validates, so this is
+  // only consulted there. Stats are deltas of the cache's own counters around
+  // the walk — same pattern used by the URI hash cache, but at coarser scope
+  // because parse-cache hits are pptx-only and per-pair source walk is paid
+  // once. Singleton may be undefined in tests / unavailable IDB contexts;
+  // validators degrade to plain parsePptx.
+  const parseCache = getParseCacheSingleton();
+  const parseBefore = snapshotParseStats(parseCache);
+
   let sourceFiles: FileInfo[] = [];
   const sourceStats = freshStats();
   try {
@@ -173,11 +197,23 @@ async function planForSource(
       },
       cache,
       sourceStats,
+      parseCache,
     );
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
   }
   const scopedSourceFiles = filterFilesToScope(sourceFiles, scope);
+
+  // Compute per-source-walk parse-cache delta. Logged once per source (the
+  // source walk happens once even when fanning out to multiple destinations);
+  // the same numbers are attached to every PlanForDestination derived from
+  // this walk so the webview can surface them per row.
+  const parseStats = deltaParseStats(parseBefore, snapshotParseStats(parseCache));
+  if (parseCache && parseStats.hits + parseStats.misses > 0) {
+    const total = parseStats.hits + parseStats.misses;
+    const sourceLabel = source.workspaceFolderName;
+    log(`sync: parse-cache: ${parseStats.hits}/${total} on ${sourceLabel}`);
+  }
 
   const results: PlanForDestination[] = [];
   for (const dest of source.destinations) {
@@ -239,6 +275,7 @@ async function planForSource(
       items,
       summary,
       hashCacheStats: pairStats,
+      parseCacheStats: parseCache ? { ...parseStats } : undefined,
     });
   }
 
@@ -247,6 +284,22 @@ async function planForSource(
 
 function freshStats(): PlanHashCacheStats {
   return { walked: 0, hits: 0, misses: 0, bytesSaved: 0 };
+}
+
+function snapshotParseStats(cache: ParseResultCache | undefined): { hits: number; misses: number } {
+  if (!cache) return { hits: 0, misses: 0 };
+  const s = cache.stats();
+  return { hits: s.hits, misses: s.misses };
+}
+
+function deltaParseStats(
+  before: { hits: number; misses: number },
+  after: { hits: number; misses: number },
+): PlanParseCacheStats {
+  return {
+    hits: after.hits - before.hits,
+    misses: after.misses - before.misses,
+  };
 }
 
 function mergeStats(a: PlanHashCacheStats, b: PlanHashCacheStats): PlanHashCacheStats {
@@ -303,6 +356,7 @@ async function walkAndHash(
   opts: WalkAndHashOpts,
   cache: UriHashCache<vscode.Uri> | undefined,
   stats: PlanHashCacheStats,
+  parseCache?: ParseResultCache,
 ): Promise<FileInfo[]> {
   const entries = await walkTree(root, opts);
   const out: FileInfo[] = [];
@@ -336,7 +390,9 @@ async function walkAndHash(
       }
       const info: FileInfo = { relPath: e.relPath, size: e.size, sha256: result.sha256 };
       if (opts.validate && result.bytes) {
-        const warnings = await runValidators(e.relPath, result.bytes);
+        // Pass sha256 + parseCache through so the pptx validator can use the
+        // content-hashed cache instead of re-parsing on every plan build.
+        const warnings = await runValidators(e.relPath, result.bytes, result.sha256, parseCache);
         if (warnings.length > 0) info.warnings = warnings;
       }
       out.push(info);
@@ -353,10 +409,15 @@ async function walkAndHash(
  * a validator that itself fails should not block the plan, only its warnings
  * are missing. Logged for diagnostics.
  */
-async function runValidators(relPath: string, bytes: Uint8Array): Promise<PlanWarning[]> {
+async function runValidators(
+  relPath: string,
+  bytes: Uint8Array,
+  sha256: string,
+  parseCache: ParseResultCache | undefined,
+): Promise<PlanWarning[]> {
   if (isPptxPath(relPath)) {
     try {
-      return await validatePptxBytes(relPath, bytes);
+      return await validatePptxBytes(relPath, bytes, { sha256, cache: parseCache });
     } catch (err) {
       log(`sync: validator failed for ${relPath} — ${errMsg(err)} (continuing without warnings)`);
       return [];
