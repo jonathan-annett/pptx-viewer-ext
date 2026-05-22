@@ -914,3 +914,125 @@ Costs and constraints:
 - **Panel area is short and wide** — the current plan layout assumes a tall column with a sticky footer. Re-flow needed: totals on one line, per-pair sections collapsed by default, footer buttons inline-right rather than sticky.
 
 Slotting target: after M5.3 lands and after M5 is signed off, so the cache is proven and the decision UX is stable before it gets a more prominent surface.
+
+---
+
+## Viewer enhancements (parallel track)
+
+Two viewer-side features bundled into one track because they target the same audience (conference technicians running real shows from the deck) and both extend the existing pptx custom-editor surface. Independent of the folder-sync milestones above — sequenced in either order against M6 / Post-v1 work. Originally drafted in a separate `viewer-enhancements-plan.md`; folded in here once M-VE-2 shipped so the record stays in one place.
+
+### M-VE-2 — Embedded media extraction *(✅ shipped — commit a4b03f7)*
+
+Adds an "Extract media:" row to the pptx viewer that lists embedded videos with slide-of-use annotations and writes the chosen entry via the extension-side save dialog. The full operational record lives in `CLAUDE.md` ("What's currently shipping" → "Extract embedded media"); preserved here as the design record.
+
+**Shipped behaviour:**
+
+- Parser side (`src/pptx.ts`): walks every `ppt/slides/_rels/slide${N}.xml.rels` and joins `Target` URIs that resolve to `ppt/media/*` paths against the slide they came from. Produces a sibling field `mediaFiles: MediaFileEntry[]` (`{ mediaPath, mime, sizeBytes, slides: number[] }`) alongside the existing aggregate `embeddedMedia`. External-target relationships (`TargetMode="External"`) are skipped. Orphan entries (parsed but unreferenced) carry `slides: []` and remain extractable.
+- Webview UI: dropdown labels `${basename} — slide N` (single use) / `slides N, M` (reuse) / `unused` (orphan). The whole row is hidden when no video parts are present (audio-only files don't render the row). Extract button is disabled until a selection is made.
+- Extraction handler (`src/provider.ts`): re-reads `document.uri` + `fflate.unzipSync` on each click — videos are never retained in memory between clicks. Routes through `vscode.window.showSaveDialog` + `vscode.workspace.fs.writeFile` because anchor-driven downloads from the webview iframe are blocked on vscode.dev (now captured as a CLAUDE.md "Dead end" entry).
+- IDB parse cache: bumped DB version 3→4 with `mediaFiles` as an additive field; old v3 records hydrate with `[]` so the Extract UI stays hidden until a fresh parse repopulates.
+
+**Scope locked in for v1:**
+
+- Video mimes only (audio/image parts are filtered from the dropdown but still counted in the aggregate `embeddedMedia` row).
+- Re-read zip per click — no in-memory video cache.
+- Suggested filename = media-entry basename. Browser save dialog has the final say.
+
+**Deferred to follow-up:**
+
+- Audio extraction (m4a, mp3, wav) — expand the mime filter, or split into a second dropdown.
+- "Download all" zip of every referenced media file.
+- Per-deck filename hint pattern (e.g. `${pptxBasename}-slide${N}-${basename}` in place of bare basename).
+- In-memory media cache during the document's open session (only worth it if users repeatedly extract from the same deck).
+
+### M-VE-1 — PDF → PPTX import *(planned)*
+
+#### What the user does
+
+1. Drag a `.pdf` onto the viewer, or click Update… and pick a PDF.
+2. Viewer detects PDF (extension + magic bytes `%PDF-`), opens a config panel modal inside the existing webview.
+3. User picks: aspect (16:9 / 4:3), target display resolution, letterbox vs stretch, format (PNG / JPEG), JPEG quality.
+4. Render runs: PDF.js renders every page to a canvas at the derived scale. Progress shown. Encoded blobs sum to a live size estimate.
+5. User changes format / quality → instant re-encode preview (no re-render of the PDF).
+6. User changes resolution / aspect → "Re-render" button reruns PDF.js.
+7. Import → final `.pptx` bytes posted through the existing `ingest` channel as if a real `.pptx` had been dropped. The existing modal flow (no-change / different-replace) takes over from there.
+
+#### Why this design
+
+- **Slide size is dimensional in PowerPoint**, not pixel-based. We pick a fixed slide aspect (16:9 default) and *render each PDF page at the pixel count it will occupy on the target display*. A 1920×1080 projection display with a 16:9 slide gets 1920×1080 image pixels for landscape pages, and letterboxed images for portrait/4:3 pages. That gives 1:1 pixel display on the projector — sharper than any "scale 2×" abstraction.
+- **All work happens in the webview**, not the extension host. The extension host is a worker with no DOM — `document.createElement('canvas')` would fail there. The webview iframe has full DOM access and is where the existing ingest UI already lives, so this is a natural fit.
+- **Existing ingest path is the seam**. The webview produces `.pptx` bytes (regardless of input format) and posts them through the channel that already handles drops and Update… picks. No new extension-side message handler needed.
+
+#### Derived render-scale model
+
+Per PDF page:
+
+```
+slideAspect   = 16/9 (or 4/3)
+targetPxW     = 1920 / 2560 / 3840 / window.screen.width * devicePixelRatio
+pageAspectR   = pdfPage.widthPt / pdfPage.heightPt
+
+if pageAspectR >= slideAspect:    // landscape or wider-than-slide
+  imagePxW = targetPxW
+  imagePxH = round(targetPxW / pageAspectR)
+else:                              // portrait or narrower-than-slide
+  imagePxH = round(targetPxW / slideAspect)
+  imagePxW = round(imagePxH * pageAspectR)
+
+renderScale  = imagePxW / pdfPage.widthPt        // PDF.js scale arg
+oversample   = 1.0   // raise to 1.5–2.0 for downsample-from-larger (deferred knob)
+```
+
+Letterboxing in slide XML: each `<p:pic>` carries `<a:off>` + `<a:ext>` sized to its `imagePxW × imagePxH` mapped to EMU, centered within the fixed slide EMU. Slide background is the page color of the master (default white).
+
+#### Decisions locked in
+
+- **Defaults**: 16:9, target 1920×1080, letterbox, JPEG, quality 0.85, oversample 1.0.
+- **Slide size fixed across the deck** with letterboxing for off-aspect pages. (Per-page slide-size overrides are OOXML-legal but poorly supported by viewers — don't go there.)
+- **Render in the webview**, post `.pptx` bytes to the extension via the existing `ingest` channel.
+- **Lazy-load pdfjs-dist** via dynamic `import()`. Main bundle stays lean for users who never import PDFs.
+- **PDF.js fake-worker mode** for v1 (no `workerSrc` config). Slower than a real worker, but no asset-URL plumbing inside vscode.dev's webview sandbox. If conversion of large PDFs blocks the UI unacceptably, revisit and ship a worker file as a `vscode-resource:` URL.
+- **Letterbox bar color**: white (matches PowerPoint default slide background). Customisation deferred.
+
+#### Module layout
+
+New:
+
+- **`src/pdfImport.ts`** — TS port of `pdf2pptx/pdfToPptx.js`, **split into three phases** so the webview can cache between phases:
+  - `renderPdfPages(file, { pdfjsLib, renderScale[], onProgress })` → `Array<{ canvas, widthPt, heightPt }>` (one entry per page; `renderScale` can be a single number applied to all pages or an array of per-page scales — the derived model passes per-page).
+  - `encodeCanvasesToBlobs(canvases, { format, quality, onProgress })` → `Array<{ bytes: Uint8Array, sizeBytes, widthPx, heightPx, widthPt, heightPt }>`.
+  - `buildPptxFromImages(pages, { format, slideSizeEmu: {cx, cy}, letterbox: boolean })` → `Uint8Array` (raw, not Blob — caller wraps if needed).
+  - The original tool packs render+encode+build into one function. The split lets the webview's live preview re-run only `encodeCanvasesToBlobs` when the user changes format/quality, which is the cheap operation.
+- **`src/pdfImportConfigHtml.ts`** — pure renderer for the config panel modal HTML (radios, sliders, size estimate row, action buttons). Pattern follows `planHtml.ts` / `adminEditorHtml.ts`. tsx-testable, no vscode import.
+
+Modified:
+
+- **`src/webview.ts`** — widen drop and Update… gates to accept `.pdf` (magic bytes `%PDF-`). On PDF detection, render the config panel HTML into the existing modal-host div; wire change handlers to call into `pdfImport.ts`; on Import, post the final `.pptx` bytes through `ingest` with a `.pptx` filename. The drop-overlay copy ("Drop a .pptx to compare or update") becomes "Drop a .pptx or .pdf …" when Phase D lands.
+- **`src/provider.ts`** — no change required. The `ingest` handler doesn't care that the bytes originated from a PDF; it only sees `.pptx` bytes coming in. (Confirm during implementation; if the filename routing makes assumptions, surface them.)
+- **`package.json`** — add `pdfjs-dist` as a dep. Pin the version. Verify esbuild splits it via dynamic import.
+- **`esbuild.config.js`** — confirm code-splitting is enabled for dynamic imports (`splitting: true`, `format: 'esm'` — but the bundle is currently CJS, so `import()` may be transformed to a Promise wrapper that still bundles eagerly; investigate during Phase A).
+
+Deletable after the port lands and is verified:
+
+- `pdf2pptx/pdfToPptx.js`, `pdf2pptx/test-harness.html`, `pdf2pptx/readme` — the test harness can stay as a reference if useful, but the working code moves into `src/pdfImport.ts`.
+
+#### Phases (suggested order)
+
+- **Phase A — TS port + pure tests.** Move pdf2pptx.js to `src/pdfImport.ts` with the three-phase split. Replace the all-in-one `pdfToPptx(file, opts)` with the trio. Add `test/pdf-import.test.ts` exercising `buildPptxFromImages` with synthetic 1×1 PNG buffers — verifies OOXML rels, slide count, picture offsets, slide-size EMU values, letterbox geometry. PDF.js itself is browser-only and isn't tested here.
+- **Phase B — Letterbox math + slide-size derivation.** Implement the `(slideAspect, targetPxW, pageAspectR) → (imagePxW, imagePxH, renderScale, offsetEmu)` function as a pure helper; unit test letterbox geometry for landscape/portrait/exact-match cases.
+- **Phase C — Config panel renderer.** `src/pdfImportConfigHtml.ts` + `test/pdf-import-config-html.test.ts`. Snapshot-style test on the rendered HTML for default state + JPEG/PNG toggle + non-default resolution.
+- **Phase D — Webview integration.** Widen drop/picker gates to accept PDF; render config panel into modal host; lazy `import('pdfjs-dist')`; wire render → encode → build pipeline; live preview re-encode loop; Import → existing `ingest` post.
+- **Phase E — VPS validation + sign-off.** Real PDFs through the live test harness; bundle-size check; update `CLAUDE.md` "What's currently shipping" with a bullet for PDF→PPTX import (defaults, lazy-load note, `pdfjs-dist` dep added) and the "Codebase / runtime dependencies" paragraph; drop a "Dead end" entry if anything surprising came up during integration (e.g., PDF.js worker URL constraints in vscode.dev); delete `pdf2pptx/` tree.
+
+#### Open follow-ups (deferred)
+
+- **Per-page format override** (text pages PNG, photo pages JPEG): would meaningfully shrink mixed decks. Defer until users actually ask.
+- **Real PDF.js worker URL** for non-blocking render: only needed if fake-worker mode is too slow on big PDFs.
+- **Memory ceiling**: a 100-page PDF at scale 4 in PNG canvases is hundreds of MB resident. Start with "keep raw canvases between re-encodes" and add a guard rail (drop canvases after encoding when memory is tight) if users hit it.
+- **Letterbox bar color** knob (black for cinema feel): default white for now.
+- **Audio extraction** from PDFs (some have embedded audio): out of scope for this iteration.
+- **Oversample > 1.0 knob**: useful for crisp downsampling, deferred until someone notices anti-aliasing artefacts.
+
+#### Workflow note
+
+`npm install` on the VPS is required when Phase A/D lands (`pdfjs-dist` is a new dep). Confirm with the user before running it — it mutates `node_modules` and may need a watcher restart afterwards.
