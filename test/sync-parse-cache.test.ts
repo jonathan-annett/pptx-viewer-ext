@@ -21,8 +21,14 @@ import {
   project,
   setParseCacheSingleton,
   getParseCacheSingleton,
+  type CachedParseResult,
 } from '../src/sync/parseCache';
-import type { ParseResult } from '../src/pptx';
+import {
+  IndexedDbParseCache,
+  type ParseResultRecord,
+} from '../src/sync/parseCacheIdb';
+import type { IdbStore } from '../src/sync/idbAdapter';
+import type { ParseResult, Thumbnail } from '../src/pptx';
 
 if (!(globalThis as { crypto?: unknown }).crypto) {
   (globalThis as { crypto?: unknown }).crypto = webcrypto;
@@ -51,6 +57,59 @@ function makeMinimalPptx(): Uint8Array {
 
 function ok(name: string): void {
   console.log(`  ok: ${name}`);
+}
+
+// Fake IdbStore for IDB-backed cache tests. Mirrors the pattern used in
+// test/sync-hash-cache.test.ts — no real IndexedDB needed; we just trace
+// the call sequence and inspect the backing map.
+function makeFakeIdb<V>(): IdbStore<V> & { backing: Map<string, V>; ops: string[] } {
+  const backing = new Map<string, V>();
+  const ops: string[] = [];
+  return {
+    backing,
+    ops,
+    async get(key) {
+      ops.push(`get ${key}`);
+      return backing.get(key);
+    },
+    async put(key, value) {
+      ops.push(`put ${key}`);
+      backing.set(key, value);
+    },
+    async delete(key) {
+      ops.push(`delete ${key}`);
+      backing.delete(key);
+    },
+    async clear() {
+      ops.push('clear');
+      backing.clear();
+    },
+    async count() {
+      return backing.size;
+    },
+    close() {
+      ops.push('close');
+    },
+  };
+}
+
+function makeSampleCached(sha: string, withThumbnail: boolean): CachedParseResult {
+  const thumbnail: Thumbnail | undefined = withThumbnail
+    ? { mime: 'image/png', dataUrl: 'data:image/png;base64,iVBOR' }
+    : undefined;
+  return project({
+    fileName: '', size: 0, sizeHuman: '', mtime: 0, mtimeHuman: '',
+    sha256: sha,
+    slideCount: 7, hiddenSlideCount: 2,
+    author: 'Carol', lastModifiedBy: 'Dave',
+    embeddedMedia: [],
+    thumbnail,
+    flags: {
+      linkedMedia: { ok: true, label: 'Linked media', detail: '' },
+      showType: { ok: true, label: 'Show type', detail: '' },
+      showMediaControls: { ok: true, label: 'Show media controls', detail: '' },
+    },
+  });
 }
 
 async function run(): Promise<void> {
@@ -228,6 +287,171 @@ async function run(): Promise<void> {
     setParseCacheSingleton(undefined);
     assert.equal(getParseCacheSingleton(), undefined, 'singleton can be cleared');
     ok('module singleton getter/setter round-trip');
+  }
+
+  // ---------- IndexedDbParseCache: miss when both stores empty ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    assert.equal(await cache.lookup('nope'), undefined);
+    assert.equal(cache.stats().misses, 1);
+    assert.equal(cache.stats().idb, true);
+    // Both stores were probed in parallel.
+    assert.deepEqual(results.ops, ['get nope']);
+    assert.deepEqual(thumbs.ops, ['get nope']);
+    ok('IndexedDbParseCache: miss probes both stores; reports idb=true');
+  }
+
+  // ---------- IndexedDbParseCache: record splits payload across stores ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    const sample = makeSampleCached('aaa', true);
+    await cache.record('aaa', sample);
+
+    // parseResults gets the record sans-thumbnail; thumbnails gets just the
+    // thumbnail. Storing the thumbnail twice would waste quota on the heavy
+    // payload and break the "drop thumbs to relieve memory pressure" plan.
+    const stored = results.backing.get('aaa');
+    assert.ok(stored, 'parseResults has the record');
+    assert.equal('thumbnail' in (stored ?? {}), false, 'parseResults record has no thumbnail');
+    assert.equal(stored?.slideCount, 7);
+    assert.equal(thumbs.backing.get('aaa')?.mime, 'image/png');
+    ok('IndexedDbParseCache: record splits thumbnail into thumbnails store');
+  }
+
+  // ---------- IndexedDbParseCache: record without thumbnail leaves thumbs untouched ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    await cache.record('bbb', makeSampleCached('bbb', false));
+    assert.ok(results.backing.has('bbb'));
+    assert.equal(thumbs.backing.has('bbb'), false, 'no thumbnail → no entry in thumbnails store');
+    assert.deepEqual(thumbs.ops, [], 'no put issued against thumbnails store');
+    ok('IndexedDbParseCache: record skips thumbnails store when thumbnail is absent');
+  }
+
+  // ---------- IndexedDbParseCache: cold session reads from IDB then warms in-memory ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    // Pre-populate IDB to simulate a previous session's work.
+    const cold = makeSampleCached('ccc', true);
+    const { thumbnail, ...rest } = cold;
+    results.backing.set('ccc', rest);
+    if (thumbnail) thumbs.backing.set('ccc', thumbnail);
+
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+
+    // First lookup goes through to IDB on both stores and reassembles.
+    results.ops.length = 0;
+    thumbs.ops.length = 0;
+    const first = await cache.lookup('ccc');
+    assert.ok(first, 'IDB-only entry resolves on cold lookup');
+    assert.equal(first?.slideCount, 7);
+    assert.equal(first?.thumbnail?.mime, 'image/png', 'thumbnail reassembled from second store');
+    assert.deepEqual(results.ops, ['get ccc']);
+    assert.deepEqual(thumbs.ops, ['get ccc']);
+
+    // Second lookup is served from the warmed in-memory tier — no extra IDB hits.
+    results.ops.length = 0;
+    thumbs.ops.length = 0;
+    const second = await cache.lookup('ccc');
+    assert.ok(second);
+    assert.deepEqual(results.ops, [], 'in-memory hit, no IDB get');
+    assert.deepEqual(thumbs.ops, [], 'in-memory hit, no IDB get');
+    assert.equal(cache.stats().hits, 2);
+    ok('IndexedDbParseCache: cold IDB lookup reassembles + warms in-memory');
+  }
+
+  // ---------- IndexedDbParseCache: result-present, thumbnail-absent means "no thumbnail" ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cold = makeSampleCached('ddd', false); // built with thumbnail: undefined
+    const { thumbnail: _ignored, ...rest } = cold;
+    results.backing.set('ddd', rest);
+    // Intentionally no entry in thumbs.
+
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    const hit = await cache.lookup('ddd');
+    assert.ok(hit, 'hit even without a thumbnail row');
+    assert.equal(hit?.thumbnail, undefined, 'absent thumbnail row means content has no thumbnail');
+    ok('IndexedDbParseCache: parseResults hit + thumbnails miss → CachedParseResult with no thumbnail');
+  }
+
+  // ---------- IndexedDbParseCache: forget drops both stores ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    await cache.record('eee', makeSampleCached('eee', true));
+    assert.equal(results.backing.has('eee'), true);
+    assert.equal(thumbs.backing.has('eee'), true);
+    await cache.forget('eee');
+    assert.equal(results.backing.has('eee'), false);
+    assert.equal(thumbs.backing.has('eee'), false);
+    assert.equal(await cache.lookup('eee'), undefined);
+    ok('IndexedDbParseCache: forget removes entries from both stores and in-memory');
+  }
+
+  // ---------- IndexedDbParseCache: tolerates IDB write failure ----------
+  {
+    const results: IdbStore<ParseResultRecord> = {
+      async get() { return undefined; },
+      async put() { throw new Error('quota'); },
+      async delete() { /* noop */ },
+      async clear() { /* noop */ },
+      async count() { return 0; },
+      close() { /* noop */ },
+    };
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    // Must not throw — IDB write failure is silently absorbed; in-memory
+    // tier carries this session.
+    await cache.record('fff', makeSampleCached('fff', false));
+    const hit = await cache.lookup('fff');
+    assert.ok(hit, 'in-memory still works when IDB.put rejects');
+    ok('IndexedDbParseCache: tolerates IDB.put failure (in-memory still serves)');
+  }
+
+  // ---------- IndexedDbParseCache: idbEntryCount reports parseResults size ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    results.backing.set('w1', {} as ParseResultRecord);
+    results.backing.set('w2', {} as ParseResultRecord);
+    thumbs.backing.set('w1', { mime: 'image/png', dataUrl: '' });
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    assert.equal(await cache.idbEntryCount(), 2, 'count comes from parseResults, not thumbnails');
+    ok('IndexedDbParseCache: idbEntryCount counts parseResults entries');
   }
 
   // ---------- defaults ----------
