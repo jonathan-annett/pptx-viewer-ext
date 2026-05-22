@@ -10,7 +10,6 @@ import { openPlanPanel } from './sync/planView';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { registerProbe } from './sync/probe';
-import { registerProbeStat } from './sync/probeStat';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
 import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
@@ -120,7 +119,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await openPlanPanel(manager.getTopology());
     }),
     registerProbe(context),
-    registerProbeStat(context),
     vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
       log('snapshot: showSnapshot invoked');
       await showSnapshotCommand(snapshotStore);

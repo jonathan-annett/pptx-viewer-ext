@@ -195,6 +195,8 @@ Things tried and found wrong. Don't propose them again without new evidence:
 
   Commands: `folderSync.showSnapshot`, `folderSync.clearSnapshot`, `folderSync.openAdminConfig`.
 
+- **Folder Sync — M5.2.5 URI hash cache shipped.** A two-tier cache keyed by `(uri, size, mtime) → sha256`, sitting between the planner/executor and `vscode.workspace.fs.readFile`. The in-memory tier is a bounded `Map<string, …>` keyed by `uri.toString()`; the IndexedDB tier (opened via `src/sync/hashCacheIdb.ts`) is a write-through layer that survives browser refresh and silently degrades to in-memory-only if IDB isn't reachable from the worker context. Public entrypoint is `hashFileAtUri(fs, uri, cache?, { needBytes? })` in `src/sync/hash.ts` — callers that need bytes (viewer, executor) pass `needBytes: true`; callers that only need the hash (destination walks) pass `false` and skip the read entirely on cache hit. Wired into `planner.ts` source + destination walks and `executor.ts` pre-write verify; the singleton is set at activation in `extension.ts` and read by planner/runSync via `getHashCacheSingleton`. Activation log: `hash-cache: idb=<available|unavailable> warm-entries=<N>`; per-sync-run log surfaces hits/total + bytes saved per destination. The M5.2.5 probe (`src/sync/probeStat.ts` + `folderSync.probeStat`) was removed at sign-off; `src/sync/probe.ts` for M4.6 stays until M4.6 itself is signed off. The same IDB adapter is the planned foundation for M5.3's `sha256 → ParseResult` cache.
+
 ---
 
 ## Open project decisions

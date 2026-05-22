@@ -84,11 +84,6 @@
         "category": "Folder Sync"
       },
       {
-        "command": "folderSync.probeStat",
-        "title": "Folder Sync: Probe Stat (M5.2.5 diagnostic)",
-        "category": "Folder Sync"
-      },
-      {
         "command": "folderSync.showSnapshot",
         "title": "Folder Sync: Show Workspace Snapshot",
         "category": "Folder Sync"
