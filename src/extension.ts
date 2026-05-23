@@ -12,6 +12,7 @@ import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { ManifestEditorProvider } from './sync/manifestEditor';
 import { registerProbe } from './sync/probe';
+import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
 import { setParseCacheSingleton } from './sync/parseCache';
@@ -194,6 +195,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     ),
     registerProbe(context),
+    registerUploadProbe(),
     vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
       log('snapshot: showSnapshot invoked');
       await showSnapshotCommand(snapshotStore);

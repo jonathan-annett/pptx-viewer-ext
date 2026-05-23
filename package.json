@@ -112,8 +112,23 @@
         "command": "folderSync.openAdminConfig",
         "title": "Folder Sync: Open Admin Config",
         "category": "Folder Sync"
+      },
+      {
+        "command": "pptxViewer.probeUpload",
+        "title": "Pptx Info: Probe Upload (M4 diagnostic)",
+        "category": "Pptx Info"
       }
     ],
+    "configuration": {
+      "title": "Pptx Info",
+      "properties": {
+        "pptxViewer.dropboxBaseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Override the dropbox-server base URL used by the upload-to-update flow. Leave empty to use the default `https://vscode.sophtwhere.com/dropbox`. Set to e.g. `http://127.0.0.1:3030` to point at a local dev instance. The WebSocket endpoint is derived by appending `/ws` and rewriting the scheme."
+        }
+      }
+    },
     "menus": {
       "explorer/context": [
         {
