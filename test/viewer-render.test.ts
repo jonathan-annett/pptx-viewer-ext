@@ -221,12 +221,15 @@ test('renderHtml: embeds the shared decisionWiringScript so per-row checkboxes p
   );
 });
 
-test('renderHtml: nonce flows onto every <script> tag (viewer + decision wiring)', () => {
+test('renderHtml: nonce flows onto every <script> tag (viewer + decision wiring + pdf import)', () => {
   const html = renderHtml(parseResult(), NONCE);
-  // M5.1 added a second <script> for the shared decisionWiringScript. Both
-  // must carry the per-render nonce — otherwise the strict CSP blocks them.
+  // Three nonce-tagged <script> tags are expected:
+  //   1. viewer script (postMessage wiring, action handlers)
+  //   2. shared decisionWiringScript (M5.1)
+  //   3. PDF import webview bundle (M-VE-1)
+  // All must carry the per-render nonce — otherwise the strict CSP blocks them.
   const occurrences = html.split(`<script nonce="${NONCE}">`).length - 1;
-  assert.equal(occurrences, 2, 'two nonce-tagged <script> tags (viewer + decision wiring)');
+  assert.equal(occurrences, 3, 'three nonce-tagged <script> tags (viewer + decision wiring + pdf import)');
 });
 
 // ───── run ──────────────────────────────────────────────────────────────

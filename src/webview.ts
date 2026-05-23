@@ -97,16 +97,24 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
   //   - syncTargetHtml truthy   → render the supplied HTML directly (used
   //                               by tests and any legacy synchronous caller).
   //   - otherwise               → no section.
-  // Stable id `sync-target-section` lets the message handler find the host.
+  // Stable ids: `sync-target-section` is the host; `sync-target-content`
+  // wraps the inner HTML so the postMessage handler can swap only the body
+  // (leaving the <h2> heading static in the DOM, which also keeps the
+  // "Sync target" string out of the inline-script literal that would
+  // otherwise trip the renderHtml test for the no-section case).
   const syncTargetSection = opts.syncTargetLoading
     ? `<section id="sync-target-section" class="sync-target-pending">
       <h2>Sync target</h2>
-      <p class="sync-target-pending-msg">Computing\u2026</p>
+      <div id="sync-target-content">
+        <p class="sync-target-pending-msg">Computing\u2026</p>
+      </div>
     </section>`
     : opts.syncTargetHtml
     ? `<section id="sync-target-section">
       <h2>Sync target</h2>
-      ${opts.syncTargetHtml}
+      <div id="sync-target-content">
+        ${opts.syncTargetHtml}
+      </div>
     </section>`
     : '';
 
@@ -1158,8 +1166,10 @@ function viewerScript(): string {
       var section = document.getElementById('sync-target-section');
       if (!section) return;
       if (typeof m.html === 'string' && m.html.length > 0) {
+        var content = document.getElementById('sync-target-content');
+        if (!content) return;
         section.classList.remove('sync-target-pending');
-        section.innerHTML = '<h2>Sync target</h2>' + m.html;
+        content.innerHTML = m.html;
         refreshOrangeButton();
       } else {
         section.remove();
