@@ -161,13 +161,15 @@ Reflect S1/S2 in `README.md` and `PLAN.md` (the deviation table at the bottom of
 
 ## Milestones
 
-### M1 — Server additions *(work in `~/projects/dropbox-server/`)*
+### M1 — Server additions *(✅ shipped 2026-05-23)*
 
-S1, S2, S3 from the previous section. Lands as one or two commits in the dropbox-server repo. Now that **M2 is shipped**, each commit gets `git pull && pm2 restart dropbox-server` on the VPS for live validation against the deployed URL (`https://vscode.sophtwhere.com/dropbox/`). **DoD:**
+Three commits to `dropbox-server`, each pulled + `pm2 restart`'d on the VPS for live validation against `https://vscode.sophtwhere.com/dropbox/`:
 
-- `npm test` passes with new assertions added.
-- `node server.js` boots; manual probe (or `curl`/`websocat`) confirms `qrSvg` round-trips from the live URL.
-- `upload-progress` observable when posting a >1 MB file to a fresh code on the live URL.
+- **S1** (`23b9747`) — `upload-progress` frame emitted during multipart spooling. Throttled at ≥64 KB *and* ≥100 ms (whichever fires *less* often wins, so neither slow nor fast uploads flood the channel). `sizeBytes` mirrors `Content-Length` or `null`. Verified live: 512 KB upload emits ≥1 monotonic progress frame before `upload-start`.
+- **S2** (`6ac2b5f`) — `qrSvg` field added to the `{type:'code'}` reply. Renders the upload URL as a trimmed SVG (ECC level M, 1-module quiet zone) via the `qrcode` npm dep — ~0.25 ms per render in benchmarks, ~2 KB SVG on the wire. `issueCode()` is now async; the WS message handler awaits it with an `issuedCode='pending'` re-entry guard set synchronously before the await. Verified live: production WS returns a 2000-byte SVG starting with `<svg xmlns="http://www.w3.org/2000/svg" …>` and ending `</svg>`.
+- **S3** (`4a74fc8`) — `README.md` + `PLAN.md` updates documenting both protocol additions, the new `qrcode` dep, and the refreshed lifecycle diagrams.
+
+48/48 tests green. Loop established: edit on phone → push → pull on VPS → `npm install --omit=dev` (only when deps change) → `pm2 restart dropbox-server` → live verification.
 
 ### M2 — Deploy *(✅ shipped 2026-05-23, done out of order)*
 
