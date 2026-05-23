@@ -837,9 +837,9 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 
 **Slotting:** wait for M5.2 data, then implement. Prerequisite for the focus-following panel (post-v1) — that feature multiplies the validator pass across every focus change and can't ship until the cache lands.
 
-### M6 — Polish + remaining surfaces *(in flight — Phase A + B shipped, C/D/E pending)*
+### M6 — Polish + remaining surfaces *(in flight — Phase A + B + C shipped, D/E/F pending)*
 
-Sequenced as five phases so each can ship + live-test independently on the VPS harness.
+Sequenced as six phases so each can ship + live-test independently on the VPS harness. Phase E was inserted after Phase C shipped — manifest custom editor — because every other extension-managed file in the project (`.sync.jsonc`, `.admin-sync.jsonc`) has a friendly editor and shipping v1 without one for `.foldersync-manifest.json` would be a visible inconsistency at sign-off.
 
 - **Phase A — Status bar primary action *(shipped 2026-05-23, commit `7b05294`-range)*.** Status bar item's click target switched from `folderSync.showTopology` to `folderSync.openPlan` for the healthy state; falls back to `showTopology` for empty/error states where there's no useful plan to render. Tooltip updated. Workspace-wide invocation now lives on the status bar; the topology dump stays available via command palette.
 - **Phase B — Explorer context menu + folder-scoped invocation *(shipped 2026-05-23, commits `65d4715`, `44ed975`).*** New command `folderSync.syncThisFolder` registered against the explorer/context menu under `7_modification@10`. `when` clause is `explorerResourceIsFolder && folderSync.hasAnySource`, where `folderSync.hasAnySource` is a context key written from `manager.onDidChange` — menu entry disappears entirely when the workspace has no `.sync.jsonc` files. Click handler:
@@ -848,15 +848,73 @@ Sequenced as five phases so each can ship + live-test independently on the VPS h
   - **Neither** → info toast "no .sync.jsonc covers this folder".
 
   `openPlanPanel` gained an optional `opts` arg (`{ scope?, title? }`) so the scoped panel carries a folder-specific tab title (e.g. `Folder Sync — myproject/src` or `Folder Sync — myproject/build (via destinationName)`) and can sit alongside the workspace-wide one. Helpers (`findNearestSourceForPath`, `findDestinationContaining`) inlined in `src/extension.ts` — small enough not to warrant a pure module of their own, and the path-ancestor logic doesn't touch anything tsx would want to test in isolation.
-- **Phase C — Orphan `.tmp` cleanup *(pending)*.** Add `**/*.tmp` to `BUILT_IN_IGNORES` so an interrupted `executor.ts` `TMP_SUFFIX` write doesn't surface as a fake "destination-only" entry in the next plan. Pre-execute sweep in `runSync.ts` deletes orphans before the run starts; cleanup is best-effort + logged.
+- **Phase C — Orphan `.tmp` cleanup *(shipped 2026-05-23, commit `0ed7b2e`)*.** `**/*.tmp` added to `BUILT_IN_IGNORES` (`src/sync/glob.ts`) so an interrupted `executor.ts` `TMP_SUFFIX` write no longer surfaces as a fake "destination-only" entry in the next plan. Pre-execute sweep in `runSync.ts` walks each distinct `destRootUri` and deletes leftover `*.tmp` files before the run starts; best-effort, errors logged, never aborts. Pure helper `sweepOrphanTmpFiles` in `src/sync/orphanSweep.ts` (tsx-testable via `test/sync-orphan-sweep.test.ts`); vscode-wired adapter split into `src/sync/orphanSweepWired.ts` so the pure half stays loadable from tests. Drive-by: `PlanWarning` code rename `'showMediaCtrlsWithVideo'` → `'media-controls'` in `test/sync-decisions.test.ts` cleared the test-debt note from Phase B.
 - **Phase D — Manifest version-mismatch refusal *(pending)*.** `normalise()` in `manifest.ts` currently logs a version mismatch and falls back to empty — quietly losing the user's prior placement record. Change to return a discriminated union (`{ kind: 'ok', manifest }` / `{ kind: 'version-mismatch', actual }`). Planner surfaces mismatch as `skippedReason`; `runSync` skips the destination with a clear error toast linking to the manifest file.
-- **Phase E — DoD walkthrough + sign-off *(pending)*.** Walk the v1 Definition of Done checklist, close any remaining gaps, update `CLAUDE.md`'s "What's currently shipping" section to reflect M6 complete, and stamp this section as shipped.
+- **Phase E — Manifest custom editor *(pending)*.** See section below — view-only tabular editor for `.foldersync-manifest.json` with Reopen-as-text escape hatch. Sequenced after Phase D so it consumes the `ManifestReadResult` discriminated union from day one and renders the `version-mismatch` state natively.
+- **Phase F — DoD walkthrough + sign-off *(pending)*.** Walk the v1 Definition of Done checklist, close any remaining gaps, update `CLAUDE.md`'s "What's currently shipping" section to reflect M6 complete, and stamp this section as shipped.
 
 **Done when:** every Definition-of-Done bullet below is satisfied.
 
-**Pre-existing test debt surfaced during M6.B** (worth noting; not blocking):
+#### M6.E — Manifest custom editor (design)
 
-- `test/sync-decisions.test.ts:295` uses `code: 'showMediaCtrlsWithVideo'` in a `PlanWarning` fixture, but the closed union in `src/sync/plan.ts:71` is `'linked-media' | 'show-type' | 'media-controls' | 'misfiled-content'`. `tsc` errors; test never runs. Pure rename to `'media-controls'`. Bundle ships clean (esbuild does syntactic transpile only).
+**Why this exists:** The two other extension-managed files in the project — `.sync.jsonc` (room config) and `.admin-sync.jsonc` (workspace snapshot) — each have a friendly custom editor with a Reopen-as-text escape hatch (M4.5, M4.6). `.foldersync-manifest.json` is the third extension-managed file but currently opens as raw JSON. v1 shipping with the third one unsoftened is a visible inconsistency; M6.E closes the gap with the same pure/wired pattern the other two follow.
+
+**Scope:** view-only tabular renderer. The manifest is *fully* extension-managed — entries get written by the executor on each sync run, decisions by the plan webview when the user toggles "don't ask again". There's no user-facing edit affordance the editor needs to surface in v1. The Reopen-as-text button is the escape hatch when someone genuinely needs to inspect or hand-edit (corruption, debugging, manual cleanup).
+
+**Layout:**
+
+- **Header** — Manifest version (`v1`), `lastSync` timestamp (human-readable), destination root path, and a small Reopen-as-text button top-right.
+- **Entries table** — one row per `entries[key]`:
+  - **Key** (`sourceWorkspaceFolder:relPath`, monospace)
+  - **Dest path** (under the destination root, monospace)
+  - **Size** (human-readable, e.g. `1.2 MB`)
+  - **SHA-256** (first 12 chars, monospace, full hash in `title` tooltip)
+  - **Synced at** (relative time + ISO in tooltip)
+- **Decisions table** — one row per `decisions[key]`:
+  - **Key** (same shape)
+  - **Three flag columns** — `destOnlyDelete`, `collisionOverwrite`, `warningOverride` — each rendered as ✓ / ✗ or icon equivalent
+  - **Decided at** (relative + ISO in tooltip)
+- **Empty state** — if `entries` is empty: "No tracked entries — nothing has been synced to this destination yet." Same shape for decisions.
+- **Version-mismatch banner** — if `readManifest` returns `{ kind: 'version-mismatch', actual }` (post-M6.D), the tables are replaced by a banner: *"This manifest was written by a newer version of Folder Sync (version `${actual}`). The current extension only understands version 1. Sync is disabled for this destination until the extension is updated."* No tables rendered, but the Reopen-as-text button stays so the user can inspect.
+
+**Sorting:** entries and decisions both sorted by key (alphabetical) at render time. Manifests grow to dozens of entries on a real workspace; a stable order makes the file diff-friendly when the user does Reopen-as-text. No interactive sort/filter in v1 — defer to follow-up if it becomes friction.
+
+**Activation flow:**
+
+1. Registered as `folderSync.manifestEditor`, `priority: 'default'`, `filenamePattern: '**/.foldersync-manifest.json'` in `package.json` `contributes.customEditors`.
+2. On open (`resolveCustomTextEditor`): parse the document text via the existing `readManifest`-equivalent (probably a new pure `parseManifest(text)` helper that mirrors `parseSnapshot` / `parseConfig` — both `manifest.ts` and the editor consume it).
+3. Render the HTML via `renderManifestEditorHtml(viewModel)` and post to the webview.
+4. On `onDidChangeTextDocument` for the same URI (the executor writes the manifest mid-sync if the editor happens to be open), re-parse and re-render.
+
+**Reopen-as-text:** identical pattern to the admin/config editors — webview button posts `{type:'openAsText'}`, extension calls `vscode.commands.executeCommand('vscode.openWith', uri, 'default')`. Already-proven seam.
+
+**CSP:** the same locked-down policy as the other editors — `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-<random>';`. One inline script for the Reopen button click. No `img-src` needed (no thumbnails / external resources).
+
+**Module layout (pure/wired split, mirrors adminEditor pattern):**
+
+- **`src/sync/manifestEditorHtml.ts`** *(new, pure)* — `renderManifestEditorHtml(viewModel, nonce)` returns the HTML string. `viewModel` is the manifest data shaped for display (relative timestamps pre-computed, sizes humanised, sorted entry/decision arrays). Plus a `toManifestViewModel(manifest, destRootUri, now)` pure helper for tsx-side construction. tsx-testable, no vscode import.
+- **`src/sync/manifestEditor.ts`** *(new, vscode-wired)* — `ManifestEditorProvider implements CustomTextEditorProvider`. Parses the document text, computes view model, posts initial HTML, wires `onDidChangeTextDocument`, handles the `openAsText` message. Mirrors the structure of `adminEditor.ts`.
+- **`src/sync/manifest.ts`** *(modified)* — optional small refactor: extract the parse-and-validate body of `readManifest` into a pure `parseManifestText(text): ManifestReadResult` so both the editor and `readManifest` share the same code. Same pattern as `configParse.ts` vs `config.ts`. Worth doing during M6.E if straightforward; skip if the diff bloats.
+- **`src/extension.ts`** *(modified)* — register the new provider on activation.
+- **`package.json`** *(modified)* — add the `contributes.customEditors` entry.
+- **`test/sync-manifest-editor-html.test.ts`** *(new)* — render snapshot tests: empty manifest, populated entries, populated decisions, version-mismatch banner present when the result is the mismatch variant. Number-of-nonces assertion same as the other editor html tests.
+
+**Open design questions:**
+
+- **Decision flag UX.** ✓/✗ vs `Yes/No` vs traffic-light icons. Three-column layout is fine for v1; if the columns get cramped, collapse into a single "Decisions" column with comma-joined active flags (e.g. "overwrite, warning-override"). Decide during implementation.
+- **Large manifest performance.** A workspace with hundreds of synced files will have hundreds of entries. The current render is one synchronous innerHTML write — fine for hundreds, probably fine for low thousands. If it becomes slow, the fix is virtual-scrolling but that's heavy for a view-only diagnostic surface. Defer until measured.
+- **"Open in plan" affordance.** Each manifest entry corresponds to a real source file. Could the row click jump to the source's plan view? *Tempting, but deferred.* The plan webview is already accessible per-source via the explorer context menu; the manifest editor's job is to show "what's tracked here" cleanly, not duplicate plan navigation.
+- **Edit-by-deletion.** A user wanting to "forget" a tracked entry would today edit the JSON by hand. The editor could offer per-row delete buttons that route through `applyEdit` (same approach as the admin editor's Rename action) — but that's a real edit affordance with real footguns and belongs to a follow-up, not v1.
+
+**Done when:**
+
+- Opening any `.foldersync-manifest.json` in the workspace shows the tabular editor by default, with the header (version + lastSync + destRoot), entries table, decisions table, and Reopen-as-text button.
+- The editor refreshes live when the executor writes the manifest mid-sync (drop a file in a source, run sync from the status bar, watch the entries table grow without closing the editor).
+- A manifest with `version: 2` (or any unknown version) renders the version-mismatch banner instead of tables; Reopen-as-text still works.
+- Empty manifests render the empty-state message rather than empty tables.
+- Reopen-as-text opens the same file in the default JSON editor; switching back to the custom editor re-renders cleanly.
+- `renderManifestEditorHtml` is covered by `test/sync-manifest-editor-html.test.ts` for the four cases (empty, entries-only, decisions-only, version-mismatch).
+- CSP locked down to the same shape as `adminEditor` / `configEditor`; one nonced inline script for the Reopen handler.
 
 ---
 
