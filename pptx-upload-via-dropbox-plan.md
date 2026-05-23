@@ -163,24 +163,36 @@ Reflect S1/S2 in `README.md` and `PLAN.md` (the deviation table at the bottom of
 
 ### M1 — Server additions *(work in `~/projects/dropbox-server/`)*
 
-S1, S2, S3 from the previous section. Lands as one or two commits in the dropbox-server repo. **DoD:**
+S1, S2, S3 from the previous section. Lands as one or two commits in the dropbox-server repo. Now that **M2 is shipped**, each commit gets `git pull && pm2 restart dropbox-server` on the VPS for live validation against the deployed URL (`https://vscode.sophtwhere.com/dropbox/`). **DoD:**
 
 - `npm test` passes with new assertions added.
-- `node server.js` boots; manual probe with `websocat` confirms `qrSvg` round-trips.
-- `upload-progress` observable when posting a >1 MB file to a fresh code.
+- `node server.js` boots; manual probe (or `curl`/`websocat`) confirms `qrSvg` round-trips from the live URL.
+- `upload-progress` observable when posting a >1 MB file to a fresh code on the live URL.
 
-### M2 — Deploy *(VPS work, user-led)*
+### M2 — Deploy *(✅ shipped 2026-05-23, done out of order)*
 
-Not a coding milestone but listed for completeness.
+Landed before M1 — the baseline `v0.1.0` server was deployed first so the rest of the pipeline could be built against the live URL rather than a local-only `localhost:3030`. Sequence:
 
-- User pastes `Caddyfile.snippet` *inside* the existing `vscode.sophtwhere.com { … }` site block.
-- `sudo systemctl reload caddy`.
-- Clone + `npm install --omit=dev` in `~/dropbox-server` on the VPS.
-- `PUBLIC_BASE_URL=https://vscode.sophtwhere.com/dropbox pm2 start ecosystem.config.cjs`.
-- Verify: `curl https://vscode.sophtwhere.com/dropbox/healthz` returns `OK`.
-- Verify: `curl -v -H 'Upgrade: websocket' -H 'Connection: upgrade' https://vscode.sophtwhere.com/dropbox/ws` returns 101 Switching Protocols.
+- **Caddyfile** — `handle_path /dropbox/*` block inserted inside the existing `vscode.sophtwhere.com { … }` site, wrapping the existing catch-all in `handle { reverse_proxy 127.0.0.1:3001 }` to keep routing explicit. `request_body { max_size 500MB }` to match `SERVER_MAX_BYTES`. Wildcard subdomain block untouched. Backup at `/etc/caddy/Caddyfile.bak.20260523-224018`. `sudo caddy validate` clean before reload.
+- **Checkout** — `~/dropbox-server` cloned from `https://github.com/jonathan-annett/dropbox-server.git`, `npm install --omit=dev` (3 packages: `busboy`, `ws`, plus deps).
+- **pm2** — `dropbox-server` running on `127.0.0.1:3030` alongside the existing `pptx-watch` + `pptx-dev-server`. `pm2 save`d so the unit survives reboots.
 
-Until M2 is done, M3+ can be built but only smoke-tested against a local server on `localhost:3030`.
+**pm2 ESM auto-boot bugfix (commit `8f0eef6`):** pm2's process launcher `import()`s ESM scripts, which makes `process.argv[1]` point at the launcher rather than `server.js`. The existing `isEntryPoint` guard (designed to keep the test path clean) silently swallowed the production boot — process appeared *online* in pm2, port 3030 unbound, logs empty. Fix: explicit `DROPBOX_AUTOBOOT=1` env-var override in `server.js` + set in `ecosystem.config.cjs`. Banner now logs ` (DROPBOX_AUTOBOOT=1)` suffix when the override fired, so the boot reason is visible. Tests unaffected (they import the module without the env var). Captured as a feedback memory.
+
+**End-to-end verification (live):**
+- `GET https://vscode.sophtwhere.com/dropbox/healthz` → `OK` (200)
+- `GET https://vscode.sophtwhere.com/dropbox/` → 200, 691-byte upload form
+- WS upgrade on `/dropbox/ws` → `HTTP/1.1 101 Switching Protocols`
+- `GET https://vscode.sophtwhere.com/` (vscode-web) → 200 (unaffected by the Caddy change)
+
+**Deploy loop established** (mirrors `pptx-watch`):
+```
+# on phone
+git push origin main
+# on VPS
+cd ~/dropbox-server && git pull --ff-only && pm2 restart dropbox-server
+```
+No `node --watch` — explicit restart is the convention, per substrate.
 
 ### M3 — Pure modules
 
