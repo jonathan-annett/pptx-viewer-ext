@@ -35,6 +35,7 @@
 // hard error). Create a fresh client for a retry.
 
 import { parseServerFrame, type ServerMessage } from './uploadProtocol';
+import { log } from '../log';
 
 export interface UploadRequest {
   /** Label string the uploader sees on the form. ≤200 chars per server. */
@@ -190,14 +191,22 @@ export class UploadClient {
    * (useful for retypes), so we don't enforce idempotency here.
    */
   sendOtp(otpHash: string): void {
-    if (this._phase === 'closed' || this._phase === 'done') return;
-    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this._phase === 'closed' || this._phase === 'done') {
+      log(`uploadClient.sendOtp: dropped — phase=${this._phase}`);
+      return;
+    }
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      log(`uploadClient.sendOtp: dropped — ws.readyState=${this.ws.readyState} (need ${WebSocket.OPEN})`);
+      return;
+    }
     try {
       this.ws.send(JSON.stringify({ type: 'otp', otpHash }));
-    } catch {
+      log(`uploadClient.sendOtp: sent (hash=${otpHash.slice(0, 12)}…)`);
+    } catch (e) {
       // Same swallow rationale as `cancel()` — surfacing here would be
       // double-counted; the WS close handler will fire and the caller will
       // see `closed` shortly.
+      log(`uploadClient.sendOtp: ws.send threw — ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
