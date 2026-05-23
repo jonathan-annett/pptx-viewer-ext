@@ -647,9 +647,30 @@ function viewerScript(): string {
   // whether to dismiss / re-render / reopen the WS.
   function openUploadModal(html){
     if (!modalHost) return;
+    // The host re-renders the whole modal on every state transition AND
+    // every countdown tick (once per second). Innocuous for the QR/code
+    // section but corrosive for the OTP <input>: its value and focus would
+    // be wiped each second. Snapshot before the swap and restore after.
+    var prevOtpInput = document.getElementById('upload-otp-input');
+    var prevOtpValue = prevOtpInput ? prevOtpInput.value : null;
+    var prevOtpHadFocus = prevOtpInput && document.activeElement === prevOtpInput;
+    var prevOtpSelStart = prevOtpInput ? prevOtpInput.selectionStart : null;
+    var prevOtpSelEnd = prevOtpInput ? prevOtpInput.selectionEnd : null;
     modalHost.innerHTML = html;
     modalHost.classList.add('open');
     modalHost.setAttribute('aria-hidden', 'false');
+    var newOtpInput = document.getElementById('upload-otp-input');
+    if (newOtpInput && prevOtpValue !== null && !newOtpInput.disabled) {
+      newOtpInput.value = prevOtpValue;
+      if (prevOtpHadFocus) {
+        try {
+          newOtpInput.focus();
+          if (prevOtpSelStart !== null && prevOtpSelEnd !== null) {
+            newOtpInput.setSelectionRange(prevOtpSelStart, prevOtpSelEnd);
+          }
+        } catch (_) {}
+      }
+    }
     var cancelBtn = document.getElementById('upload-cancel-btn');
     var closeBtn = document.getElementById('upload-close-btn');
     var retryBtn = document.getElementById('upload-retry-btn');
@@ -691,6 +712,49 @@ function viewerScript(): string {
         vlog('upload copy failed: ' + (err && err.message || err));
       }
     });
+
+    // OTP entry — present only in the waiting phase with status other than
+    // accepted. The host renderer decides whether the input is in the DOM;
+    // we just attach listeners if it is. Both the submit button and Enter
+    // inside the input post the same message.
+    var otpInput = document.getElementById('upload-otp-input');
+    var otpSubmitBtn = document.getElementById('upload-otp-submit-btn');
+    function submitOtpFromInput(){
+      if (!otpInput) return;
+      var raw = (otpInput.value || '').trim();
+      if (!/^\d{6}$/.test(raw)) {
+        // Local-side guard so we don't bounce a postMessage that the host
+        // will obviously reject. Final source of truth is uploadFlow.
+        otpInput.focus();
+        otpInput.select();
+        return;
+      }
+      try { vscode.postMessage({type:'uploadOtpSubmit', otp: raw}); } catch (_) {}
+    }
+    if (otpInput) {
+      // Autofocus on first render of the waiting phase, but not on re-renders
+      // (the countdown ticks once a second and would steal focus mid-typing).
+      // We detect "fresh insertion" by checking whether the input already
+      // has a value set or is currently focused — if neither, it's new.
+      if (document.activeElement !== otpInput && !otpInput.value) {
+        try { otpInput.focus(); } catch (_) {}
+      }
+      otpInput.addEventListener('keydown', function(ev){
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          submitOtpFromInput();
+        }
+      });
+      // Strip non-digit characters on input so the user can't paste in junk.
+      // maxlength on the element handles length; this handles content.
+      otpInput.addEventListener('input', function(){
+        var cleaned = otpInput.value.replace(/\D+/g, '');
+        if (cleaned !== otpInput.value) otpInput.value = cleaned;
+      });
+    }
+    if (otpSubmitBtn) {
+      otpSubmitBtn.addEventListener('click', submitOtpFromInput);
+    }
   }
 
   // ----- Extract media (dropdown + button) -----

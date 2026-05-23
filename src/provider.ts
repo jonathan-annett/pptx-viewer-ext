@@ -204,6 +204,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         source?: unknown;
         fileName?: unknown;
         bytes?: unknown;
+        otp?: unknown;
       };
 
       if (m.type === 'viewer-log' && typeof m.message === 'string') {
@@ -381,6 +382,16 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       if (m.type === 'uploadRetry') {
         if (currentUploadFlow) {
           currentUploadFlow.retry();
+        }
+        return;
+      }
+
+      if (m.type === 'uploadOtpSubmit' && typeof m.otp === 'string') {
+        // OTP came from a user typing into the modal. The flow validates the
+        // 6-digit format again on its side and hashes before forwarding to
+        // the WS — we just route it.
+        if (currentUploadFlow) {
+          currentUploadFlow.submitOtp(m.otp);
         }
         return;
       }

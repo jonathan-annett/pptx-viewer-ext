@@ -26,7 +26,23 @@ export type UploadModalState =
   | { phase: 'connecting' }
   /**
    * Code received, waiting for the phone to upload. This is the "happy
-   * path" landing screen — QR + URL + code + countdown to TTL.
+   * path" landing screen — QR + URL + code + countdown to TTL, plus an
+   * OTP entry box that the desktop user fills in by reading the 6-digit
+   * code off the phone's screen.
+   *
+   * `otpStatus` is the per-render snapshot of the OTP handshake with the
+   * server:
+   *   - 'pending': haven't sent SHA(otp) yet. Input box is editable; phone
+   *     uploads will be 403'd by the server until we send.
+   *   - 'sent':    sent {type:'otp'} over WS, awaiting otp-ack. Input is
+   *     disabled to prevent double-submits.
+   *   - 'accepted': otp-ack arrived. The hidden field on the phone's form
+   *     either matches (upload proceeds) or doesn't (server keeps refusing
+   *     and the phone retries). Input is replaced with a "locked" badge.
+   *   - 'rejected': sub-state we don't actually reach today — the server
+   *     doesn't tell us about hash mismatches (intentional, to avoid
+   *     noisy WS frames mid-typing); included for future use if/when the
+   *     server gains an explicit "OTP mismatch" notification.
    */
   | {
       phase: 'waiting';
@@ -35,6 +51,13 @@ export type UploadModalState =
       qrSvg: string;
       /** ISO-8601 instant; the countdown is computed against `nowMs`. */
       expiresAt: string;
+      otpStatus: 'pending' | 'sent' | 'accepted' | 'rejected';
+      /**
+       * Local-side OTP-handling error. Populated when the user typed a
+       * non-numeric / wrong-length OTP into the input. Distinct from a
+       * server-side rejection (which we currently don't surface).
+       */
+      otpError?: string;
     }
   /**
    * Phone is uploading to the server. Driven by `upload-progress` frames.
@@ -116,6 +139,7 @@ function renderBody(opts: ModalRenderOptions): string {
     case 'waiting': {
       const now = typeof opts.nowMs === 'number' ? opts.nowMs : Date.now();
       const countdown = formatCountdown(s.expiresAt, now);
+      const otpBlock = renderOtpBlock(s.otpStatus, s.otpError);
       // The QR SVG comes straight from the server. The server's qrcode lib
       // emits a clean <svg> with no embedded scripts; the existing webview
       // CSP (default-src 'none'; img-src data:) means a *foreign* <img> wouldn't
@@ -135,7 +159,7 @@ ${s.qrSvg}
           <button type="button" class="upload-copy-btn" id="upload-copy-btn" aria-label="Copy URL">Copy</button>
         </p>
         <p class="upload-countdown" id="upload-countdown">${escapeHtml(countdown)}</p>
-        <p class="upload-hint">Open the URL on a phone and pick the replacement file.</p>
+${otpBlock}
       </div>
     </div>`;
     }
@@ -180,6 +204,62 @@ ${s.qrSvg}
       <p>File received. Updating the viewer…</p>
     </div>`;
   }
+}
+
+// ───── OTP entry block (rendered inside `waiting`) ─────────────────────
+//
+// Layout choices:
+//   - inputmode="numeric" + autocomplete="one-time-code" so phone keyboards
+//     pop the number row by default. (The desktop user is still typing — the
+//     attributes don't hurt anything there.)
+//   - maxlength=6 + pattern enforced in JS in webview.ts; we also do a
+//     server-equivalent format check in uploadFlow before hashing.
+//   - The submit button is a sibling, not a wrapper <form> — we don't want
+//     an accidental Enter press to submit a hypothetical outer form. The
+//     inline-script wiring (webview.ts) adds an Enter-to-submit handler on
+//     the input itself.
+//
+// `accepted` collapses the block to a tiny "locked" badge instead of the
+// whole input + button surface, freeing up vertical space for the QR/code
+// section. The wiring code never transitions back from `accepted` to
+// `pending` in the same modal lifetime.
+
+function renderOtpBlock(
+  status: 'pending' | 'sent' | 'accepted' | 'rejected',
+  error?: string,
+): string {
+  if (status === 'accepted') {
+    return `        <p class="upload-otp upload-otp-accepted" id="upload-otp-block">
+          <span class="upload-otp-badge" aria-hidden="true">✓</span>
+          Code locked in — waiting for the upload from the phone.
+        </p>`;
+  }
+  const disabled = status === 'sent' ? ' disabled' : '';
+  const btnDisabled = status === 'sent' ? ' disabled' : '';
+  const hint = status === 'sent'
+    ? `Sending…`
+    : `The phone is showing a 6-digit code. Type it here so the upload can be relayed back.`;
+  const errLine = error
+    ? `<p class="upload-otp-error" id="upload-otp-error">${escapeHtml(error)}</p>`
+    : ``;
+  return `        <div class="upload-otp" id="upload-otp-block">
+          <label class="upload-otp-label" for="upload-otp-input">One-time code from the phone</label>
+          <div class="upload-otp-row">
+            <input
+              type="text"
+              id="upload-otp-input"
+              class="upload-otp-input"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+              maxlength="6"
+              pattern="[0-9]{6}"
+              placeholder="······"${disabled}
+              aria-describedby="upload-otp-hint">
+            <button type="button" class="action-btn" id="upload-otp-submit-btn"${btnDisabled}>Confirm</button>
+          </div>
+          <p class="upload-otp-hint" id="upload-otp-hint">${escapeHtml(hint)}</p>
+          ${errLine}
+        </div>`;
 }
 
 // ───── action buttons per-phase ────────────────────────────────────────
@@ -459,6 +539,78 @@ export function uploadModalCss(): string {
       color: var(--vscode-errorForeground);
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 0.92em;
+    }
+    /* OTP block — lives at the bottom of the waiting layout's right column.
+       margin-top:6px puts a small visual gap below the countdown without
+       cramming up against it. The accepted state collapses to a single line. */
+    .upload-otp {
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .upload-otp-accepted {
+      color: var(--vscode-charts-green, #4caf50);
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0 0;
+    }
+    .upload-otp-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--vscode-charts-green, #4caf50);
+      color: var(--vscode-editor-background, #fff);
+      font-size: 0.85em;
+      font-weight: 700;
+    }
+    .upload-otp-label {
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .upload-otp-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .upload-otp-input {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 1.25em;
+      letter-spacing: 0.3em;
+      text-align: center;
+      padding: 4px 8px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+      border-radius: 3px;
+    }
+    .upload-otp-input:focus {
+      outline: 1px solid var(--vscode-focusBorder, #007fd4);
+      outline-offset: -1px;
+    }
+    .upload-otp-input:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .upload-otp-hint {
+      margin: 0;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .upload-otp-error {
+      margin: 0;
+      font-size: 0.85em;
+      color: var(--vscode-errorForeground);
     }
   `;
 }

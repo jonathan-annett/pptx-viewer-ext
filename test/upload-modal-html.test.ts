@@ -32,13 +32,17 @@ const FIXED_NOW = Date.parse('2026-05-23T10:15:00.000Z');
 const EXPIRES_AT = '2026-05-23T10:25:00.000Z'; // +10 minutes
 const SAMPLE_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25"><path d="M0 0h25v25H0z"/></svg>';
 
-function waitingState(): UploadModalState {
+function waitingState(
+  overrides: Partial<Extract<UploadModalState, { phase: 'waiting' }>> = {},
+): UploadModalState {
   return {
     phase: 'waiting',
     code: 'ABCDE',
     url: 'https://vscode.sophtwhere.com/dropbox/ABCDE',
     qrSvg: SAMPLE_SVG,
     expiresAt: EXPIRES_AT,
+    otpStatus: 'pending',
+    ...overrides,
   };
 }
 
@@ -98,6 +102,57 @@ test('waiting: countdown floors at 0:00 when expired', () => {
     nowMs: past,
   });
   assert(/expires in 0:00/.test(html), 'countdown floor at 0:00');
+});
+
+// ─── phase: waiting — OTP block ─────────────────────────────────────────
+
+test('waiting/otp pending: renders input + submit button + hint', () => {
+  const html = renderUploadModalHtml({
+    fileName: 'sample.pptx',
+    state: waitingState(),
+    nowMs: FIXED_NOW,
+  });
+  assert(/id="upload-otp-input"/.test(html), 'input present');
+  assert(/id="upload-otp-submit-btn"/.test(html), 'submit btn present');
+  assert(/inputmode="numeric"/.test(html), 'numeric inputmode');
+  assert(/autocomplete="one-time-code"/.test(html), 'OTP autocomplete hint');
+  assert(/maxlength="6"/.test(html), 'maxlength=6');
+  assert(/The phone is showing a 6-digit code/.test(html), 'hint copy present');
+  assert(!/upload-otp-error/.test(html), 'no error line when otpError absent');
+});
+
+test('waiting/otp sent: input and button are disabled, hint changes', () => {
+  const html = renderUploadModalHtml({
+    fileName: 'sample.pptx',
+    state: waitingState({ otpStatus: 'sent' }),
+    nowMs: FIXED_NOW,
+  });
+  // The disabled attribute is on both the input and the submit button.
+  assert(/id="upload-otp-input"[^>]*disabled/.test(html), 'input disabled');
+  assert(/id="upload-otp-submit-btn"[^>]*disabled/.test(html), 'submit btn disabled');
+  assert(/Sending/.test(html), 'sending hint visible');
+});
+
+test('waiting/otp accepted: collapses to "locked" badge, no input', () => {
+  const html = renderUploadModalHtml({
+    fileName: 'sample.pptx',
+    state: waitingState({ otpStatus: 'accepted' }),
+    nowMs: FIXED_NOW,
+  });
+  assert(/upload-otp-accepted/.test(html), 'accepted block present');
+  assert(/Code locked in/.test(html), 'locked copy present');
+  assert(!/id="upload-otp-input"/.test(html), 'input removed once accepted');
+  assert(!/id="upload-otp-submit-btn"/.test(html), 'submit btn removed once accepted');
+});
+
+test('waiting/otp error: shows escaped error message under input', () => {
+  const html = renderUploadModalHtml({
+    fileName: 'sample.pptx',
+    state: waitingState({ otpError: 'Code must be <6> digits.' }),
+    nowMs: FIXED_NOW,
+  });
+  assert(/id="upload-otp-error"/.test(html), 'error line present');
+  assert(html.includes('Code must be &lt;6&gt; digits.'), 'error HTML-escaped');
 });
 
 // ─── phase: uploading ───────────────────────────────────────────────────

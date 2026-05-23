@@ -3,9 +3,10 @@
 // The dropbox-server (sibling repo `~/projects/dropbox-server/`) defines two
 // directions on a single WS connection:
 //
-//   requester → server : `request`, `cancel`
-//   server    → requester (us) : `code`, `upload-progress`, `upload-start`,
-//                                `upload-end`, `expired`, `cancelled`, `error`
+//   requester → server : `request`, `cancel`, `otp`
+//   server    → requester (us) : `code`, `otp-ack`, `upload-progress`,
+//                                `upload-start`, `upload-end`, `expired`,
+//                                `cancelled`, `error`
 //                                + binary frames (in-order chunks of the file).
 //
 // The extension only ever sits on the *requester* side, so this module only
@@ -68,6 +69,15 @@ export type CancelledMessage = {
   type: 'cancelled';
 };
 
+/**
+ * Sent in reply to a client `otp` message. Acknowledgement only — no payload.
+ * The server has now stored the hash; subsequent uploads will be checked
+ * against it.
+ */
+export type OtpAckMessage = {
+  type: 'otp-ack';
+};
+
 export type ErrorMessage = {
   type: 'error';
   message: string;
@@ -80,6 +90,7 @@ export type ServerMessage =
   | UploadEndMessage
   | ExpiredMessage
   | CancelledMessage
+  | OtpAckMessage
   | ErrorMessage;
 
 export type ServerMessageType = ServerMessage['type'];
@@ -125,6 +136,7 @@ export function validateServerMessage(msg: unknown): ValidationResult<ServerMess
     case 'upload-end': return validateUploadEnd(m);
     case 'expired': return validateExpired(m);
     case 'cancelled': return validateCancelled(m);
+    case 'otp-ack': return validateOtpAck(m);
     case 'error': return validateError(m);
     default: return { ok: false, error: `unknown message type "${m.type}"` };
   }
@@ -229,6 +241,14 @@ function validateCancelled(m: Record<string, any>): ValidationResult<CancelledMe
     return { ok: false, error: `cancelled has unexpected fields: ${extras.join(', ')}` };
   }
   return { ok: true, value: { type: 'cancelled' } };
+}
+
+function validateOtpAck(m: Record<string, any>): ValidationResult<OtpAckMessage> {
+  const extras = Object.keys(m).filter((k) => k !== 'type');
+  if (extras.length > 0) {
+    return { ok: false, error: `otp-ack has unexpected fields: ${extras.join(', ')}` };
+  }
+  return { ok: true, value: { type: 'otp-ack' } };
 }
 
 function validateError(m: Record<string, any>): ValidationResult<ErrorMessage> {

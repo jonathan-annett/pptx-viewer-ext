@@ -2,9 +2,11 @@
 
 ## Status (2026-05-24)
 
-**Shipped:** M1 (server S1+S2+S3), M2 (deploy), M3 (pure extension modules), M4 (wired WS client + live probe), and M5 (button + modal wiring — feature is now user-reachable). Two buttons in the viewer's action row: "Browse to Update…" (renamed from "Update…") and "Upload to Update…". Click on the new button posts `{type:'uploadOpen'}` to the host, which spins up an `UploadFlow` (`src/upload/uploadFlow.ts`) that owns the WS session + state machine + modal HTML re-renders. Every transition (`connecting` → `waiting` → `uploading` → `applying` → `done` plus terminal `expired`/`error`) re-renders the full modal via `renderUploadModalHtml()` and posts `{type:'uploadModal', html}` to the webview; a 1 Hz countdown ticker keeps the TTL line live during `waiting`. On `complete` the flow renders the brief "Done" splash and posts `{type:'uploadedBytes', fileName, bytes}` to the webview. The webview owns the routing decision: filename-extension-first + `%PDF` magic-bytes fallback. PDFs are wrapped in a `new File([bytes], …, {type:'application/pdf'})` and fed to the existing `handlePdfFile()` flow (so the PDF→PPTX import modal opens preloaded with the uploaded PDF). PPTXs round-trip back as `{type:'ingest', source:'upload', …}`; the provider's `handleIngest` was extended with `'upload'` as a third source alongside `'picker'` and `'drop'`, routed identically to `'picker'` (no compare modal — the phone upload itself is the affirmation), with the same parse-cache eviction guard the PDF import already had. Cancel/Close/Retry/Copy buttons inside the modal all post typed messages back to the host (`uploadCancel`/`uploadClose`/`uploadRetry`); Copy reads the `<a id="upload-url">` href and writes to clipboard with a 1.5 s "Copied" flash. The shared base URL resolver lives in `src/upload/baseUrl.ts` (used by both `uploadFlow` and `probeUpload`). Typecheck clean; existing test suites green (parse, viewer-render, upload-protocol, upload-modal-html).
+**Shipped:** M1 (server S1+S2+S3), M2 (deploy), M3 (pure extension modules), M4 (wired WS client + live probe), M5 (button + modal wiring — feature is now user-reachable), and **M-OTP (phone-invents-OTP security gate — shipped 2026-05-24, both server and extension)**. Two buttons in the viewer's action row: "Browse to Update…" (renamed from "Update…") and "Upload to Update…". Click on the new button posts `{type:'uploadOpen'}` to the host, which spins up an `UploadFlow` (`src/upload/uploadFlow.ts`) that owns the WS session + state machine + modal HTML re-renders. Every transition (`connecting` → `waiting` → `uploading` → `applying` → `done` plus terminal `expired`/`error`) re-renders the full modal via `renderUploadModalHtml()` and posts `{type:'uploadModal', html}` to the webview; a 1 Hz countdown ticker keeps the TTL line live during `waiting`. On `complete` the flow renders the brief "Done" splash and posts `{type:'uploadedBytes', fileName, bytes}` to the webview. The webview owns the routing decision: filename-extension-first + `%PDF` magic-bytes fallback. PDFs are wrapped in a `new File([bytes], …, {type:'application/pdf'})` and fed to the existing `handlePdfFile()` flow (so the PDF→PPTX import modal opens preloaded with the uploaded PDF). PPTXs round-trip back as `{type:'ingest', source:'upload', …}`; the provider's `handleIngest` was extended with `'upload'` as a third source alongside `'picker'` and `'drop'`, routed identically to `'picker'` (no compare modal — the phone upload itself is the affirmation), with the same parse-cache eviction guard the PDF import already had. Cancel/Close/Retry/Copy buttons inside the modal all post typed messages back to the host (`uploadCancel`/`uploadClose`/`uploadRetry`); Copy reads the `<a id="upload-url">` href and writes to clipboard with a 1.5 s "Copied" flash. The shared base URL resolver lives in `src/upload/baseUrl.ts` (used by both `uploadFlow` and `probeUpload`). Typecheck clean; existing test suites green (parse, viewer-render, upload-protocol, upload-modal-html).
 
 **Next:** M6 — progress UI tightening (mostly already in place via the modal renderer; the carry-over is confirming both bars visibly animate on a >1 MB upload over the live VPS) and M7 — polish + sign-off (delete `probeUpload.ts` + its command, error-path walkthrough, substrate CLAUDE.md update under "What's currently shipping", DoD verification).
+
+**M-OTP recap:** The phone generates a 6-digit code via `crypto.getRandomValues` on page load and displays it in a yellow panel above the file picker. The VS Code modal (during `waiting`) shows an OTP input; on submit the extension hashes `SHA-256(otp)` via `crypto.subtle.digest` and ships it over the existing WS as `{type:'otp', otpHash}`. The phone sends the same hash as a hidden `otpHash` field in the multipart form (`busboy.on('field', …)`). The server holds both hashes against the same code session and 403s any upload whose hashes don't match (or where either hash is missing). Security rationale: a stranger who snaps the QR can't do anything without physically asking the VS Code operator for the 6-digit code, which makes them visible. The OTP block in the modal goes through four render states (`pending` → `sent` → `accepted` → optional `rejected`); on `accepted` the countdown timer starts. Pure renderer in `src/upload/uploadModalHtml.ts` with snapshot/restore of input focus + selection across 1 Hz re-renders in `src/webview.ts`. Server tests: 7 OTP validator + 5 OTP gate e2e (61/61 total). Extension tests: 4 OTP render-state tests added to `test/upload-modal-html.test.ts` (24/24 + 20/20 protocol).
 
 **Carry-over for M7:** delete `src/upload/probeUpload.ts` + its command + the `pptxViewer.dropboxBaseUrl` setting (or keep the setting as a deliberate user-facing knob if it earns its keep). Same throwaway arc as `src/sync/probe.ts` for M4.6.
 
@@ -251,6 +253,40 @@ No `node --watch` — explicit restart is the convention, per substrate.
 - Upload a `.pdf` → PDF→PPTX modal opens with the uploaded PDF preloaded.
 - Cancel button drops the WS and closes the modal cleanly.
 - TTL expiry → modal shows expired state + retry button.
+
+### M-OTP — Phone-invents-OTP security gate *(✅ shipped 2026-05-24, both server and extension)*
+
+The QR code alone is a bearer credential — anyone walking past who scans it can upload arbitrary bytes into the viewer. M-OTP closes that gap without adding auth or accounts: the phone invents a 6-digit code on page load, the user reads it off the phone and types it into the VS Code modal, and the server only relays the upload when both sides have committed to the same hash.
+
+**Protocol:** four-step handshake layered on the existing WS session.
+
+1. Phone generates `otp = (crypto.getRandomValues % 1_000_000).padStart(6, '0')` at page load and renders it in a yellow `.otp-block` panel above the file input.
+2. VS Code user reads the OTP off the phone, types it into the modal's OTP input (digit-only filter, Enter submits). The extension computes `SHA-256(otp)` via `crypto.subtle.digest` and sends `{type:'otp', otpHash}` over the existing WS; server replies `{type:'otp-ack'}`.
+3. Phone computes the same `SHA-256(otp)` and ships it as a hidden `otpHash` field in the multipart upload form.
+4. Server's busboy captures both hashes against the same code session; if either is missing or they don't match, the upload is 403'd before reaching disk.
+
+**Server side (`~/projects/dropbox-server/`):**
+- `protocol.js` — `validateOtp` (lowercased 64-char hex) + `validateOtpAck`.
+- `server.js` — `'otp'` WS dispatch stores `state.otpHash`, `bb.on('field', …)` captures `formOtpHash`, 403 gate fires after the rejectedMime check.
+- `upload.html` — yellow panel + hidden input, `crypto.getRandomValues` OTP, `crypto.subtle.digest` hash wired through a new `doSubmit()` function awaited via `hashReady.then(doSubmit)`.
+- `test/helpers.js` — `issueCode`/`postFile` default to a matched OTP pair so existing happy-path tests continue to pass; opt-out via `{otp: null}` / `{otpHash: null}` for gate-failure tests.
+- 7 OTP validator tests + 5 OTP gate e2e tests; 61/61 total.
+
+**Extension side:**
+- `src/upload/uploadProtocol.ts` — `OtpAckMessage` added to the discriminated union + validator.
+- `src/upload/uploadClient.ts` — `sendOtp(otpHash)` method.
+- `src/upload/uploadModalHtml.ts` — waiting-state gains `otpStatus: 'pending'|'sent'|'accepted'|'rejected'` + `otpError?`. Renders four UI shapes: pending (input + submit), sent (disabled, "checking…"), accepted (collapsed green badge with checkmark), error (red message under input).
+- `src/upload/uploadFlow.ts` — `submitOtp(otp)` validates `/^\d{6}$/`, transitions to `sent`, hashes via a module-private `sha256Hex`, calls `client.sendOtp`. `'otp-ack'` handler flips `otpStatus` to `accepted` and starts the countdown timer (timer is gated on `accepted` rather than on receiving the code, so an unaccepted session expires by inactivity instead of letting the QR sit live).
+- `src/webview.ts` — OTP input wired with snapshot/restore of value + focus + selection across the 1 Hz countdown re-renders (otherwise typing would lose focus every tick). Enter-key handler, digit-only `replace(/\D+/g, '')` filter, autofocus on first render. Posts `{type:'uploadOtpSubmit', otp}`.
+- `src/provider.ts` — `uploadOtpSubmit` routed to `currentUploadFlow.submitOtp(otp)`.
+- `test/upload-modal-html.test.ts` — 4 new render-state tests; 24/24.
+
+**Security rationale (user's framing):** "if a third party walking by sees the QR code and scans it they can't do anything with it because all they get is a 6 digit random number they have to hand to someone, which physically identifies them." The OTP makes the credential bi-modal: the QR alone gets you a connection, but committing bytes requires speaking-distance proximity to the operator. No accounts, no tokens, no server-side state beyond what already lived per-session.
+
+**Design notes:**
+- Server stays quiet on OTP gate failures — no `error` frame back to the desktop side. The desktop has no way to distinguish "still typing" from "wrong code", and a noisy server would spam the modal during normal use. Phone gets the 403 directly.
+- `otp-ack` arriving in any phase other than `waiting` is silently dropped — the gate has already passed by then.
+- Countdown is gated on `otpStatus === 'accepted'` so a session sitting at `pending` doesn't burn its TTL while the user is still walking across the room.
 
 ### M6 — Progress UI
 

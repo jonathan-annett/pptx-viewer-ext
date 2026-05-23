@@ -180,6 +180,28 @@ export class UploadClient {
   }
 
   /**
+   * Send `{type:'otp', otpHash:<hex>}` to the server. The hash is bound to
+   * the upload session and must match the hidden form field the phone POSTs
+   * before the server will relay any bytes. Caller is responsible for the
+   * SHA-256: it lives in the wiring layer (`uploadFlow`) where we have a
+   * webview/host boundary the OTP string crosses.
+   *
+   * Re-sending overwrites the previously stored hash on the server side
+   * (useful for retypes), so we don't enforce idempotency here.
+   */
+  sendOtp(otpHash: string): void {
+    if (this._phase === 'closed' || this._phase === 'done') return;
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(JSON.stringify({ type: 'otp', otpHash }));
+    } catch {
+      // Same swallow rationale as `cancel()` — surfacing here would be
+      // double-counted; the WS close handler will fire and the caller will
+      // see `closed` shortly.
+    }
+  }
+
+  /**
    * Drop the WS without telling the server. Use for panel disposal or
    * unrecoverable client-side errors; for a user-initiated cancel prefer
    * `cancel()` so the server reclaims the code immediately.

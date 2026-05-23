@@ -49,6 +49,20 @@ export interface UploadFlowHandle {
   cancel(): void;
   close(): void;
   retry(): void;
+  /**
+   * Submit a 6-digit OTP from the modal input. The OTP is the code the
+   * phone has invented and displayed on its upload form; the desktop user
+   * reads it off the phone's screen and types it here. We SHA-256 it and
+   * send the hash to the server, which then gates the relay on the phone
+   * presenting the same hash in its multipart form. Surfacing the hashing
+   * here (rather than in webview JS) keeps the secret out of the webview's
+   * postMessage trail.
+   *
+   * No-op if the flow has already moved past `waiting`. Local validation
+   * failures (non-numeric / wrong length) re-render the waiting state with
+   * an inline error rather than transitioning to the global `error` phase.
+   */
+  submitOtp(otp: string): void;
   dispose(): void;
 }
 
@@ -146,6 +160,59 @@ class UploadFlow implements UploadFlowHandle {
     this.openClient();
   }
 
+  submitOtp(otp: string): void {
+    if (this.disposed) return;
+    // Only relevant in the `waiting` phase — once the upload has started, the
+    // phone has already presented its hash and the server has made its
+    // decision; there's nothing to (re-)submit.
+    if (this.state.phase !== 'waiting') {
+      log(`upload[${this.fileName}]: submitOtp ignored in phase=${this.state.phase}`);
+      return;
+    }
+    const cleaned = (otp ?? '').trim();
+    if (!/^\d{6}$/.test(cleaned)) {
+      this.transition({
+        ...this.state,
+        otpStatus: 'pending',
+        otpError: 'Code must be exactly 6 digits.',
+      });
+      this.startCountdownTimer();
+      return;
+    }
+    // Flip the UI to 'sent' immediately so the user can't double-click while
+    // we're hashing. Hashing is sub-millisecond on any device that runs
+    // vscode.dev, but the discipline is the same as anywhere — UI commits
+    // before async work starts.
+    this.transition({ ...this.state, otpStatus: 'sent', otpError: undefined });
+    this.startCountdownTimer();
+
+    void (async () => {
+      try {
+        const hash = await sha256Hex(cleaned);
+        // State may have changed while we were hashing (cancel, error, etc.).
+        // Bail without sending if we're no longer in the waiting phase.
+        if (this.disposed) return;
+        if (this.state.phase !== 'waiting') return;
+        this.client?.sendOtp(hash);
+        // We don't optimistically mark accepted — wait for the server's
+        // otp-ack so a transport failure doesn't silently leave the form
+        // in a misleading "locked" state.
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`upload[${this.fileName}]: OTP hashing failed — ${message}`);
+        if (this.disposed) return;
+        if (this.state.phase === 'waiting') {
+          this.transition({
+            ...this.state,
+            otpStatus: 'pending',
+            otpError: `Could not compute code: ${message}`,
+          });
+          this.startCountdownTimer();
+        }
+      }
+    })();
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -197,8 +264,22 @@ class UploadFlow implements UploadFlowHandle {
             url: m.url,
             qrSvg: m.qrSvg,
             expiresAt: m.expiresAt,
+            otpStatus: 'pending',
           });
           this.startCountdownTimer();
+          return;
+        }
+        if (m.type === 'otp-ack') {
+          // Only fold into the waiting state. If the user was somehow already
+          // past waiting (extremely fast phone, edge cases), ack is harmless
+          // to drop — the gate is already satisfied at this point.
+          if (this.state.phase === 'waiting') {
+            log(`upload[${this.fileName}]: otp accepted by server`);
+            this.transition({ ...this.state, otpStatus: 'accepted', otpError: undefined });
+            this.startCountdownTimer();
+          } else {
+            log(`upload[${this.fileName}]: otp-ack received in phase=${this.state.phase} (ignored)`);
+          }
           return;
         }
         if (m.type === 'upload-progress') {
@@ -382,4 +463,23 @@ class UploadFlow implements UploadFlowHandle {
       this.countdownTimer = undefined;
     }
   }
+}
+
+/**
+ * SHA-256 a UTF-8 string and return its lowercase hex digest. crypto.subtle is
+ * available in the web-extension worker context, same as in any browser
+ * worker. Async because the SubtleCrypto API is.
+ *
+ * Kept module-private rather than exported to a `crypto` helper — the only
+ * caller is the OTP submit path; if a second caller appears, promote it.
+ */
+async function sha256Hex(s: string): Promise<string> {
+  const bytes = new TextEncoder().encode(s);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const view = new Uint8Array(digest);
+  let out = '';
+  for (let i = 0; i < view.length; i++) {
+    out += view[i].toString(16).padStart(2, '0');
+  }
+  return out;
 }
