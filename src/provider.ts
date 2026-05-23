@@ -40,6 +40,7 @@ import {
   seedRememberedDecisions,
   type RowDecision,
 } from './sync/decisions';
+import { startUploadFlow, type UploadFlowHandle } from './upload/uploadFlow';
 
 class PptxDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}
@@ -183,8 +184,16 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       }
     };
 
+    // M5: per-panel upload session. At most one is active at a time; opening
+    // a fresh session replaces (and disposes) any previous one so the modal
+    // stays consistent with whichever WS we're actually wired to. Cleared
+    // on cancel/close finishing, and on panel dispose.
+    let currentUploadFlow: UploadFlowHandle | null = null;
+
     webviewPanel.onDidDispose(() => {
       pendingCandidate = null;
+      currentUploadFlow?.dispose();
+      currentUploadFlow = null;
     });
 
     webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
@@ -318,6 +327,61 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           log(`update[${fileName}]: cancelled (candidate ${pendingCandidate.fileName} discarded)`);
         }
         pendingCandidate = null;
+        return;
+      }
+
+      if (m.type === 'uploadOpen') {
+        // User clicked "Upload to Update…". Dispose any prior flow (defensive
+        // — UI shouldn't allow concurrent flows, but a stale one could exist
+        // if the webview reloaded mid-session) and open a fresh one.
+        currentUploadFlow?.dispose();
+        log(`upload[${fileName}]: opening session`);
+        currentUploadFlow = startUploadFlow({
+          webviewPanel,
+          fileName,
+          onComplete: async (bytes, sourceName) => {
+            // Hand the bytes back to the webview. It does PDF vs PPTX
+            // routing (magic bytes + filename extension), closes the
+            // upload modal, and either opens the PDF-import modal or
+            // posts an ingest message we'll receive below as
+            // m.type === 'ingest' with source='upload'.
+            log(
+              `upload[${fileName}]: delivered ${bytes.byteLength} bytes ` +
+                `to webview (source=${sourceName})`,
+            );
+            webviewPanel.webview.postMessage({
+              type: 'uploadedBytes',
+              fileName: sourceName,
+              bytes,
+            });
+          },
+        });
+        return;
+      }
+
+      if (m.type === 'uploadCancel') {
+        if (currentUploadFlow) {
+          currentUploadFlow.cancel();
+          // Don't null the slot here — the flow's WS close handler still
+          // needs to fire and post `uploadModalClose`. The next uploadOpen
+          // disposes whatever remains.
+        }
+        return;
+      }
+
+      if (m.type === 'uploadClose') {
+        if (currentUploadFlow) {
+          currentUploadFlow.close();
+          currentUploadFlow.dispose();
+          currentUploadFlow = null;
+        }
+        return;
+      }
+
+      if (m.type === 'uploadRetry') {
+        if (currentUploadFlow) {
+          currentUploadFlow.retry();
+        }
         return;
       }
 
@@ -610,7 +674,12 @@ async function handleIngest(
   renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
   autoSyncDefault: boolean,
 ): Promise<void> {
-  const source = m.source === 'drop' ? 'drop' : 'picker';
+  // 'upload' is a new (M5) ingest source — user-affirmed bytes from the
+  // dropbox-server. It behaves identically to 'picker' (no compare modal;
+  // write immediately) but logs under its own label so traces stay
+  // distinguishable. Anything else falls through to 'picker' for back-compat.
+  const source: 'drop' | 'picker' | 'upload' =
+    m.source === 'drop' ? 'drop' : m.source === 'upload' ? 'upload' : 'picker';
   const resultMessageType = source === 'drop' ? 'drop-result' : 'picker-result';
   const ingestFileName = typeof m.fileName === 'string' && m.fileName.length > 0
     ? m.fileName
@@ -695,34 +764,33 @@ async function handleIngest(
     return;
   }
 
-  // Picker — write immediately (the user already affirmed via the dialog).
-  // Drop — stash + open the compare modal (user affirms via Update button).
-  if (source === 'picker') {
+  // Picker / Upload — write immediately (the user already affirmed via the
+  // dialog / by completing the phone upload). Drop — stash + open the compare
+  // modal (user affirms via Update button).
+  if (source === 'picker' || source === 'upload') {
     try {
-      // PDF→PPTX import is the only producer of source='picker' today, and
-      // re-importing the same PDF reproduces the same sha256. If a previous
-      // import landed before the in-file thumbnail change (or any other
-      // content-determined behaviour we've since added to the parser), its
-      // cached entry would shadow the freshly-written file's parse and the
-      // panel would render against the stale shape.
+      // PDF→PPTX import + (now) phone upload can both re-deliver bytes the
+      // user has shipped before; if a previous import/upload landed before
+      // a parser change, its cached entry would shadow the freshly-written
+      // file and the panel would render against the stale shape.
       //
       // Evict the entry for *this one sha* (scoped, not a full cache flush)
       // so the post-write re-parse inside writeAndRender misses and then
       // records the fresh result via parsePptxCached → cache.record. Net
       // effect: the cache entry for the imported file is replaced with the
-      // up-to-date parse; every other file's entry stays intact. Import is
-      // already the slow path — paying for one extra parse is well below
-      // the user-noticeable threshold.
+      // up-to-date parse; every other file's entry stays intact. Import /
+      // upload is already the slow path — paying for one extra parse is
+      // well below the user-noticeable threshold.
       const cache = getParseCacheSingleton();
       if (cache) {
         await cache.forget(candidate.sha256);
-        log(`ingest[picker]: evicted stale cache entry for sha256=${candidate.sha256.slice(0, 12)}… (will be repopulated by post-write re-parse)`);
+        log(`ingest[${source}]: evicted stale cache entry for sha256=${candidate.sha256.slice(0, 12)}… (will be repopulated by post-write re-parse)`);
       }
       await writeAndRender(document, webviewPanel, bytes, ingestFileName, renderWithSyncTarget);
       webviewPanel.webview.postMessage({ type: 'picker-result', outcome: 'updated' });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log(`update[picker]: write failed — ${message}`);
+      log(`update[${source}]: write failed — ${message}`);
       webviewPanel.webview.postMessage({
         type: 'picker-result',
         outcome: 'error',

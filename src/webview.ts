@@ -32,6 +32,7 @@ import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
 import { compareModalCss } from './sync/compareModalHtml';
 import { decisionWiringScript } from './sync/planHtml';
 import { pdfImportConfigCss } from './pdfImportConfigHtml';
+import { uploadModalCss } from './upload/uploadModalHtml';
 
 // Placeholder string. esbuild's pdfimport-webview-bundle plugin substitutes
 // the entire quoted literal (quotes included) with a JSON.stringify of the
@@ -136,7 +137,8 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     <h1>${escapeHtml(r.fileName)}</h1>
     <div class="actions">
       <button id="save-as-btn" class="action-btn" type="button">Save As\u2026</button>
-      <button id="update-btn" class="action-btn action-btn-secondary" type="button">Update\u2026</button>
+      <button id="update-btn" class="action-btn action-btn-secondary" type="button">Browse to Update\u2026</button>
+      <button id="upload-btn" class="action-btn action-btn-secondary" type="button">Upload to Update\u2026</button>
       <span id="action-status" class="action-status" aria-live="polite">${initialStatus}</span>
     </div>
     <input id="update-input" type="file" accept=".pptx,.pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/pdf" style="display:none">
@@ -343,6 +345,7 @@ function viewerScript(): string {
   const vscode = (window.__decisionVscode = window.__decisionVscode || acquireVsCodeApi());
   const saveBtn = document.getElementById('save-as-btn');
   const updateBtn = document.getElementById('update-btn');
+  const uploadBtn = document.getElementById('upload-btn');
   const updateInput = document.getElementById('update-input');
   const status = document.getElementById('action-status');
   const modalHost = document.getElementById('modal-host');
@@ -544,6 +547,7 @@ function viewerScript(): string {
   function setBusy(busy){
     if (saveBtn) saveBtn.disabled = busy;
     if (updateBtn) updateBtn.disabled = busy;
+    if (uploadBtn) uploadBtn.disabled = busy;
   }
 
   function openModal(html){
@@ -618,6 +622,73 @@ function viewerScript(): string {
         setBusy(false);
         setStatus('Could not read file');
         vlog('picker read error: ' + (err && err.message || err));
+      }
+    });
+  }
+
+  // ----- Upload to Update… (M5: dropbox-server-mediated phone upload) -----
+  // Clicking opens a server-side WebSocket session via the extension host.
+  // The host owns the WS + protocol state machine and posts re-rendered
+  // modal HTML for each transition; this script's job is just to drop the
+  // HTML into #modal-host and rebind the well-known button ids. The host
+  // tears the session down on cancel/close/retry messages.
+  if (uploadBtn) {
+    uploadBtn.addEventListener('click', function(){
+      vlog('click → upload-open');
+      setBusy(true);
+      setStatus('Connecting\u2026');
+      try { vscode.postMessage({type:'uploadOpen'}); } catch (_) {}
+    });
+  }
+
+  // openUploadModal mirrors openModal() above but binds the upload modal's
+  // own four button ids (see src/upload/uploadModalHtml.ts renderActions).
+  // Each click posts a typed message back to the host; the host decides
+  // whether to dismiss / re-render / reopen the WS.
+  function openUploadModal(html){
+    if (!modalHost) return;
+    modalHost.innerHTML = html;
+    modalHost.classList.add('open');
+    modalHost.setAttribute('aria-hidden', 'false');
+    var cancelBtn = document.getElementById('upload-cancel-btn');
+    var closeBtn = document.getElementById('upload-close-btn');
+    var retryBtn = document.getElementById('upload-retry-btn');
+    var copyBtn = document.getElementById('upload-copy-btn');
+    if (cancelBtn) cancelBtn.addEventListener('click', function(){
+      // Disable immediately so a double-click doesn't fire twice. The host
+      // is idempotent on cancel but the UI shouldn't suggest otherwise.
+      cancelBtn.disabled = true;
+      try { vscode.postMessage({type:'uploadCancel'}); } catch (_) {}
+    });
+    if (closeBtn) closeBtn.addEventListener('click', function(){
+      // Close from a terminal state (expired/error). The host has nothing
+      // more to do; we dismiss the modal locally and tell the host to
+      // dispose of the (already-closed) WS so it doesn't leak.
+      try { vscode.postMessage({type:'uploadClose'}); } catch (_) {}
+      closeModal();
+      setBusy(false);
+      setStatus('');
+    });
+    if (retryBtn) retryBtn.addEventListener('click', function(){
+      // Don't dismiss the modal — the host's first re-render after retry
+      // arrives almost immediately and swaps the contents in place.
+      try { vscode.postMessage({type:'uploadRetry'}); } catch (_) {}
+    });
+    if (copyBtn) copyBtn.addEventListener('click', function(){
+      // The URL is on the <a id="upload-url"> in the waiting phase. Read
+      // the href (preferred — already absolute and normalised) and fall
+      // back to textContent if for some reason the href is missing.
+      var urlEl = document.getElementById('upload-url');
+      if (!urlEl) return;
+      var url = urlEl.getAttribute('href') || urlEl.textContent || '';
+      try {
+        navigator.clipboard.writeText(url);
+        copyBtn.textContent = 'Copied';
+        setTimeout(function(){
+          try { copyBtn.textContent = 'Copy'; } catch (_) {}
+        }, 1500);
+      } catch (err) {
+        vlog('upload copy failed: ' + (err && err.message || err));
       }
     });
   }
@@ -1220,6 +1291,71 @@ function viewerScript(): string {
       return;
     }
 
+    if (m.type === 'uploadModal' && typeof m.html === 'string') {
+      // Host pushed a fresh modal HTML — replace the modal contents and
+      // re-bind buttons. Per-tick countdown updates land here as well as
+      // phase transitions; the cost of full-modal innerHTML rewrites at
+      // 1 Hz is negligible.
+      openUploadModal(m.html);
+      return;
+    }
+
+    if (m.type === 'uploadModalClose') {
+      // Host signalled terminal-but-no-action-needed (e.g. WS closed after
+      // a cancel round-trip). Drop the modal and clear the busy state.
+      closeModal();
+      setBusy(false);
+      setStatus('');
+      return;
+    }
+
+    if (m.type === 'uploadedBytes' && m.bytes) {
+      // Bytes are in hand from the dropbox-server. Decide whether they're
+      // a .pptx (route through ingest) or a .pdf (route through the existing
+      // pdf-import modal). The check is filename-extension-first with a
+      // %PDF magic-bytes fallback so a phone that drops the extension still
+      // routes correctly.
+      var bytes = m.bytes instanceof Uint8Array ? m.bytes : new Uint8Array(m.bytes);
+      var uploadedName = String(m.fileName || 'upload');
+      var looksLikePdfByMagic = bytes.byteLength >= 4 &&
+        bytes[0] === 0x25 && bytes[1] === 0x50 &&
+        bytes[2] === 0x44 && bytes[3] === 0x46; // '%PDF'
+      var isPdf = /\\.pdf$/i.test(uploadedName) || looksLikePdfByMagic;
+      vlog('upload bytes received: ' + uploadedName + ' (' + bytes.byteLength + ' bytes), ' +
+        (isPdf ? 'routing to pdf-import' : 'routing to ingest'));
+      // Dismiss the upload modal before opening the PDF modal or kicking
+      // off ingest so the user doesn't see two modals stacked / a stale
+      // "Done" splash hanging around.
+      closeModal();
+      if (isPdf) {
+        // The PDF pipeline expects a File-like with arrayBuffer(); the
+        // simplest cross-environment construct is an actual File built
+        // from a Blob over the bytes. vscode.dev's webview iframe has
+        // the File constructor available.
+        setBusy(false);
+        setStatus('');
+        try {
+          var fakeFile = new File([bytes], uploadedName, { type: 'application/pdf' });
+          handlePdfFile(fakeFile, 'upload');
+        } catch (err) {
+          setStatus('PDF import failed: ' + (err && err.message || err));
+          vlog('upload pdf wrap error: ' + (err && err.message || err));
+        }
+        return;
+      }
+      // PPTX branch — round-trip through ingest so the existing sha256
+      // + identical/different check applies. source='upload' tells the
+      // provider this was user-affirmed (no compare modal), same as picker.
+      setStatus('Updating\u2026');
+      try {
+        vscode.postMessage({type:'ingest', source:'upload', fileName: uploadedName, bytes: bytes});
+      } catch (err) {
+        setBusy(false);
+        setStatus('Could not deliver bytes: ' + (err && err.message || err));
+      }
+      return;
+    }
+
     if (m.type === 'drop-result') {
       setBusy(false);
       if (m.outcome === 'invalid') {
@@ -1627,6 +1763,9 @@ function css(): string {
 
     /* ----- PDF import config modal --------------------------------------- */
     ${pdfImportConfigCss()}
+
+    /* ----- Upload-to-Update modal (M5) ----------------------------------- */
+    ${uploadModalCss()}
   `;
 }
 

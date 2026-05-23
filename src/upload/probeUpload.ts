@@ -24,8 +24,8 @@
 import * as vscode from 'vscode';
 import { log } from '../log';
 import { UploadClient, deriveWsUrl, type UploadClientEvent } from './uploadClient';
+import { resolveDropboxBaseUrl } from './baseUrl';
 
-const DEFAULT_BASE_URL = 'https://vscode.sophtwhere.com/dropbox';
 const CANCEL_AFTER_MS = 2000;
 // Hardcoded label/accept/maxBytes. Realistic enough to match the eventual
 // M5 wiring (pptx + pdf), but the probe never actually uploads anything —
@@ -40,7 +40,7 @@ const PROBE_MAX_BYTES = 200 * 1024 * 1024; // 200 MB; server clamps to 500.
 export function registerUploadProbe(): vscode.Disposable {
   return vscode.commands.registerCommand('pptxViewer.probeUpload', async () => {
     log('--- probeUpload: live WS roundtrip ---');
-    const baseUrl = resolveBaseUrl();
+    const baseUrl = resolveDropboxBaseUrl();
     log(`probeUpload: baseUrl = ${baseUrl}`);
     log(`probeUpload: wsUrl   = ${deriveWsUrl(baseUrl)}`);
 
@@ -102,13 +102,6 @@ export function registerUploadProbe(): vscode.Disposable {
     log('--- probeUpload: end ---');
     void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
   });
-}
-
-function resolveBaseUrl(): string {
-  const cfg = vscode.workspace.getConfiguration('pptxViewer');
-  const v = cfg.get<string>('dropboxBaseUrl');
-  if (typeof v === 'string' && v.trim().length > 0) return v.trim();
-  return DEFAULT_BASE_URL;
 }
 
 function logEvent(ev: UploadClientEvent): void {
