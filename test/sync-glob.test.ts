@@ -95,6 +95,16 @@ test('built-in ignores catch the sync config and manifest', () => {
   assert.equal(set.matches('.foldersync-manifest.json'), true);
 });
 
+test('built-in ignores catch orphan .tmp files anywhere', () => {
+  // Interrupted executor.ts atomic writes leave <file>.tmp behind; the
+  // planner must not surface these as destination-only entries.
+  const set = new GlobSet(BUILT_IN_IGNORES);
+  assert.equal(set.matches('foo.tmp'), true);
+  assert.equal(set.matches('sub/foo.pptx.tmp'), true);
+  assert.equal(set.matches('a/b/c/deep.tmp'), true);
+  assert.equal(set.matches('foo.tmp.bak'), false); // only the .tmp suffix
+});
+
 // ───── GlobSet behaviour ─────────────────────────────────────────────────
 
 test('GlobSet matches any pattern', () => {

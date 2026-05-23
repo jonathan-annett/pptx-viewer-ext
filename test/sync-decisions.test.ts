@@ -292,7 +292,7 @@ test('seedRememberedDecisions: remembered create + override-warning → warning-
             relPath: 'wed/talk.pptx',
             remembered: { accepted: true },
             warnings: [
-              { code: 'showMediaCtrlsWithVideo', severity: 'override', detail: '' },
+              { code: 'media-controls', severity: 'override', message: '' },
             ],
           }),
         ],

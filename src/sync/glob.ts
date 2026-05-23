@@ -105,4 +105,5 @@ export const BUILT_IN_IGNORES: readonly string[] = [
   '**/~$*',
   '**/.sync.jsonc',
   '**/.foldersync-manifest.json',
+  '**/*.tmp',
 ];

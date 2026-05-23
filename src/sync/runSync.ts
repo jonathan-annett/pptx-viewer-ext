@@ -22,6 +22,8 @@ import { manifestKey } from './manifest-types';
 import { sha256Hex } from './hash';
 import { getHashCacheSingleton } from './hashCache';
 import { vscodeFs } from './vscodeFs';
+import { sweepOrphanTmpFiles } from './orphanSweep';
+import { vscodeSweepFs } from './orphanSweepWired';
 import { log } from '../log';
 
 export interface RunSummary {
@@ -75,6 +77,39 @@ export async function runSync(
   // array), so decision ids are interpretable here without re-deriving them.
   const pairIndices = new Map<PlanForDestination, number>();
   plans.forEach((p, i) => pairIndices.set(p, i));
+
+  // Pre-execute orphan .tmp sweep. An interrupted executor write (browser
+  // tab closed mid-rename, host crash) leaves <file>.tmp behind. The planner
+  // already ignores **/*.tmp (M6.A); this sweep removes them from disk so a
+  // re-run doesn't pile up on the previous attempt's debris. Best-effort:
+  // failures are logged and never abort the run.
+  const sweepFs = vscodeSweepFs();
+  const sweptRoots = new Set<string>();
+  for (const plan of plans) {
+    const destRoot = plan.destination.destRootUri;
+    if (!destRoot) continue;
+    const key = destRoot.toString();
+    if (sweptRoots.has(key)) continue;
+    sweptRoots.add(key);
+    try {
+      const result = await sweepOrphanTmpFiles(sweepFs, destRoot);
+      if (result.deleted.length > 0 || result.errors.length > 0) {
+        log(
+          `sync: orphan-tmp sweep on ${key} — ` +
+            `deleted ${result.deleted.length}, failed ${result.errors.length}`,
+        );
+        for (const path of result.deleted) {
+          log(`  swept: ${path}`);
+        }
+        for (const err of result.errors) {
+          log(`  sweep FAILED: ${err.relPath} — ${err.message}`);
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`sync: orphan-tmp sweep FAILED for ${key} — ${message}`);
+    }
+  }
 
   for (const group of groups) {
     const manifest = await readManifest(group.destWorkspaceFolderUri);
