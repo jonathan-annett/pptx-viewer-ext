@@ -6,7 +6,10 @@
 // from files the user added independently, and to recognise overwrites.
 //
 // M2 ships read-only. Writes land in M4 (tmp+rename via writeManifest).
-// Version-mismatch refusal still belongs to M6.
+// Version-mismatch refusal shipped in M6.D — `readManifest` now returns a
+// discriminated union so callers can refuse sync on an unknown schema
+// version rather than silently treating the manifest as empty (which would
+// clobber the user's prior tracking on the next write).
 //
 // Schema (per folder-sync-v1-plan.md):
 //
@@ -45,18 +48,37 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import {
   emptyManifest,
+  normaliseManifest,
   type Manifest,
-  type ManifestDecision,
-  type ManifestEntry,
+  type ManifestReadResult,
 } from './manifest-types';
 
-export { emptyManifest, manifestKey } from './manifest-types';
-export type { Manifest, ManifestDecision, ManifestEntry } from './manifest-types';
+export { emptyManifest, manifestKey, parseManifestText } from './manifest-types';
+export type {
+  Manifest,
+  ManifestDecision,
+  ManifestEntry,
+  ManifestReadResult,
+} from './manifest-types';
 
 const MANIFEST_FILENAME = '.foldersync-manifest.json';
 
-/** Read the manifest at the given destination root URI. */
-export async function readManifest(destRootUri: vscode.Uri): Promise<Manifest> {
+/**
+ * Read the manifest at the given destination root URI.
+ *
+ * Returns a discriminated union:
+ *   - `{ kind: 'ok', manifest }` for the happy path AND every recoverable
+ *     failure (missing file, bad utf-8, corrupt JSON, structurally-wrong
+ *     payload) — the documented soft-fallback to an empty manifest, which
+ *     makes existing destination files surface as destination-only in the
+ *     plan.
+ *   - `{ kind: 'version-mismatch', actual }` when the file parses to a
+ *     valid object but its `version` field is anything other than 1. Sync
+ *     callers refuse to touch that destination; writing an empty manifest
+ *     back would overwrite the user's prior tracking record. The viewer's
+ *     informational surfaces treat this like a missing manifest.
+ */
+export async function readManifest(destRootUri: vscode.Uri): Promise<ManifestReadResult> {
   const uri = manifestUri(destRootUri);
 
   let bytes: Uint8Array;
@@ -64,7 +86,7 @@ export async function readManifest(destRootUri: vscode.Uri): Promise<Manifest> {
     bytes = await vscode.workspace.fs.readFile(uri);
   } catch {
     // File doesn't exist — empty manifest is the documented behaviour.
-    return emptyManifest();
+    return okEmpty();
   }
 
   let text: string;
@@ -72,7 +94,7 @@ export async function readManifest(destRootUri: vscode.Uri): Promise<Manifest> {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch (err) {
     log(`sync: manifest at ${uri.toString()} is not valid utf-8 (${errMsg(err)}); treating as empty`);
-    return emptyManifest();
+    return okEmpty();
   }
 
   let raw: unknown;
@@ -80,10 +102,26 @@ export async function readManifest(destRootUri: vscode.Uri): Promise<Manifest> {
     raw = JSON.parse(text);
   } catch (err) {
     log(`sync: manifest at ${uri.toString()} is corrupt JSON (${errMsg(err)}); treating as empty`);
-    return emptyManifest();
+    return okEmpty();
   }
 
-  return normalise(raw, uri);
+  const result = normaliseManifest(raw);
+  if (result.kind === 'version-mismatch') {
+    log(
+      `sync: manifest at ${uri.toString()} has unsupported version ${String(result.actual)} ` +
+        `(extension supports version 1); refusing to sync this destination`,
+    );
+  } else if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    // normaliseManifest swallows this branch silently. Keep the diagnostic
+    // here where we still have URI context — same shape as the corrupt-JSON
+    // log line above.
+    log(`sync: manifest at ${uri.toString()} top-level is not an object; treating as empty`);
+  }
+  return result;
+}
+
+function okEmpty(): ManifestReadResult {
+  return { kind: 'ok', manifest: emptyManifest() };
 }
 
 export function manifestUri(destRootUri: vscode.Uri): vscode.Uri {
@@ -112,91 +150,6 @@ export async function writeManifest(
     try { await vscode.workspace.fs.delete(tmpUri); } catch { /* ignore */ }
     throw err;
   }
-}
-
-/**
- * Validate the parsed JSON loosely. Anything we don't recognise as a v1
- * manifest collapses to an empty one — version-mismatch refusal is M6.
- */
-function normalise(raw: unknown, uri: vscode.Uri): Manifest {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    log(`sync: manifest at ${uri.toString()} top-level is not an object; treating as empty`);
-    return emptyManifest();
-  }
-  const obj = raw as Record<string, unknown>;
-  if (obj.version !== 1) {
-    // M6 territory: surface the mismatch. For M2 we log and keep going.
-    log(
-      `sync: manifest at ${uri.toString()} has unrecognised version ${String(obj.version)} — ` +
-        `treating as empty (a strict refusal lands in M6)`,
-    );
-    return emptyManifest();
-  }
-
-  const entries: { [key: string]: ManifestEntry } = {};
-  if (obj.entries && typeof obj.entries === 'object' && !Array.isArray(obj.entries)) {
-    for (const [k, v] of Object.entries(obj.entries as Record<string, unknown>)) {
-      const entry = asEntry(v);
-      if (entry) entries[k] = entry;
-    }
-  }
-
-  const decisions: { [key: string]: ManifestDecision } = {};
-  if (obj.decisions && typeof obj.decisions === 'object' && !Array.isArray(obj.decisions)) {
-    for (const [k, v] of Object.entries(obj.decisions as Record<string, unknown>)) {
-      const decision = asDecision(v);
-      if (decision) decisions[k] = decision;
-    }
-  }
-
-  return {
-    version: 1,
-    lastSync: typeof obj.lastSync === 'string' ? obj.lastSync : null,
-    entries,
-    decisions,
-  };
-}
-
-function asEntry(v: unknown): ManifestEntry | undefined {
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined;
-  const e = v as Record<string, unknown>;
-  if (
-    typeof e.destPath !== 'string' ||
-    typeof e.size !== 'number' ||
-    typeof e.sha256 !== 'string' ||
-    typeof e.syncedAt !== 'string'
-  ) {
-    return undefined;
-  }
-  return {
-    destPath: e.destPath,
-    size: e.size,
-    sha256: e.sha256,
-    syncedAt: e.syncedAt,
-  };
-}
-
-function asDecision(v: unknown): ManifestDecision | undefined {
-  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined;
-  const d = v as Record<string, unknown>;
-  if (
-    typeof d.destOnlyDelete !== 'boolean' ||
-    typeof d.collisionOverwrite !== 'boolean' ||
-    typeof d.decidedAt !== 'string'
-  ) {
-    return undefined;
-  }
-  // warningOverride is a later addition; default to false when missing so
-  // manifests written before it shipped continue to load. A wrong-typed
-  // value also degrades to false rather than rejecting the whole record.
-  const warningOverride =
-    typeof d.warningOverride === 'boolean' ? d.warningOverride : false;
-  return {
-    destOnlyDelete: d.destOnlyDelete,
-    collisionOverwrite: d.collisionOverwrite,
-    warningOverride,
-    decidedAt: d.decidedAt,
-  };
 }
 
 function errMsg(err: unknown): string {

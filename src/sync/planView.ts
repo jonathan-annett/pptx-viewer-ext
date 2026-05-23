@@ -9,7 +9,8 @@ import type { PlanForDestination, ScopedPlanOptions } from './planner';
 import { buildDryRunPlan, buildScopedDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
-import { runSync, formatRunSummary } from './runSync';
+import { runSync, formatRunSummary, type RunSummary } from './runSync';
+import { manifestUri } from './manifest';
 import {
   countAccepted,
   handleDecisionMessage,
@@ -192,5 +193,44 @@ async function runProceed(
     );
   }
 
+  // Manifest version-mismatch is a distinct condition that can co-occur with
+  // any of the above (a multi-destination sync where one destination has a
+  // bad version and the others succeed). Surface it as a second toast so the
+  // user sees both signals.
+  surfaceManifestVersionMismatches(summary);
+
   panel.dispose();
+}
+
+/**
+ * Show a warning toast for destinations whose manifests had unsupported
+ * versions. The toast carries an "Open Manifest" action that opens the
+ * first (or only) mismatched manifest file so the user can inspect it.
+ *
+ * Exported so the per-file Run Sync path in `provider.ts` can use the same
+ * surface — keeps the messaging consistent across every Run Sync entry
+ * point.
+ */
+export function surfaceManifestVersionMismatches(summary: RunSummary): void {
+  const mismatches = summary.manifestVersionMismatches;
+  if (mismatches.length === 0) return;
+
+  const firstManifestUri = manifestUri(mismatches[0].destWorkspaceFolderUri);
+  const message =
+    mismatches.length === 1
+      ? `Folder Sync: skipped a destination — its manifest declares ` +
+        `version ${String(mismatches[0].actual)}, which this extension doesn't ` +
+        `support. Update the extension or remove the manifest to re-enable sync.`
+      : `Folder Sync: skipped ${mismatches.length} destinations due to ` +
+        `unsupported manifest versions. See the Output Channel for the list.`;
+
+  void vscode.window
+    .showWarningMessage(message, 'Open Manifest', 'Show Details')
+    .then((choice) => {
+      if (choice === 'Open Manifest') {
+        void vscode.commands.executeCommand('vscode.open', firstManifestUri);
+      } else if (choice === 'Show Details') {
+        void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
+      }
+    });
 }

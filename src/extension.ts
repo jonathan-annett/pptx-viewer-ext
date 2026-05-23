@@ -10,6 +10,7 @@ import { openPlanPanel } from './sync/planView';
 import type { ResolvedSource, ResolvedTopology } from './sync/topology';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
+import { ManifestEditorProvider } from './sync/manifestEditor';
 import { registerProbe } from './sync/probe';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
@@ -162,6 +163,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   log('activate: .sync.jsonc custom editor registered');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
   log('activate: .admin-sync.jsonc custom editor registered');
+  context.subscriptions.push(ManifestEditorProvider.register());
+  log('activate: .foldersync-manifest.json custom editor registered');
   context.subscriptions.push(
     vscode.commands.registerCommand('folderSync.showTopology', () => {
       log('sync: showTopology invoked');

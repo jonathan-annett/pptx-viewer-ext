@@ -31,6 +31,21 @@ export interface RunSummary {
   failed: number;
   perPlan: PlanSummary[];
   manifestWriteFailures: string[];
+  /**
+   * Destination workspace folders whose existing `.foldersync-manifest.json`
+   * declared an unsupported `version`. Sync refuses these destinations
+   * entirely (no writes, no manifest overwrite) — the user has to update the
+   * extension before this destination can be synced again. The shape is
+   * carried separately so the caller can surface a distinct toast and offer
+   * an "Open Manifest" action.
+   */
+  manifestVersionMismatches: ManifestVersionMismatch[];
+}
+
+export interface ManifestVersionMismatch {
+  destWorkspaceFolderUri: vscode.Uri;
+  /** The unsupported `version` field as read from the file. */
+  actual: unknown;
 }
 
 export interface PlanSummary {
@@ -67,7 +82,13 @@ export async function runSync(
   const cache = getHashCacheSingleton() as
     | undefined
     | import('./hashCache').UriHashCache<vscode.Uri>;
-  const summary: RunSummary = { ok: 0, failed: 0, perPlan: [], manifestWriteFailures: [] };
+  const summary: RunSummary = {
+    ok: 0,
+    failed: 0,
+    perPlan: [],
+    manifestWriteFailures: [],
+    manifestVersionMismatches: [],
+  };
 
   // Group by destination workspace folder URI. A single manifest is shared
   // across all sources writing into the same workspace folder; reading and
@@ -112,7 +133,28 @@ export async function runSync(
   }
 
   for (const group of groups) {
-    const manifest = await readManifest(group.destWorkspaceFolderUri);
+    const manifestResult = await readManifest(group.destWorkspaceFolderUri);
+    if (manifestResult.kind === 'version-mismatch') {
+      // Refuse the whole group. Writing v1 over an unknown version would
+      // clobber the user's prior tracking. The planner already surfaced the
+      // same condition as a per-pair skippedReason, but we re-check here
+      // because (a) a stale plan could be replayed after the file was edited
+      // out-of-band, and (b) the runSync API contract is "safe regardless of
+      // plan provenance". Skip every plan in the group; record the mismatch
+      // for the caller's toast.
+      summary.manifestVersionMismatches.push({
+        destWorkspaceFolderUri: group.destWorkspaceFolderUri,
+        actual: manifestResult.actual,
+      });
+      for (const plan of group.plans) {
+        log(
+          `sync: execute — skipping ${labelPair(plan)} ` +
+            `(manifest version mismatch: ${String(manifestResult.actual)})`,
+        );
+      }
+      continue;
+    }
+    const manifest = manifestResult.manifest;
 
     for (const plan of group.plans) {
       if (plan.skippedReason || !plan.destination.destRootUri) {
@@ -340,6 +382,13 @@ export function formatRunSummary(summary: RunSummary): string {
     lines.push('Manifest write failures:');
     for (const m of summary.manifestWriteFailures) {
       lines.push(`  ${m}`);
+    }
+  }
+  if (summary.manifestVersionMismatches.length > 0) {
+    lines.push('');
+    lines.push('Skipped destinations (unsupported manifest version):');
+    for (const m of summary.manifestVersionMismatches) {
+      lines.push(`  ${m.destWorkspaceFolderUri.toString()} — version ${String(m.actual)}`);
     }
   }
   lines.push('--- end ---');

@@ -248,7 +248,24 @@ async function planForSource(
     // The manifest lives at the destination workspace folder root, not at
     // the subpath. A single workspace-folder destination shares one manifest
     // even when multiple sources write into different subpaths under it.
-    const manifest = await readManifest(dest.workspaceFolderUri);
+    const manifestResult = await readManifest(dest.workspaceFolderUri);
+    if (manifestResult.kind === 'version-mismatch') {
+      // Refuse to plan this destination — sync would overwrite an unknown
+      // schema. Surface as a skipped row so the plan webview / Output
+      // Channel reports it; runSync skips the destination too (it re-reads
+      // the manifest there for the same reason).
+      results.push({
+        source,
+        destination: dest,
+        items: [],
+        summary: summarisePlan([]),
+        skippedReason:
+          `manifest at ${dest.workspaceFolderUri.toString()} has unsupported version ` +
+          `${String(manifestResult.actual)} (extension supports version 1)`,
+      });
+      continue;
+    }
+    const manifest = manifestResult.manifest;
     const scopedManifest = filterManifestToScope(manifest, source.workspaceFolderName, scope);
 
     const items = classifyFiles(

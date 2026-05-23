@@ -33,6 +33,7 @@ import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
 import { runSync, formatRunSummary } from './sync/runSync';
+import { surfaceManifestVersionMismatches } from './sync/planView';
 import {
   countAccepted,
   handleDecisionMessage,
@@ -878,6 +879,11 @@ async function runPerFileSync(
     );
   }
 
+  // Manifest version-mismatch: orthogonal to the other outcomes (a destination
+  // could be skipped while others still synced). Same surface as the standalone
+  // plan panel so the messaging matches across entry points.
+  surfaceManifestVersionMismatches(summary);
+
   // Re-render. The whole webview HTML is replaced — the new render's Sync
   // target section will reflect the updated manifest (typically nothing-to-do
   // after a green-path apply). initialStatus mirrors what the user just did.
@@ -943,7 +949,15 @@ async function buildSyncTargetHtml(
   // Find the containing workspace folder by ancestry on path. Used to read
   // the manifest at that root before classifying.
   const containing = pickContainingFolder(documentUri.path, vscode.workspace.workspaceFolders ?? []);
-  const manifest = containing ? await readManifest(containing.uri) : null;
+  // Treat a version-mismatched manifest like a missing manifest for the
+  // viewer's purposes — the preview still renders, the user sees the file
+  // surface as destination-only (or scoped-plan with empty tracking). The
+  // refusal-to-sync signal lands when they hit Run Sync, via the toast
+  // surfaced by surfaceManifestVersionMismatches above. Logging the read
+  // result here would double-log; manifest.ts already logged on read.
+  const manifestResult = containing ? await readManifest(containing.uri) : null;
+  const manifest =
+    manifestResult && manifestResult.kind === 'ok' ? manifestResult.manifest : null;
 
   const input: PreviewInput = {
     documentUri: documentUri.toString(),
