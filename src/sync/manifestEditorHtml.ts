@@ -255,7 +255,7 @@ function renderBody(vm: ManifestEditorViewModel): string {
   <section class="card">
     <h2>Decisions <span class="count">(${vm.decisions.length})</span></h2>
     ${vm.decisions.length === 0
-      ? '<p class="hint"><em>No remembered decisions — toggle a "don\\u2019t ask again" checkbox in the plan webview to add one.</em></p>'
+      ? '<p class="hint"><em>No remembered decisions — toggle a "don\u2019t ask again" checkbox in the plan webview to add one.</em></p>'
       : renderDecisionsTable(vm.decisions)}
   </section>`;
 }
