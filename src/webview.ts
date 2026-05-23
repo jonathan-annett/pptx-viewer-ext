@@ -723,9 +723,12 @@ function viewerScript(): string {
       if (!otpInput) { vlog('otp-submit: no otp input found in DOM'); return; }
       var raw = (otpInput.value || '').trim();
       vlog('otp-submit: click — raw value len=' + raw.length);
-      if (!/^\d{6}$/.test(raw)) {
+      if (!/^\\d{6}$/.test(raw)) {
         // Local-side guard so we don't bounce a postMessage that the host
         // will obviously reject. Final source of truth is uploadFlow.
+        // (Double-backslash on \\d because this code lives inside the
+        // viewerScript() template literal — \\d in source becomes \d in
+        // the emitted JS, which is what the RegExp actually needs.)
         vlog('otp-submit: bounced by local 6-digit guard (raw=' + JSON.stringify(raw) + ')');
         otpInput.focus();
         otpInput.select();
@@ -750,8 +753,9 @@ function viewerScript(): string {
       });
       // Strip non-digit characters on input so the user can't paste in junk.
       // maxlength on the element handles length; this handles content.
+      // (\\D not \D — see above, this is inside the viewerScript() template.)
       otpInput.addEventListener('input', function(){
-        var cleaned = otpInput.value.replace(/\D+/g, '');
+        var cleaned = otpInput.value.replace(/\\D+/g, '');
         if (cleaned !== otpInput.value) otpInput.value = cleaned;
       });
     }
