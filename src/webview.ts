@@ -237,20 +237,32 @@ function basename(path: string): string {
 }
 
 function thumbnailImg(r: ParseResult): string {
-  if (r.thumbnail) {
+  // Real in-file thumbnail — bare <img>, no badge, no wrap. Layout unchanged
+  // from before the M-VE-3 badge addition.
+  if (r.thumbnail && r.thumbnail.synthesised !== true) {
     // alt="" because the image is decorative — the filename above already labels
     // the content. A non-empty alt would just be read twice by a screen reader.
     return `<img id="thumbnail-img" class="thumbnail" src="${r.thumbnail.dataUrl}" alt="">`;
   }
-  // M-VE-3: no in-file thumbnail but parsePptx emitted a synthesisHint —
-  // emit a placeholder element the viewer script will fill with the
-  // canvas-rendered fallback once it's done. aspect-ratio: 16/9 reserves
-  // the same visual footprint a real thumbnail would occupy so the page
-  // layout doesn't jump when the image swaps in.
-  if (r.synthesisHint) {
-    return `<div id="thumbnail-host" class="thumbnail thumbnail-placeholder" aria-hidden="true"></div>`;
+  // From here on the thumbnail is (or will be) synthesised. Two sub-cases:
+  //   (a) cache hit on a previously-synthesised entry — r.thumbnail is set
+  //       with synthesised:true, render straight to <img>.
+  //   (b) first encounter, parsePptx emitted a synthesisHint — render the
+  //       placeholder div; the viewer script swaps it once the canvas pass
+  //       completes (host.replaceWith(img)).
+  // In both cases the image lives inside a .thumbnail-wrap so the
+  // .thumbnail-badge sibling survives the swap. The badge tells the user
+  // the preview is generated rather than the deck's actual first slide.
+  let inner = '';
+  if (r.thumbnail) {
+    inner = `<img id="thumbnail-img" class="thumbnail" src="${r.thumbnail.dataUrl}" alt="">`;
+  } else if (r.synthesisHint) {
+    inner = `<div id="thumbnail-host" class="thumbnail thumbnail-placeholder" aria-hidden="true"></div>`;
+  } else {
+    return '';
   }
-  return '';
+  const badge = `<div class="thumbnail-badge" title="This file has no embedded thumbnail; the viewer generated this preview from the slide title.">Generated preview</div>`;
+  return `<div class="thumbnail-wrap">${inner}${badge}</div>`;
 }
 
 /**
@@ -1287,6 +1299,31 @@ function css(): string {
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
       border-radius: 4px;
       background: var(--vscode-editor-background);
+    }
+    /* Wrap around the thumbnail when a "Generated preview" badge is shown.
+       inline-block so the wrap's width tracks the image's natural width
+       (240px tall * native aspect), which keeps the badge centred under
+       the image rather than spanning the full panel. The wrap owns the
+       16px bottom gutter; the inner .thumbnail's margin-bottom is collapsed
+       to 4px in this context so the badge sits tight to the image. */
+    .thumbnail-wrap {
+      display: inline-block;
+      max-width: 100%;
+      margin: 0 0 16px;
+    }
+    .thumbnail-wrap .thumbnail {
+      margin: 0 0 4px;
+    }
+    /* The badge itself: muted italic small-caps under the image, centred to
+       match the inline-block wrap. Uses descriptionForeground so it stays
+       readable in both light and dark themes without competing with the
+       primary metadata table below. */
+    .thumbnail-badge {
+      font-size: 11px;
+      font-style: italic;
+      color: var(--vscode-descriptionForeground);
+      text-align: center;
+      letter-spacing: 0.02em;
     }
     /* Synthesised-thumbnail placeholder (M-VE-3):
        The viewer reserves a 16:9 box at the thumbnail's natural height so
