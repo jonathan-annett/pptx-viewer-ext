@@ -707,7 +707,7 @@ What we're looking for in the data:
 
 Empirical data feeds into M5.3 before any cache code is written.
 
-### M5.2.5 — URI hash cache *(probe ✅ complete, implementation planned)*
+### M5.2.5 — URI hash cache *(✅ shipped)*
 
 **Why this exists:** M5.2 data + 2026-05-19 dogfooding surfaced two compounding costs. (a) Hash dominates parse on big files — 449ms of a 619ms total on the 137MB deck, ~73%. (b) The sync planner re-hashes every destination file on every plan build, which is wasteful when destinations are mostly stable copies of what sync placed. Caching by `(uri, size, mtime) → sha256` short-circuits both: the viewer's hash phase, and the planner destination walk's *entire* read+hash phase.
 
@@ -837,7 +837,7 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 
 **Slotting:** wait for M5.2 data, then implement. Prerequisite for the focus-following panel (post-v1) — that feature multiplies the validator pass across every focus change and can't ship until the cache lands.
 
-### M6 — Polish + remaining surfaces *(blocked on M5.3)*
+### M6 — Polish + remaining surfaces *(unblocked — M5.3 D deferred as non-v1)*
 
 - Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
 - Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
@@ -1042,7 +1042,7 @@ Deletable after the port lands and is verified:
 
 `npm install` on the VPS is required before Phase E sign-off (`pdfjs-dist` is a new dep in `package.json`). Confirm with the user before running it — it mutates `node_modules`. The watcher (`pptx-watch`) also needs `pm2 restart` because `esbuild.config.js` changed (the watcher loads the config once, on startup).
 
-### M-VE-3 — Synthesised fallback thumbnails *(planned)*
+### M-VE-3 — Synthesised fallback thumbnails *(✅ shipped — commit 37a3309)*
 
 #### Why this exists
 
@@ -1094,29 +1094,15 @@ So the surface is: read-only file, synthesised image, cached out-of-band, displa
 - The file's bytes on disk are unchanged before vs after the viewer opens it (sha256 stable).
 - Title extraction returns the slide-1 title when present, falls back to filename when absent, and never crashes on malformed slide XML.
 
-#### Resume notes (Phases A–D landed locally, not yet pushed)
+#### What landed (sign-off 2026-05-23)
 
-Working tree state at the time of this note (use `git status` to verify before resuming):
+Shipped exactly as designed above. Implementation pieces:
 
-```
- M  esbuild.config.js          ← two-bundle layout + JSON.stringify substitution
- M  package.json               ← pdfjs-dist dep + 3 new test scripts
- M  package-lock.json          ← lockfile for the dep
- M  src/webview.ts             ← drop/picker PDF gates + handlePdfFile + placeholder
-?? src/pdfImport.ts             ← Phase A
-?? src/pdfImportLayout.ts       ← Phase B
-?? src/pdfImportConfigHtml.ts   ← Phase C
-?? src/pdfImportWebviewEntry.ts ← Phase D (webview IIFE entry)
-?? test/pdf-import.test.ts
-?? test/pdf-import-layout.test.ts
-?? test/pdf-import-config-html.test.ts
-```
+- `src/pptx.ts` — `extractFirstSlideTitle(entries)` walks `ppt/slides/slide1.xml` for `<p:ph type="title">` or `"ctrTitle"`; adds `synthesisHint?: { title, sha256 }` to `ParseResult` when the in-file thumbnail is absent.
+- `src/thumbnailSynth.ts` — pure colour + layout helpers (`deterministicColourFromSha`, line-fitting math); tsx-testable via `test/thumbnail-synth.test.ts`.
+- `src/webview.ts` — renders the canvas when `synthesisHint` is present, posts `{ type: 'thumbnail-synthesised', sha256, dataUrl }`.
+- `src/provider.ts` — message handler writes the data URL into the parse cache + in-memory `ParseResult` and sends `{ type: 'thumbnail-set', dataUrl }` to swap the placeholder image in-place. Cache record carries `synthesised: true` (diagnostic).
+- `src/sync/parseCacheIdb.ts` — additive `synthesised?: boolean` field on the thumbnail record. No DB version bump (additive).
+- Tests: `test/pptx-title-extract.test.ts`, `test/thumbnail-synth.test.ts`.
 
-Phase E sequence:
-
-1. Commit + push from Termux. Suggested commit message: `Viewer: PDF → PPTX import (M-VE-1 Phases A–D)`.
-2. SSH to VPS, `cd ~/pptx-viewer-ext`, `git pull --ff-only`.
-3. Ask the user before running `npm install`. After install completes, `pm2 restart pptx-watch`. Tail `pm2 logs pptx-watch --nostream` to confirm a clean rebuild and the `[esbuild] inlined pdfImport.webview.js (NNN KB) → extension.js` line.
-4. Reload the PWA on `vscode.sophtwhere.com`. Open a `.pptx`, then drag a `.pdf` into the viewer. Step through the config modal: default render → JPEG quality change (should re-encode only) → aspect/resolution change (should re-render). Click Import → existing ingest flow should accept the bytes and replace the open file.
-5. Sign-off updates: `CLAUDE.md` "What's currently shipping" gets a PDF→PPTX import bullet; add dead-end entries for anything that surprised during VPS validation; delete `pdf2pptx/` (the reference test harness — its working code is now in `src/pdfImport.ts`).
-6. Final commit: `M-VE-1 sign-off: substrate + cleanup`.
+A pptx with no `docProps/thumbnail.*` now opens with a coloured-box + title-text thumbnail. Same sha256 always produces the same colour. Cache survives PWA refresh and is keyed content-addressed — editing the file changes its sha256 and triggers a fresh synth automatically.
