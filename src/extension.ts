@@ -338,18 +338,31 @@ async function restoreLastActiveTab(context: vscode.ExtensionContext): Promise<v
 // Explorer right-click → "Folder Sync: Sync This Folder" routes here. The
 // arg is the URI of the right-clicked folder (vscode passes it positionally
 // for explorer/context menu items). When invoked from the command palette
-// the arg is undefined and we fall back to the first workspace folder so
-// the command still does something useful.
+// the arg is undefined and we fall back to the first workspace folder.
 //
-// Validation order (each branch surfaces a distinct info message so the
-// user understands why nothing opened):
-//   1. Topology has any sources at all → otherwise "no .sync.jsonc anywhere"
-//   2. Target is not inside a destination → destinations are read-only and
-//      can't be a sync *source*; common confusion when the user right-clicks
-//      a destination tree
-//   3. Find the nearest enclosing source by walking up from the target URI;
-//      none → "no source covers this folder"
-//   4. Open the scoped plan webview with a descriptive title
+// Resolution order (each click maps to at most one scoped plan; we never
+// open multiple panels at once because the right-clicked folder is a single
+// physical location and there's a unique source/destination mapping for it):
+//
+//   1. Topology has any sources at all → otherwise "no .sync.jsonc anywhere".
+//
+//   2. **Destination-side click** — the target sits inside some
+//      `dest.destRootUri` subtree. The user wants the plan that *would
+//      write* to this exact location, so we walk the mapping backwards: the
+//      relative path from `destRootUri` to the target is the same relative
+//      path from the source's `sourceFolderUri` to its mirror on the source
+//      side. We open the scoped plan against the source with that mapped
+//      path as the filter. If two destinations could match (deeper subpath
+//      nests inside a shallower one) we take the deeper — same nearest-
+//      ancestor rule as source resolution below.
+//
+//   3. **Source-side click** — the target sits inside a `sourceFolderUri`.
+//      Open the scoped plan against that source, filter = the target itself.
+//      Nearest-source rule when multiple sources nest.
+//
+//   4. Neither — info message. Covers "inside a destination workspace folder
+//      but outside every destination's subpath" and "no .sync.jsonc anywhere
+//      that covers this folder".
 
 async function runSyncThisFolder(
   manager: SyncManager,
@@ -369,12 +382,29 @@ async function runSyncThisFolder(
     );
     return;
   }
-  if (isInsideAnyDestination(topology, target)) {
-    void vscode.window.showInformationMessage(
-      'Folder Sync: that folder is inside a destination — destinations are read-only and cannot be synced from.',
+  const rel = vscode.workspace.asRelativePath(target, false) || target.toString();
+
+  // Destination-side click: map back to the source's mirror path and open
+  // the scoped plan from there. The user gets the same plan they'd see by
+  // right-clicking the matching source folder.
+  const destHit = findDestinationContaining(topology, target);
+  if (destHit) {
+    log(
+      `sync: syncThisFolder invoked (destination-side) — target=${target.toString()} ` +
+        `source=${destHit.source.configUri.toString()} ` +
+        `mapped=${destHit.mappedSourceUri.toString()}`,
     );
+    await openPlanPanel(topology, {
+      scope: {
+        sourceConfigUri: destHit.source.configUri,
+        pathFilter: destHit.mappedSourceUri,
+        pathFilterIsFile: false,
+      },
+      title: `Folder Sync — ${rel} (via ${destHit.source.workspaceFolderName})`,
+    });
     return;
   }
+
   const source = findNearestSourceForPath(topology, target);
   if (!source) {
     void vscode.window.showInformationMessage(
@@ -382,9 +412,8 @@ async function runSyncThisFolder(
     );
     return;
   }
-  const rel = vscode.workspace.asRelativePath(target, false) || target.toString();
   log(
-    `sync: syncThisFolder invoked — target=${target.toString()} ` +
+    `sync: syncThisFolder invoked (source-side) — target=${target.toString()} ` +
       `source=${source.configUri.toString()}`,
   );
   await openPlanPanel(topology, {
@@ -425,25 +454,43 @@ function findNearestSourceForPath(
 }
 
 /**
- * True when `target` is inside any destination's workspace folder — the user
- * right-clicked something on the read-only side. We check the workspace
- * folder root rather than the `destRootUri` so that a subpath-scoped
- * destination still flags every file under the whole folder (the entire
- * folder is treated as read-only in the snapshot's lock settings).
+ * Find the (source, destination) pair whose resolved `destRootUri` contains
+ * `target`, and compute the equivalent URI on the source side. Used to
+ * reverse-map a destination-side right-click to the scoped plan that would
+ * have written to that exact location.
+ *
+ * "Deepest match wins" — when one destination's subpath nests inside another
+ * (legal as long as they belong to different sources; same-source overlap is
+ * caught by topology diagnostics). The longer `destRootUri.path` is the
+ * tighter match.
+ *
+ * We check `destRootUri` (subpath-resolved) rather than `workspaceFolderUri`
+ * because a click outside the subpath isn't actually written by any source —
+ * for those cases the caller falls through to nearest-source resolution.
  */
-function isInsideAnyDestination(
+function findDestinationContaining(
   topology: ResolvedTopology,
   target: vscode.Uri,
-): boolean {
+): { source: ResolvedSource; mappedSourceUri: vscode.Uri } | undefined {
+  let best: { source: ResolvedSource; mappedSourceUri: vscode.Uri } | undefined;
+  let bestLen = -1;
   for (const src of topology.sources) {
     for (const dest of src.destinations) {
-      const root = dest.workspaceFolderUri;
+      const root = dest.destRootUri;
       if (!root) continue;
       if (!sameSchemeAuthority(root, target)) continue;
-      if (isPathAtOrUnder(root.path, target.path)) return true;
+      if (!isPathAtOrUnder(root.path, target.path)) continue;
+      const rootPath = stripTrailingSlash(root.path);
+      const rel = target.path === rootPath ? '' : target.path.slice(rootPath.length + 1);
+      const srcPath = stripTrailingSlash(src.sourceFolderUri.path);
+      const mappedPath = rel === '' ? srcPath : `${srcPath}/${rel}`;
+      if (rootPath.length > bestLen) {
+        best = { source: src, mappedSourceUri: src.sourceFolderUri.with({ path: mappedPath }) };
+        bestLen = rootPath.length;
+      }
     }
   }
-  return false;
+  return best;
 }
 
 function sameSchemeAuthority(a: vscode.Uri, b: vscode.Uri): boolean {
