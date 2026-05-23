@@ -1,17 +1,20 @@
 {
-  "name": "pptx-viewer",
-  "displayName": "Pptx Info",
-  "description": "Read-only pptx metadata and validation viewer for vscode.dev",
-  "version": "0.0.3",
-  "publisher": "local",
+  "name": "pptx-sync",
+  "displayName": "Presentation Folder Sync",
+  "description": "One-way folder sync and pptx inspector for vscode.dev.",
+  "version": "0.1.0",
+  "publisher": "sophtwhere",
   "license": "MIT",
-  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonathan-annett/pptx-viewer-ext.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Visualization",
-    "Other"
+    "Other",
+    "Visualization"
   ],
   "browser": "./dist/extension.js",
   "activationEvents": [
