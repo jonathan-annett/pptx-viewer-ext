@@ -67,32 +67,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   log('activate: custom editor registered for *.pptx');
 
-  // Re-open the last-active .pptx file. vscode.dev does not preserve custom
-  // editor tabs across PWA refresh — workspace folders come back (via
-  // maybeRestore above) but the focused .pptx tab is replaced by the welcome
-  // page. The provider writes the active panel's URI to globalState whenever
-  // it gains focus; here we replay it. Fire-and-forget — resolveCustomEditor
-  // awaits the managerPromise internally, so the panel populates as the rest
-  // of activation finishes. Failures (file moved/deleted since last session)
-  // surface only in the log.
-  const lastActivePptx = context.globalState.get<string>('pptxViewer.lastActiveUri');
-  if (lastActivePptx) {
-    log(`restore: re-opening last-active pptx — ${lastActivePptx}`);
-    void vscode.commands
-      .executeCommand(
-        'vscode.openWith',
-        vscode.Uri.parse(lastActivePptx),
-        PptxEditorProvider.viewType,
-      )
-      .then(
-        () => {},
-        (err: unknown) => {
-          log(
-            `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
-      );
-  }
+  // Re-open the last-active tab. vscode.dev does not preserve open editor
+  // tabs across PWA refresh — workspace folders come back (via maybeRestore
+  // above) but the focused file is replaced by the welcome page regardless
+  // of its editor type. The tracker (started further below) writes the
+  // active tab's URI + viewType to globalState whenever the active tab
+  // changes; here we replay it. Handles .pptx (custom), .sync.jsonc / .admin-
+  // sync.jsonc (custom), plain text, and notebooks; diffs / terminals /
+  // webviews are not restorable. Fire-and-forget — failures (file
+  // moved/deleted, view-type gone) surface only in the log.
+  migrateLegacyActiveTabKey(context);
+  void restoreLastActiveTab(context);
 
   // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
   // if missing — destinations are read-only by default; the source folder
@@ -143,6 +128,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Unblock any resolveCustomEditor calls that landed during activation —
   // they've been awaiting this since the provider was registered above.
   resolveManager(manager);
+
+  // Active-tab tracker for the PWA-refresh-restore loop above. Started after
+  // manager resolution so the initial capture sees whatever tab the restore
+  // just opened (rather than the welcome page during the brief window before).
+  context.subscriptions.push(startActiveTabTracker(context));
 
   // Snapshot writer subscribes to topology changes — every config edit or
   // workspace folder add/remove recaptures and rewrites .admin-sync.jsonc
@@ -221,6 +211,103 @@ function packageVersion(context: vscode.ExtensionContext): string {
   // context.extension is set when the activation context is fully wired up.
   // Fall back to "?" if it's not available (older API surfaces).
   return (context.extension?.packageJSON as { version?: string } | undefined)?.version ?? '?';
+}
+
+// ───── active-tab tracker / restorer ───────────────────────────────────────
+//
+// vscode.dev does not persist open editor tabs across PWA refresh. M4.6's
+// snapshot covers workspace folders + selected settings; this covers the
+// focused tab, whatever its editor type:
+//   - TabInputText        plain text editors (.sync.jsonc raw, .ts, .md, …)
+//   - TabInputCustom      our .pptx viewer, folderSync config + admin editors
+//   - TabInputNotebook    .ipynb and friends
+// Diff editors, terminals, and ad-hoc webview tabs are not restorable from
+// just a URI + viewType, so they fall through (no save → no restore).
+
+interface SavedActiveTab {
+  uri: string;
+  /** Set for custom editors and notebooks; absent for plain text. */
+  viewType?: string;
+}
+
+const ACTIVE_TAB_KEY = 'pptxViewer.lastActiveTab';
+const LEGACY_PPTX_KEY = 'pptxViewer.lastActiveUri';
+
+function tabInputToSaved(input: unknown): SavedActiveTab | null {
+  if (input instanceof vscode.TabInputText) {
+    return { uri: input.uri.toString() };
+  }
+  if (input instanceof vscode.TabInputCustom) {
+    return { uri: input.uri.toString(), viewType: input.viewType };
+  }
+  if (input instanceof vscode.TabInputNotebook) {
+    return { uri: input.uri.toString(), viewType: input.notebookType };
+  }
+  return null;
+}
+
+function startActiveTabTracker(context: vscode.ExtensionContext): vscode.Disposable {
+  const write = (): void => {
+    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    if (!tab) {
+      // No active tab (welcome page, empty group) — clear the marker so a
+      // refresh into a deliberately-empty workspace doesn't re-open stale
+      // state from a previous session.
+      void context.globalState.update(ACTIVE_TAB_KEY, undefined);
+      return;
+    }
+    const saved = tabInputToSaved(tab.input);
+    if (saved) {
+      void context.globalState.update(ACTIVE_TAB_KEY, saved);
+    }
+    // Unrestorable tab types (diff, terminal, webview): leave the marker as-is
+    // so refreshing on top of one still restores the last restorable tab the
+    // user had focused.
+  };
+  // Capture once now in case the user never switches tabs before the next
+  // refresh — onDidChangeTabs only fires on changes.
+  write();
+  return vscode.Disposable.from(
+    vscode.window.tabGroups.onDidChangeTabs(write),
+    vscode.window.tabGroups.onDidChangeTabGroups(write),
+  );
+}
+
+/**
+ * One-shot migration from the .pptx-only `pptxViewer.lastActiveUri` key
+ * (introduced one revision earlier) to the new generic
+ * `pptxViewer.lastActiveTab` shape. Idempotent and safe to call on every
+ * activate: when there's nothing to migrate it's a no-op.
+ */
+function migrateLegacyActiveTabKey(context: vscode.ExtensionContext): void {
+  if (context.globalState.get<SavedActiveTab>(ACTIVE_TAB_KEY)) return;
+  const legacy = context.globalState.get<string>(LEGACY_PPTX_KEY);
+  if (!legacy) return;
+  void context.globalState.update(ACTIVE_TAB_KEY, {
+    uri: legacy,
+    viewType: PptxEditorProvider.viewType,
+  });
+  void context.globalState.update(LEGACY_PPTX_KEY, undefined);
+  log(`restore: migrated legacy active-pptx key → lastActiveTab`);
+}
+
+async function restoreLastActiveTab(context: vscode.ExtensionContext): Promise<void> {
+  const saved = context.globalState.get<SavedActiveTab>(ACTIVE_TAB_KEY);
+  if (!saved?.uri) return;
+  try {
+    const uri = vscode.Uri.parse(saved.uri);
+    if (saved.viewType) {
+      log(`restore: re-opening last-active tab — ${saved.uri} (viewType=${saved.viewType})`);
+      await vscode.commands.executeCommand('vscode.openWith', uri, saved.viewType);
+    } else {
+      log(`restore: re-opening last-active tab — ${saved.uri} (text)`);
+      await vscode.commands.executeCommand('vscode.open', uri);
+    }
+  } catch (err) {
+    log(
+      `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 function logBuildInfo(): void {
