@@ -153,6 +153,8 @@
     "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
     "test:pdf-import-layout": "node --import tsx test/pdf-import-layout.test.ts",
     "test:pdf-import-config-html": "node --import tsx test/pdf-import-config-html.test.ts",
+    "test:upload-protocol": "node --import tsx test/upload-protocol.test.ts",
+    "test:upload-modal-html": "node --import tsx test/upload-modal-html.test.ts",
     "test:pptx-title-extract": "node --import tsx test/pptx-title-extract.test.ts",
     "test:thumbnail-synth": "node --import tsx test/thumbnail-synth.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",

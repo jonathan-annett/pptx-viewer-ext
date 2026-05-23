@@ -2,11 +2,11 @@
 
 ## Status (2026-05-23)
 
-**Shipped:** M1 (server S1+S2+S3) and M2 (deploy). The dropbox-server is live at `https://vscode.sophtwhere.com/dropbox/` with `upload-progress` frames and `qrSvg` field in the `code` reply. 48/48 server e2e tests green.
+**Shipped:** M1 (server S1+S2+S3), M2 (deploy), and M3 (pure extension modules). The dropbox-server is live at `https://vscode.sophtwhere.com/dropbox/` with `upload-progress` frames and `qrSvg` field in the `code` reply. 48/48 server e2e tests green. Extension-side: `src/upload/uploadProtocol.ts` validates all seven server→client message types (`code`, `upload-progress`, `upload-start`, `upload-end`, `expired`, `cancelled`, `error`) including a combined `parseServerFrame` that wraps `JSON.parse`; `src/upload/uploadModalHtml.ts` renders the modal as a state machine over seven phases (`connecting` / `waiting` / `uploading` / `applying` / `expired` / `error` / `done`) with shared helpers (`formatCountdown`, `progressPercent`, `formatBytes`) exported for the M5 wiring layer. 28 + 20 = 48 pure-module tests green via tsx; `npm run typecheck` clean.
 
-**Next:** M3 — pure extension-side modules (`src/upload/uploadProtocol.ts` validators + `src/upload/uploadModalHtml.ts` renderer), with tsx-runnable tests. No vscode imports in M3. See the M3 entry under "Milestones" for the full DoD.
+**Next:** M4 — the wired WS client (`src/upload/uploadClient.ts`) plus a throwaway `pptxViewer.probeUpload` command that opens a WS to the live server, requests a code, logs the reply, and cancels after 2 s. First time anything in this feature touches `vscode.*`.
 
-**Open commits (extension side):** none — the extension repo's last commit on this feature is `e950db5` (plan update marking M1 shipped). All extension code changes start in M3.
+**Open commits (extension side):** M3 unpushed at the time of writing — `src/upload/uploadProtocol.ts`, `src/upload/uploadModalHtml.ts`, `test/upload-protocol.test.ts`, `test/upload-modal-html.test.ts`, plus the two `package.json` script entries.
 
 **Pointers for a fresh session:**
 - This file (`pptx-upload-via-dropbox-plan.md`) is the active per-iteration plan.
@@ -212,13 +212,12 @@ cd ~/dropbox-server && git pull --ff-only && pm2 restart dropbox-server
 ```
 No `node --watch` — explicit restart is the convention, per substrate.
 
-### M3 — Pure modules
+### M3 — Pure modules *(✅ shipped 2026-05-23)*
 
-- `src/upload/uploadProtocol.ts` — message validators.
-- `src/upload/uploadModalHtml.ts` — modal renderer for happy / expired / error states.
-- `test/upload-protocol.test.ts`, `test/upload-modal-html.test.ts` — tsx-runnable.
-
-No vscode imports anywhere in M3. **DoD:** both test files green via `npx tsx --test test/upload-*.test.ts`.
+- **`src/upload/uploadProtocol.ts`** — `validateServerMessage` + `parseServerFrame` discriminate the seven inbound message types and return `{ok, value}` / `{ok, error}` shaped exactly like the dropbox-server's `protocol.js`. The strictness is deliberate: the server's protocol is closed, so an unrecognised `type` is treated as a hard failure rather than silently passed through. Per-type validators check field shapes (code is `[0-9A-HJKMNPQRSTVWXYZ]{5}` — `U` excluded, `I/L/O` already normalised by the server before emit; sha256 is lowercase hex; `expiresAt` parses as a Date; QR SVG must start with `<svg`) and surface specific error messages so log lines from the wiring layer point straight at the offending frame. `upload-progress.sizeBytes` is normalised: explicit `null`, omitted, and `undefined` all collapse to `null` since the server uses `null` to mean "no Content-Length seen".
+- **`src/upload/uploadModalHtml.ts`** — `renderUploadModalHtml(opts)` is a pure string-out renderer over a `UploadModalState` discriminated union. Phases: `connecting` (spinner), `waiting` (QR + URL + code + countdown), `uploading` (progress bar from `upload-progress` frames; indeterminate variant when `sizeBytes === null`), `applying` (second progress bar driven by the relay accumulator), `expired` / `error` (with close + retry buttons), `done` (terminal, no buttons). The QR SVG is injected verbatim — the server's `qrcode` lib emits a clean `<svg>` and the existing webview CSP (`script-src 'nonce-…'`) means inline `<script>` inside an SVG wouldn't execute anyway. Action buttons carry stable ids (`upload-cancel-btn`, `upload-close-btn`, `upload-retry-btn`, `upload-copy-btn`) so M5's wiring attaches handlers via `getElementById` rather than DOM traversal. CSS lives in `uploadModalCss()` and follows the existing modal pattern: themed via `--vscode-*` custom properties, narrow-viewport collapse on the QR/text grid via a `max-width: 480px` media query, indeterminate progress as a 30%-wide strip sliding back and forth via a `@keyframes upload-bar-indet` rule.
+- **Helpers exported for the wiring layer**: `formatCountdown(expiresAt, nowMs)` → `expires in M:SS` (pads seconds, floors at 0:00, falls back to `expires soon` for garbage input), `progressPercent(n, d)` → 0–100 integer (clamps top + bottom, returns 0 for null/zero denominator), `formatBytes(n)` → `512 B` / `1.0 KB` / `1.5 MB` / `1.0 GB` (always-1-decimal for KB+, 0 B for negative/non-finite input).
+- **Tests** — `test/upload-protocol.test.ts` (28 cases) covers every type, every required-field rejection, plus the JSON-parse wrapper. `test/upload-modal-html.test.ts` (20 cases) walks each phase asserting the expected ids, copy, and progress-bar markup, plus unit tests for the three helpers. Both runnable individually via `npm run test:upload-protocol` / `npm run test:upload-modal-html`. **DoD: green.**
 
 ### M4 — Wired WS client
 
