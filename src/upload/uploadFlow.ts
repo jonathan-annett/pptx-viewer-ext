@@ -183,7 +183,6 @@ class UploadFlow implements UploadFlowHandle {
     // we're hashing. Hashing is sub-millisecond on any device that runs
     // vscode.dev, but the discipline is the same as anywhere — UI commits
     // before async work starts.
-    log(`upload[${this.fileName}]: submitOtp accepted — flipping to sent, hashing`);
     this.transition({ ...this.state, otpStatus: 'sent', otpError: undefined });
     this.startCountdownTimer();
 
@@ -193,11 +192,7 @@ class UploadFlow implements UploadFlowHandle {
         // State may have changed while we were hashing (cancel, error, etc.).
         // Bail without sending if we're no longer in the waiting phase.
         if (this.disposed) return;
-        if (this.state.phase !== 'waiting') {
-          log(`upload[${this.fileName}]: OTP hashed but phase=${this.state.phase} — dropping`);
-          return;
-        }
-        log(`upload[${this.fileName}]: OTP hashed (${hash.slice(0, 12)}…) — calling client.sendOtp`);
+        if (this.state.phase !== 'waiting') return;
         this.client?.sendOtp(hash);
         // We don't optimistically mark accepted — wait for the server's
         // otp-ack so a transport failure doesn't silently leave the form

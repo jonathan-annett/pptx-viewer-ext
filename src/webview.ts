@@ -720,22 +720,19 @@ function viewerScript(): string {
     var otpInput = document.getElementById('upload-otp-input');
     var otpSubmitBtn = document.getElementById('upload-otp-submit-btn');
     function submitOtpFromInput(){
-      if (!otpInput) { vlog('otp-submit: no otp input found in DOM'); return; }
+      if (!otpInput) return;
       var raw = (otpInput.value || '').trim();
-      vlog('otp-submit: click — raw value len=' + raw.length);
       if (!/^\\d{6}$/.test(raw)) {
         // Local-side guard so we don't bounce a postMessage that the host
         // will obviously reject. Final source of truth is uploadFlow.
         // (Double-backslash on \\d because this code lives inside the
         // viewerScript() template literal — \\d in source becomes \d in
         // the emitted JS, which is what the RegExp actually needs.)
-        vlog('otp-submit: bounced by local 6-digit guard (raw=' + JSON.stringify(raw) + ')');
         otpInput.focus();
         otpInput.select();
         return;
       }
-      vlog('otp-submit: posting uploadOtpSubmit to host');
-      try { vscode.postMessage({type:'uploadOtpSubmit', otp: raw}); } catch (e) { vlog('otp-submit: postMessage threw — ' + (e && e.message || e)); }
+      try { vscode.postMessage({type:'uploadOtpSubmit', otp: raw}); } catch (_) {}
     }
     if (otpInput) {
       // Autofocus on first render of the waiting phase, but not on re-renders
