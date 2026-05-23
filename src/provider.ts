@@ -123,29 +123,63 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     // is recomputed on every render (drop, save-as, topology change).
     let lastPerFileDecisions = new Map<string, RowDecision>();
 
+    // Monotonic token for the in-flight sync-target build. Used to ignore
+    // late responses from a build that started against an old ParseResult
+    // (e.g. user dropped a new file mid-build). Each renderWithSyncTarget
+    // bumps it; the async build checks the token before posting.
+    let syncTargetBuildToken = 0;
+
     const renderWithSyncTarget = async (
       result: ParseResult,
       initialStatus?: string,
     ): Promise<void> => {
-      const syncTarget = await buildSyncTargetHtml(manager, document.uri);
-      lastPerFilePlans = syncTarget?.plans ?? [];
-      lastPerFileBlocking = syncTarget?.blocking ?? 0;
-      lastPerFileHasWork = syncTarget?.hasWork ?? false;
-      // The webview HTML is rebuilt on every render, so any decisions the
-      // user armed before are gone from the DOM. Reset the stash to match —
-      // remembered rows will come back pre-checked via the renderer.
-      // Seed the map from the plan's `remembered.accepted` items so the
-      // extension's view of armed decisions matches the rendered DOM (pre-
-      // checked checkboxes don't fire change events on load).
+      // 1. Render the shell IMMEDIATELY — thumbnail, metadata, validation,
+      //    and a placeholder "Sync target" section saying "Computing…".
+      //    The dry-run (buildSyncTargetHtml) is the slow phase; we kick it
+      //    off below and post the result back to the webview when it's
+      //    ready. Net effect: the user sees the bulk of the page snap into
+      //    place immediately, then the sync section fills in.
+      lastPerFilePlans = [];
+      lastPerFileBlocking = 0;
+      lastPerFileHasWork = false;
       lastPerFileDecisions = new Map();
-      const seeded = seedRememberedDecisions(lastPerFilePlans, lastPerFileDecisions);
-      if (seeded > 0) {
-        log(`viewer[${fileName}]: seeded ${seeded} remembered decision(s) from plan`);
-      }
-      const opts: RenderOptions = { syncTargetHtml: syncTarget?.html ?? null };
+      const opts: RenderOptions = { syncTargetLoading: true };
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
       currentResult = result;
+
+      // 2. Background build — when it lands, post a sync-target-html
+      //    message; the webview swaps it into the placeholder section
+      //    (or removes the section if there's no sync coverage).
+      const myToken = ++syncTargetBuildToken;
+      try {
+        const syncTarget = await buildSyncTargetHtml(manager, document.uri);
+        if (myToken !== syncTargetBuildToken) {
+          // A newer render superseded us before this build finished.
+          log(`viewer[${fileName}]: sync-target build #${myToken} superseded — discarding`);
+          return;
+        }
+        lastPerFilePlans = syncTarget?.plans ?? [];
+        lastPerFileBlocking = syncTarget?.blocking ?? 0;
+        lastPerFileHasWork = syncTarget?.hasWork ?? false;
+        // The webview HTML was rebuilt above, so any decisions the user
+        // armed before are gone from the DOM. The stash is already empty
+        // (reset above) — remembered rows come back pre-checked via the
+        // renderer, and we seed the map so the extension's view matches.
+        const seeded = seedRememberedDecisions(lastPerFilePlans, lastPerFileDecisions);
+        if (seeded > 0) {
+          log(`viewer[${fileName}]: seeded ${seeded} remembered decision(s) from plan`);
+        }
+        webviewPanel.webview.postMessage({
+          type: 'sync-target-html',
+          html: syncTarget?.html ?? null,
+        });
+      } catch (err) {
+        if (myToken !== syncTargetBuildToken) return;
+        const message = err instanceof Error ? err.message : String(err);
+        log(`viewer[${fileName}]: sync-target build threw — ${message}`);
+        webviewPanel.webview.postMessage({ type: 'sync-target-html', html: null });
+      }
     };
 
     webviewPanel.onDidDispose(() => {

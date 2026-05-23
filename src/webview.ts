@@ -45,8 +45,14 @@ const PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER =
 export interface RenderOptions {
   /** Pre-rendered HTML for the "Sync target" section, or null/undefined for
    *  none (file is outside any workspace). Passed verbatim — the caller is
-   *  responsible for HTML safety on its inputs. */
+   *  responsible for HTML safety on its inputs. Mutually exclusive with
+   *  `syncTargetLoading`; if both are set, `syncTargetLoading` wins. */
   syncTargetHtml?: string | null;
+  /** Render an empty Sync-target section with a "Computing…" placeholder so
+   *  the caller can post a `sync-target-html` message later to swap the
+   *  built dry-run HTML into the page without re-rendering the whole panel.
+   *  The placeholder section carries a stable id `sync-target-section`. */
+  syncTargetLoading?: boolean;
   /** Pre-populated status text shown in the action row. Used after a
    *  successful Update / drop-confirm to surface "Updated" without needing
    *  the new script to receive a postMessage that may race the re-render. */
@@ -84,8 +90,21 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
       </ul>
     </section>`;
 
-  const syncTargetSection = opts.syncTargetHtml
-    ? `<section>
+  // Sync target section. Three states:
+  //   - syncTargetLoading=true  → placeholder with "Computing…"; the webview
+  //                               will swap real HTML in via a postMessage
+  //                               handler when the dry-run completes.
+  //   - syncTargetHtml truthy   → render the supplied HTML directly (used
+  //                               by tests and any legacy synchronous caller).
+  //   - otherwise               → no section.
+  // Stable id `sync-target-section` lets the message handler find the host.
+  const syncTargetSection = opts.syncTargetLoading
+    ? `<section id="sync-target-section" class="sync-target-pending">
+      <h2>Sync target</h2>
+      <p class="sync-target-pending-msg">Computing\u2026</p>
+    </section>`
+    : opts.syncTargetHtml
+    ? `<section id="sync-target-section">
       <h2>Sync target</h2>
       ${opts.syncTargetHtml}
     </section>`
@@ -315,15 +334,20 @@ function viewerScript(): string {
   const extractSelect = document.getElementById('extract-select');
   const extractBtn = document.getElementById('extract-btn');
   const extractStatus = document.getElementById('extract-status');
-  const syncRunBtn = document.getElementById('sync-run-btn');
-  const syncRunSafeBtn = document.getElementById('sync-run-safe-btn');
-  const syncRunHint = document.getElementById('sync-run-hint');
+  // Sync-target action elements are re-resolved on demand rather than cached:
+  // the section starts as a "Computing…" placeholder and gets innerHTML-swapped
+  // when the dry-run completes, at which point any cached references would
+  // point at orphaned elements.
+  function getSyncRunBtn() { return document.getElementById('sync-run-btn'); }
+  function getSyncRunSafeBtn() { return document.getElementById('sync-run-safe-btn'); }
+  function getSyncRunHint() { return document.getElementById('sync-run-hint'); }
 
   // M5.1: live armed-count display on the orange button. Mirrors the
   // admin/config editor's refreshOrangeButton(). Hooked into the shared
   // decisionWiringScript via window.__decisionWiring so we get a callback
   // after every per-row checkbox toggle.
   function refreshOrangeButton() {
+    var syncRunSafeBtn = getSyncRunSafeBtn();
     if (!syncRunSafeBtn || syncRunSafeBtn.hidden) return;
     var n = 0;
     var cbs = document.querySelectorAll('.decision-input');
@@ -1020,7 +1044,14 @@ function viewerScript(): string {
   // Both buttons post the same {type:'run-sync'}; the extension decides what
   // to do based on the in-memory decisions Map. Orange differs from green
   // only in that the user has armed some per-row overrides before clicking.
+  //
+  // The clicks are delegated on document so the handlers survive the
+  // sync-target-html innerHTML swap (the buttons don't exist when this
+  // script runs — they arrive with the dry-run result).
   function lockSyncButtons(label){
+    var syncRunBtn = getSyncRunBtn();
+    var syncRunSafeBtn = getSyncRunSafeBtn();
+    var syncRunHint = getSyncRunHint();
     if (syncRunBtn) {
       syncRunBtn.disabled = true;
       syncRunBtn.textContent = label;
@@ -1033,15 +1064,13 @@ function viewerScript(): string {
     setBusy(true);
     setStatus(label);
   }
-  if (syncRunBtn) syncRunBtn.addEventListener('click', function(){
-    if (syncRunBtn.disabled) return;
-    vlog('click → run-sync (green)');
-    lockSyncButtons('Syncing\u2026');
-    try { vscode.postMessage({type:'run-sync'}); } catch (_) {}
-  });
-  if (syncRunSafeBtn) syncRunSafeBtn.addEventListener('click', function(){
-    if (syncRunSafeBtn.disabled) return;
-    vlog('click → run-sync (orange / safe items only)');
+  document.addEventListener('click', function(ev){
+    var t = ev.target;
+    if (!t) return;
+    var id = t.id;
+    if (id !== 'sync-run-btn' && id !== 'sync-run-safe-btn') return;
+    if (t.disabled) return;
+    vlog('click → run-sync (' + (id === 'sync-run-btn' ? 'green' : 'orange / safe items only') + ')');
     lockSyncButtons('Syncing\u2026');
     try { vscode.postMessage({type:'run-sync'}); } catch (_) {}
   });
@@ -1085,6 +1114,9 @@ function viewerScript(): string {
       // this script entirely. These messages only land if the extension chose
       // not to re-render (defensive no-currentResult case, or an error before
       // the re-render fires).
+      var syncRunBtn = getSyncRunBtn();
+      var syncRunSafeBtn = getSyncRunSafeBtn();
+      var syncRunHint = getSyncRunHint();
       if (m.status === 'running') {
         lockSyncButtons('Syncing\u2026');
       } else if (m.status === 'done') {
@@ -1112,6 +1144,25 @@ function viewerScript(): string {
         }
         refreshOrangeButton();
         if (syncRunHint) syncRunHint.textContent = '';
+      }
+      return;
+    }
+
+    if (m.type === 'sync-target-html') {
+      // Async dry-run finished — swap the "Computing…" placeholder for the
+      // real plan HTML, or remove the section entirely when the file has no
+      // sync coverage (extension posts null in that case). Buttons inside
+      // the swapped HTML are reached via event delegation, so no rewiring
+      // is needed here beyond refreshing the orange button label (it counts
+      // freshly-rendered armed checkboxes).
+      var section = document.getElementById('sync-target-section');
+      if (!section) return;
+      if (typeof m.html === 'string' && m.html.length > 0) {
+        section.classList.remove('sync-target-pending');
+        section.innerHTML = '<h2>Sync target</h2>' + m.html;
+        refreshOrangeButton();
+      } else {
+        section.remove();
       }
       return;
     }
@@ -1448,6 +1499,13 @@ function css(): string {
       gap: 12px;
       margin-top: 12px;
       flex-wrap: wrap;
+    }
+    /* "Computing…" placeholder rendered while the dry-run is in flight.
+       Muted because it's transient; the real section replaces it within
+       a few hundred ms on typical workspaces. */
+    .sync-target-pending-msg {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
     }
     .sync-run-btn {
       background: var(--vscode-charts-green, #4caf50);
