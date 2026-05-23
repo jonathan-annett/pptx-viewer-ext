@@ -67,6 +67,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   log('activate: custom editor registered for *.pptx');
 
+  // Re-open the last-active .pptx file. vscode.dev does not preserve custom
+  // editor tabs across PWA refresh — workspace folders come back (via
+  // maybeRestore above) but the focused .pptx tab is replaced by the welcome
+  // page. The provider writes the active panel's URI to globalState whenever
+  // it gains focus; here we replay it. Fire-and-forget — resolveCustomEditor
+  // awaits the managerPromise internally, so the panel populates as the rest
+  // of activation finishes. Failures (file moved/deleted since last session)
+  // surface only in the log.
+  const lastActivePptx = context.globalState.get<string>('pptxViewer.lastActiveUri');
+  if (lastActivePptx) {
+    log(`restore: re-opening last-active pptx — ${lastActivePptx}`);
+    void vscode.commands
+      .executeCommand(
+        'vscode.openWith',
+        vscode.Uri.parse(lastActivePptx),
+        PptxEditorProvider.viewType,
+      )
+      .then(
+        () => {},
+        (err: unknown) => {
+          log(
+            `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
+          );
+        },
+      );
+  }
+
   // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
   // if missing — destinations are read-only by default; the source folder
   // (workspaceFolders[0]) is the writable carve-out. No-op when the user has

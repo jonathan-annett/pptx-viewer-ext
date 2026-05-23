@@ -148,8 +148,28 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       currentResult = result;
     };
 
+    // vscode.dev does not persist custom editor tabs across PWA refresh —
+    // the workspace folders come back (via M4.6 snapshot restore) but the
+    // focused .pptx tab does not. We track the last-active .pptx URI in
+    // globalState and have activate() re-open it after restoration. Save
+    // whenever this panel becomes active, clear on graceful disposal (a
+    // PWA refresh kills the worker before onDidDispose fires, so the
+    // marker survives that path).
+    const docUriStr = document.uri.toString();
+    const writeActive = (): void => {
+      if (webviewPanel.active) {
+        void this.globalState.update('pptxViewer.lastActiveUri', docUriStr);
+      }
+    };
+    writeActive();
+    webviewPanel.onDidChangeViewState(writeActive);
+
     webviewPanel.onDidDispose(() => {
       pendingCandidate = null;
+      const cur = this.globalState.get<string>('pptxViewer.lastActiveUri');
+      if (cur === docUriStr) {
+        void this.globalState.update('pptxViewer.lastActiveUri', undefined);
+      }
     });
 
     webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
