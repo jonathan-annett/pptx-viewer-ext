@@ -837,16 +837,26 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 
 **Slotting:** wait for M5.2 data, then implement. Prerequisite for the focus-following panel (post-v1) — that feature multiplies the validator pass across every focus change and can't ship until the cache lands.
 
-### M6 — Polish + remaining surfaces *(unblocked — M5.3 D deferred as non-v1)*
+### M6 — Polish + remaining surfaces *(in flight — Phase A + B shipped, C/D/E pending)*
 
-- Explorer context menu entries with grey-out rules (no `.sync.jsonc` at/above selection; selection inside a destination)
-- Folder-scoped invocation: nearest-yaml rule + relative-offset destination subpath
-- Status bar button as alternate workspace-wide invocation
-- Orphan `.tmp` cleanup at the start of each run's destination reverse pass
-- Manifest version-mismatch refusal with a clear error
-- Walk the Definition of Done checklist; close any remaining gaps
+Sequenced as five phases so each can ship + live-test independently on the VPS harness.
+
+- **Phase A — Status bar primary action *(shipped 2026-05-23, commit `7b05294`-range)*.** Status bar item's click target switched from `folderSync.showTopology` to `folderSync.openPlan` for the healthy state; falls back to `showTopology` for empty/error states where there's no useful plan to render. Tooltip updated. Workspace-wide invocation now lives on the status bar; the topology dump stays available via command palette.
+- **Phase B — Explorer context menu + folder-scoped invocation *(shipped 2026-05-23, commits `65d4715`, `44ed975`).*** New command `folderSync.syncThisFolder` registered against the explorer/context menu under `7_modification@10`. `when` clause is `explorerResourceIsFolder && folderSync.hasAnySource`, where `folderSync.hasAnySource` is a context key written from `manager.onDidChange` — menu entry disappears entirely when the workspace has no `.sync.jsonc` files. Click handler:
+  - **Source-side click** → nearest enclosing source via path-ancestor walk (deepest match wins for nested sources), pathFilter = the clicked URI.
+  - **Destination-side click** → reverse mapping: relative path under `destRootUri` is also the relative path under `sourceFolderUri`; we open the scoped plan against the owning source with the mapped path as the filter. The user sees the same plan they'd see by right-clicking the equivalent source folder, which was the original ask. Deepest-destRootUri wins.
+  - **Neither** → info toast "no .sync.jsonc covers this folder".
+
+  `openPlanPanel` gained an optional `opts` arg (`{ scope?, title? }`) so the scoped panel carries a folder-specific tab title (e.g. `Folder Sync — myproject/src` or `Folder Sync — myproject/build (via destinationName)`) and can sit alongside the workspace-wide one. Helpers (`findNearestSourceForPath`, `findDestinationContaining`) inlined in `src/extension.ts` — small enough not to warrant a pure module of their own, and the path-ancestor logic doesn't touch anything tsx would want to test in isolation.
+- **Phase C — Orphan `.tmp` cleanup *(pending)*.** Add `**/*.tmp` to `BUILT_IN_IGNORES` so an interrupted `executor.ts` `TMP_SUFFIX` write doesn't surface as a fake "destination-only" entry in the next plan. Pre-execute sweep in `runSync.ts` deletes orphans before the run starts; cleanup is best-effort + logged.
+- **Phase D — Manifest version-mismatch refusal *(pending)*.** `normalise()` in `manifest.ts` currently logs a version mismatch and falls back to empty — quietly losing the user's prior placement record. Change to return a discriminated union (`{ kind: 'ok', manifest }` / `{ kind: 'version-mismatch', actual }`). Planner surfaces mismatch as `skippedReason`; `runSync` skips the destination with a clear error toast linking to the manifest file.
+- **Phase E — DoD walkthrough + sign-off *(pending)*.** Walk the v1 Definition of Done checklist, close any remaining gaps, update `CLAUDE.md`'s "What's currently shipping" section to reflect M6 complete, and stamp this section as shipped.
 
 **Done when:** every Definition-of-Done bullet below is satisfied.
+
+**Pre-existing test debt surfaced during M6.B** (worth noting; not blocking):
+
+- `test/sync-decisions.test.ts:295` uses `code: 'showMediaCtrlsWithVideo'` in a `PlanWarning` fixture, but the closed union in `src/sync/plan.ts:71` is `'linked-media' | 'show-type' | 'media-controls' | 'misfiled-content'`. `tsc` errors; test never runs. Pure rename to `'media-controls'`. Bundle ships clean (esbuild does syntactic transpile only).
 
 ---
 
