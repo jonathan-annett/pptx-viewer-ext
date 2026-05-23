@@ -1,5 +1,21 @@
 # Pptx Upload via Dropbox — Plan
 
+## Status (2026-05-23)
+
+**Shipped:** M1 (server S1+S2+S3) and M2 (deploy). The dropbox-server is live at `https://vscode.sophtwhere.com/dropbox/` with `upload-progress` frames and `qrSvg` field in the `code` reply. 48/48 server e2e tests green.
+
+**Next:** M3 — pure extension-side modules (`src/upload/uploadProtocol.ts` validators + `src/upload/uploadModalHtml.ts` renderer), with tsx-runnable tests. No vscode imports in M3. See the M3 entry under "Milestones" for the full DoD.
+
+**Open commits (extension side):** none — the extension repo's last commit on this feature is `e950db5` (plan update marking M1 shipped). All extension code changes start in M3.
+
+**Pointers for a fresh session:**
+- This file (`pptx-upload-via-dropbox-plan.md`) is the active per-iteration plan.
+- `CLAUDE.md` is substrate — read it for the project's conventions (especially the pure/wired split, no Node APIs in extension code, web-extension constraints).
+- Sibling repo: `~/projects/dropbox-server/` — `PLAN.md` is the spec, `README.md` documents the wire protocol including the new `upload-progress` and `qrSvg` additions.
+- Memory: `feedback_pm2_esm_autoboot.md`, `reference_dropbox_server.md`, `project_upload_via_dropbox.md`.
+
+---
+
 ## Purpose
 
 Add a third "replace the current file" affordance to the pptx viewer: in addition to **Browse to Update…** (local file picker) and drag-and-drop, the user can click **Upload to Update…** to get a short URL + QR code. Opening that URL on another device (typically a phone) and picking a file relays the bytes back to the viewer over a WebSocket. The viewer then feeds the bytes through the existing ingest pipeline — straight overwrite for `.pptx`, the PDF→PPTX import flow for `.pdf`.
@@ -112,9 +128,9 @@ E2E coverage of the WS roundtrip stays in `~/projects/dropbox-server/test/e2e.te
 
 ---
 
-## Server-side additions (live in `~/projects/dropbox-server/`)
+## Server-side additions (live in `~/projects/dropbox-server/`) — ✅ all shipped 2026-05-23
 
-Three additions, each small. Each lands as its own commit in the dropbox-server repo, not this one.
+Retained for historical context. The "as-shipped" summaries (with commits, throttle details, and live-verification notes) are under **M1** in the Milestones section below; this section preserves the original spec for what was asked of the server.
 
 ### S1 — `upload-progress` events
 
