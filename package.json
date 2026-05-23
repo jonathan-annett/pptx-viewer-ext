@@ -79,6 +79,11 @@
         "category": "Folder Sync"
       },
       {
+        "command": "folderSync.syncThisFolder",
+        "title": "Folder Sync: Sync This Folder",
+        "category": "Folder Sync"
+      },
+      {
         "command": "folderSync.probeColdRead",
         "title": "Folder Sync: Probe Cold-Read (M4.6 diagnostic)",
         "category": "Folder Sync"
@@ -98,7 +103,16 @@
         "title": "Folder Sync: Open Admin Config",
         "category": "Folder Sync"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "folderSync.syncThisFolder",
+          "when": "explorerResourceIsFolder && folderSync.hasAnySource",
+          "group": "7_modification@10"
+        }
+      ]
+    }
   },
   "scripts": {
     "bundle": "node esbuild.config.js",

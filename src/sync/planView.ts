@@ -5,8 +5,8 @@
 // vscode-touching wrapper: it builds the plan, opens a panel, wires Cancel.
 
 import * as vscode from 'vscode';
-import type { PlanForDestination } from './planner';
-import { buildDryRunPlan } from './planner';
+import type { PlanForDestination, ScopedPlanOptions } from './planner';
+import { buildDryRunPlan, buildScopedDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary } from './runSync';
@@ -19,16 +19,44 @@ import {
 import { log } from '../log';
 
 /**
+ * Optional scope + title for `openPlanPanel`. When `scope` is set, the panel
+ * shows a single-source (and optionally path-filtered) plan via
+ * `buildScopedDryRunPlan`; otherwise it falls back to the workspace-wide
+ * `buildDryRunPlan`. `title` overrides the panel title — useful so the user
+ * can tell "this folder" plans apart from the workspace-wide one when both
+ * are open in adjacent tabs.
+ */
+export interface OpenPlanOptions {
+  scope?: ScopedPlanOptions;
+  title?: string;
+}
+
+/**
  * Open the plan webview against the current topology. Builds the dry-run
  * plan, opens a single column-active webview panel, wires Cancel to dispose.
  * The panel is recreated on each invocation — there's no caching for v1, the
  * plan is cheap to rebuild and the user benefits from the freshest state.
+ *
+ * M6: optional `opts.scope` routes through `buildScopedDryRunPlan` for the
+ * "Sync This Folder" Explorer context-menu invocation; `opts.title` lets the
+ * caller distinguish scoped panels from the workspace-wide one in the tab bar.
  */
-export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
-  log('sync: openPlan invoked');
+export async function openPlanPanel(
+  topology: ResolvedTopology,
+  opts?: OpenPlanOptions,
+): Promise<void> {
+  log(
+    opts?.scope
+      ? `sync: openPlan invoked (scoped — source=${opts.scope.sourceConfigUri.toString()}` +
+          (opts.scope.pathFilter ? `, filter=${opts.scope.pathFilter.toString()}` : '') +
+          ')'
+      : 'sync: openPlan invoked',
+  );
   let plans: PlanForDestination[] = [];
   try {
-    plans = await buildDryRunPlan(topology);
+    plans = opts?.scope
+      ? await buildScopedDryRunPlan(topology, opts.scope)
+      : await buildDryRunPlan(topology);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync: openPlan failed to build plan — ${message}`);
@@ -43,7 +71,7 @@ export async function openPlanPanel(topology: ResolvedTopology): Promise<void> {
 
   const panel = vscode.window.createWebviewPanel(
     'folderSync.plan',
-    'Folder Sync — plan',
+    opts?.title ?? 'Folder Sync — plan',
     { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
     {
       enableScripts: true,

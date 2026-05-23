@@ -7,6 +7,7 @@ import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
+import type { ResolvedSource, ResolvedTopology } from './sync/topology';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { registerProbe } from './sync/probe';
@@ -141,6 +142,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     startSnapshotWriter(snapshotStore, (listener) => manager.onDidChange(listener)),
   );
   createStatusBarItem(context, manager);
+  // M6 — context key drives the Explorer context-menu visibility for
+  // "Sync This Folder". We grey the menu entry out (via a `when` clause in
+  // package.json) whenever the workspace has zero sources, so the user
+  // never sees an unusable menu item. Per-selection greying (e.g. "this
+  // selection is inside a destination") would require VS Code APIs that
+  // don't exist for explorer right-click; we handle that at click-time
+  // with an information message instead.
+  const writeHasAnySource = (topology: ResolvedTopology): void => {
+    void vscode.commands.executeCommand(
+      'setContext',
+      'folderSync.hasAnySource',
+      topology.sources.length > 0,
+    );
+  };
+  writeHasAnySource(manager.getTopology());
+  context.subscriptions.push(manager.onDidChange(writeHasAnySource));
   context.subscriptions.push(SyncConfigEditorProvider.register(manager));
   log('activate: .sync.jsonc custom editor registered');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
@@ -167,6 +184,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('folderSync.openPlan', async () => {
       await openPlanPanel(manager.getTopology());
     }),
+    vscode.commands.registerCommand(
+      'folderSync.syncThisFolder',
+      async (uriArg?: vscode.Uri) => {
+        await runSyncThisFolder(manager, uriArg);
+      },
+    ),
     registerProbe(context),
     vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
       log('snapshot: showSnapshot invoked');
@@ -308,6 +331,135 @@ async function restoreLastActiveTab(context: vscode.ExtensionContext): Promise<v
       `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+// ───── M6 — folder-scoped invocation ───────────────────────────────────────
+//
+// Explorer right-click → "Folder Sync: Sync This Folder" routes here. The
+// arg is the URI of the right-clicked folder (vscode passes it positionally
+// for explorer/context menu items). When invoked from the command palette
+// the arg is undefined and we fall back to the first workspace folder so
+// the command still does something useful.
+//
+// Validation order (each branch surfaces a distinct info message so the
+// user understands why nothing opened):
+//   1. Topology has any sources at all → otherwise "no .sync.jsonc anywhere"
+//   2. Target is not inside a destination → destinations are read-only and
+//      can't be a sync *source*; common confusion when the user right-clicks
+//      a destination tree
+//   3. Find the nearest enclosing source by walking up from the target URI;
+//      none → "no source covers this folder"
+//   4. Open the scoped plan webview with a descriptive title
+
+async function runSyncThisFolder(
+  manager: SyncManager,
+  uriArg?: vscode.Uri,
+): Promise<void> {
+  const target = uriArg ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+  if (!target) {
+    void vscode.window.showInformationMessage(
+      'Folder Sync: no folder selected and no workspace folders are open.',
+    );
+    return;
+  }
+  const topology = manager.getTopology();
+  if (topology.sources.length === 0) {
+    void vscode.window.showInformationMessage(
+      'Folder Sync: no .sync.jsonc found in the workspace. Add one to a source folder first.',
+    );
+    return;
+  }
+  if (isInsideAnyDestination(topology, target)) {
+    void vscode.window.showInformationMessage(
+      'Folder Sync: that folder is inside a destination — destinations are read-only and cannot be synced from.',
+    );
+    return;
+  }
+  const source = findNearestSourceForPath(topology, target);
+  if (!source) {
+    void vscode.window.showInformationMessage(
+      'Folder Sync: no .sync.jsonc covers this folder. Add one at this folder or an ancestor.',
+    );
+    return;
+  }
+  const rel = vscode.workspace.asRelativePath(target, false) || target.toString();
+  log(
+    `sync: syncThisFolder invoked — target=${target.toString()} ` +
+      `source=${source.configUri.toString()}`,
+  );
+  await openPlanPanel(topology, {
+    scope: {
+      sourceConfigUri: source.configUri,
+      // Skip the stat round-trip — the explorer/context entry's `when`
+      // clause is `explorerResourceIsFolder`, and command-palette fallback
+      // uses workspaceFolders[0] which is always a folder.
+      pathFilter: target,
+      pathFilterIsFile: false,
+    },
+    title: `Folder Sync — ${rel}`,
+  });
+}
+
+/**
+ * Find the source whose `sourceFolderUri` is the closest ancestor of `target`
+ * (or equal to it). Returns the deepest match when multiple sources nest —
+ * that's the "nearest yaml" rule from the plan. URI comparison is by path
+ * after normalising trailing slashes; same scheme/authority required.
+ */
+function findNearestSourceForPath(
+  topology: ResolvedTopology,
+  target: vscode.Uri,
+): ResolvedSource | undefined {
+  let best: ResolvedSource | undefined;
+  let bestLen = -1;
+  for (const src of topology.sources) {
+    if (!sameSchemeAuthority(src.sourceFolderUri, target)) continue;
+    if (!isPathAtOrUnder(src.sourceFolderUri.path, target.path)) continue;
+    const len = stripTrailingSlash(src.sourceFolderUri.path).length;
+    if (len > bestLen) {
+      best = src;
+      bestLen = len;
+    }
+  }
+  return best;
+}
+
+/**
+ * True when `target` is inside any destination's workspace folder — the user
+ * right-clicked something on the read-only side. We check the workspace
+ * folder root rather than the `destRootUri` so that a subpath-scoped
+ * destination still flags every file under the whole folder (the entire
+ * folder is treated as read-only in the snapshot's lock settings).
+ */
+function isInsideAnyDestination(
+  topology: ResolvedTopology,
+  target: vscode.Uri,
+): boolean {
+  for (const src of topology.sources) {
+    for (const dest of src.destinations) {
+      const root = dest.workspaceFolderUri;
+      if (!root) continue;
+      if (!sameSchemeAuthority(root, target)) continue;
+      if (isPathAtOrUnder(root.path, target.path)) return true;
+    }
+  }
+  return false;
+}
+
+function sameSchemeAuthority(a: vscode.Uri, b: vscode.Uri): boolean {
+  return a.scheme === b.scheme && a.authority === b.authority;
+}
+
+/** True when `childPath` is equal to `basePath` or sits below it. Path strings
+ *  only — caller has already matched scheme/authority. */
+function isPathAtOrUnder(basePath: string, childPath: string): boolean {
+  const base = stripTrailingSlash(basePath);
+  if (childPath === base) return true;
+  return childPath.startsWith(base + '/');
+}
+
+function stripTrailingSlash(p: string): string {
+  return p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p;
 }
 
 function logBuildInfo(): void {
