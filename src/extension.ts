@@ -25,6 +25,9 @@ import {
   showSnapshotCommand,
   startSnapshotWriter,
 } from './sync/restoreFlow';
+import { createSearchEngine } from './search/searchEngine';
+import { openSearchIndexStore } from './search/indexStore';
+import { startSearchIndexer } from './search/indexer';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -229,6 +232,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
   log('activate: folder sync manager initialised');
+
+  // Search subsystem — M4. The IDB store opens lazily (returns undefined
+  // when IndexedDB isn't reachable; indexer + engine still work in-memory).
+  // The engine is hydrated from the store before the indexer starts so a
+  // warm-load can serve hits immediately while the background pass walks
+  // the disk for new/changed/deleted files. M5 will register the command
+  // + webview panel that calls `engine.search(query)`.
+  try {
+    const engine = createSearchEngine();
+    const store = await openSearchIndexStore();
+    if (store) {
+      const warm = await store.getAll();
+      engine.load(warm);
+      log(`search-index: idb=available warm-entries=${warm.length}`);
+    } else {
+      log('search-index: idb=unavailable (in-memory only)');
+    }
+    const indexer = startSearchIndexer({ engine, store, manager });
+    context.subscriptions.push(indexer);
+    if (store) {
+      context.subscriptions.push({ dispose: () => store.close() });
+    }
+    log(`search-index: scope folders=${indexer.getScope().folderUris.length}`);
+  } catch (err) {
+    log(
+      `search-index: init failed — ${err instanceof Error ? err.message : String(err)} (search disabled this session)`,
+    );
+  }
 }
 
 export function deactivate(): void {

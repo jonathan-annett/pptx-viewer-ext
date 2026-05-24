@@ -62,6 +62,16 @@ export interface SearchEngine {
    *  (as a freshly-copied array) for `sha256`, or undefined when not
    *  present. */
   getUrisForSha(sha256: string): string[] | undefined;
+  /** Lookup helper for the wired indexer. Returns the sha currently
+   *  mapped to `uri`, or undefined when the URI isn't tracked. Used to
+   *  mirror engine evictions into the IDB index store: after a removeUri
+   *  that empties the sha's URI set, the indexer drops the IDB record. */
+  getShaForUri(uri: string): string | undefined;
+  /** Snapshot of every tracked URI. Used by the indexer to compute
+   *  evictions when topology changes shrink the source-folder scope.
+   *  Returns a freshly-copied array so callers can iterate without
+   *  worrying about concurrent mutations during a walk. */
+  getAllUris(): string[];
   /** Run a search. Empty input → empty array (the panel chooses what to
    *  render for an empty input box; we don't dump the whole index). */
   search(query: string): SearchHit[];
@@ -174,6 +184,14 @@ export function createSearchEngine(): SearchEngine {
       const set = shaToUris.get(sha256);
       if (!set) return undefined;
       return [...set];
+    },
+
+    getShaForUri(uri) {
+      return uriToSha.get(uri);
+    },
+
+    getAllUris() {
+      return [...uriToSha.keys()];
     },
 
     search(rawQuery) {
