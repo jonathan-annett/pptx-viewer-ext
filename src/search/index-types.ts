@@ -79,6 +79,12 @@ export interface SearchHit {
   matchedFields: SearchField[];
 }
 
+/** Combinator across query terms. Default 'and' (every term must hit
+ *  somewhere); 'or' widens the search so a single hitting term qualifies
+ *  the file. OR mode is useful for fishing out a specific deck by a
+ *  filename fragment when the metadata is unhelpful. */
+export type SearchOp = 'and' | 'or';
+
 /** Tokenised, folded query. Built by the engine from a raw input string;
  *  exported as a type so the scorer can be unit-tested without going
  *  through the engine. */
@@ -87,4 +93,6 @@ export interface SearchQuery {
   raw: string;
   /** Folded + tokenised query terms. Empty array ↔ "no query". */
   terms: string[];
+  /** AND across terms by default; OR widens the match. */
+  op: SearchOp;
 }

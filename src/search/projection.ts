@@ -140,3 +140,27 @@ export function projectFromCached(
     mtime: info.mtime,
   });
 }
+
+/**
+ * Project a file we know nothing about beyond its bytes-hash + basename.
+ * Used for `.pdf` files, which the search subsystem doesn't open or
+ * parse — the indexer skips the pptx parse path entirely for PDFs and
+ * surfaces them as filename-only hits. Author and slide-text fields
+ * stay empty, so OR-mode queries can still hit on a filename fragment
+ * while AND-mode queries with non-filename terms naturally exclude PDFs.
+ */
+export function projectFilenameOnly(opts: {
+  sha256: string;
+  fileName: string;
+  sizeBytes: number;
+  mtime: number;
+}): SearchProjection {
+  return buildProjection({
+    sha256: opts.sha256,
+    filename: opts.fileName,
+    author: '',
+    slideText: '',
+    sizeBytes: opts.sizeBytes,
+    mtime: opts.mtime,
+  });
+}

@@ -28,8 +28,12 @@ import { groupHitsByFolder, folderLabelFor } from './scope';
 import {
   renderSearchUpdateModalHtml,
   renderSearchUpdateIdenticalModalHtml,
+  renderSearchUpdatePdfModalHtml,
 } from './updateModalHtml';
 import { getParseCacheSingleton, parsePptxCached } from '../sync/parseCache';
+import { hashFileAtUri } from '../sync/hash';
+import { getHashCacheSingleton } from '../sync/hashCache';
+import { vscodeFs } from '../sync/vscodeFs';
 
 export interface OpenSearchPanelDeps {
   engine: SearchEngine;
@@ -105,7 +109,8 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
       const q = typeof (msg as { query?: unknown }).query === 'string'
         ? ((msg as { query: string }).query)
         : '';
-      handleSearch(panel, deps.engine, deps.indexer, q);
+      const op = (msg as { op?: unknown }).op === 'or' ? 'or' : 'and';
+      handleSearch(panel, deps.engine, deps.indexer, q, op);
       return;
     }
     if (m.type === 'open') {
@@ -230,6 +235,42 @@ async function handleUpdateFile(
   const targetFileName = basenameFromUri(targetUri);
   const candidateFileName = basenameFromUri(sourceUri);
 
+  // Type-routing before the parse step. PDFs go through a different
+  // compare path (no pptx parser); mixed pairs are refused outright
+  // because the search panel doesn't yet know how to render the
+  // PDF→PPTX import flow (the viewer's drag-and-drop is the existing
+  // path for that). The "no-PDF support" case is logged so a future
+  // milestone can decide whether to add cross-type routing here.
+  const targetIsPdf = isPdfBasename(targetFileName);
+  const sourceIsPdf = isPdfBasename(candidateFileName);
+  if (targetIsPdf !== sourceIsPdf) {
+    const message =
+      'Cannot update across file types. ' +
+      'For PDF → PPTX, use the viewer\u2019s drag-and-drop or "Update from file\u2026" instead.';
+    log(
+      `pptxSearch: updateFile — refused mixed pair ` +
+        `(target=${targetIsPdf ? 'pdf' : 'pptx'} source=${sourceIsPdf ? 'pdf' : 'pptx'})`,
+    );
+    void vscode.window.showWarningMessage(message);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message,
+    });
+    return null;
+  }
+  if (targetIsPdf && sourceIsPdf) {
+    return await handleUpdateFilePdf(
+      panel,
+      targetUri,
+      sourceUri,
+      targetFileName,
+      candidateFileName,
+      targetFolderLabel,
+      candidateFolderLabel,
+    );
+  }
+
   // Read + parse both files. parsePptxCached uses the URI-hash cache under
   // the hood so a recently-indexed file hits cache and pays only a hash.
   let targetBytes: Uint8Array;
@@ -319,6 +360,122 @@ async function handleUpdateFile(
     candidateFileName,
     targetFileName,
   };
+}
+
+/**
+ * PDF↔PDF update path. We never parse PDFs in the search subsystem, so the
+ * compare modal is a thin filename/size/sha grid rather than the
+ * slide-metadata grid the pptx path uses. The Confirm flow downstream is
+ * shared with the pptx path — `handleUpdateConfirm` just does fs.writeFile
+ * (+ optional fs.delete + open) and the parse-cache forget is a safe no-op
+ * for a sha we never inserted into the cache.
+ */
+async function handleUpdateFilePdf(
+  panel: vscode.WebviewPanel,
+  targetUri: vscode.Uri,
+  sourceUri: vscode.Uri,
+  targetFileName: string,
+  candidateFileName: string,
+  targetFolderLabel: string,
+  candidateFolderLabel: string,
+): Promise<PendingUpdate | null> {
+  const hashCache = getHashCacheSingleton();
+  let candidateBytes: Uint8Array;
+  let targetSha: string;
+  let candidateSha: string;
+  let targetSize: number;
+  let candidateSize: number;
+  let targetMtime: number;
+  let candidateMtime: number;
+  try {
+    // Hash the target via the URI hash cache (no bytes needed unless the
+    // cache misses). The source needs bytes anyway — they're what we'll
+    // write to the target on confirm — so request needBytes:true.
+    const [targetHashed, candidateHashed] = await Promise.all([
+      hashFileAtUri(vscodeFs(), targetUri, hashCache, { needBytes: false }),
+      hashFileAtUri(vscodeFs(), sourceUri, hashCache, { needBytes: true }),
+    ]);
+    targetSha = targetHashed.sha256;
+    candidateSha = candidateHashed.sha256;
+    targetSize = targetHashed.size;
+    candidateSize = candidateHashed.size;
+    targetMtime = targetHashed.mtime;
+    candidateMtime = candidateHashed.mtime;
+    if (!candidateHashed.bytes) {
+      // Should not happen — hashFileAtUri returns bytes when needBytes is
+      // true. If it ever does, fall back to a direct read.
+      candidateBytes = await vscode.workspace.fs.readFile(sourceUri);
+    } else {
+      candidateBytes = candidateHashed.bytes;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`pptxSearch: updateFile (pdf) — read/hash failed — ${message}`);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message: `Could not read PDF: ${message}`,
+    });
+    return null;
+  }
+
+  if (candidateSha === targetSha) {
+    const html = renderSearchUpdateIdenticalModalHtml({
+      targetFileName,
+      candidateFileName,
+      targetFolderLabel,
+      candidateFolderLabel,
+      sha256: candidateSha,
+    });
+    void panel.webview.postMessage({ type: 'updateModal', html });
+    log(
+      `pptxSearch: updateFile (pdf) — identical content ` +
+        `(sha256=${candidateSha.slice(0, 12)}…), no update offered`,
+    );
+    return null;
+  }
+
+  const html = renderSearchUpdatePdfModalHtml({
+    target: {
+      fileName: targetFileName,
+      sizeBytes: targetSize,
+      mtime: targetMtime,
+      sha256: targetSha,
+    },
+    candidate: {
+      fileName: candidateFileName,
+      sizeBytes: candidateSize,
+      mtime: candidateMtime,
+      sha256: candidateSha,
+    },
+    targetFolderLabel,
+    candidateFolderLabel,
+  });
+  void panel.webview.postMessage({ type: 'updateModal', html });
+  log(
+    `pptxSearch: updateFile (pdf) — comparing ${candidateFileName} ` +
+      `(sha=${candidateSha.slice(0, 12)}…) → ${targetFileName} ` +
+      `(sha=${targetSha.slice(0, 12)}…)`,
+  );
+
+  return {
+    targetUri,
+    sourceUri,
+    candidateBytes,
+    candidateSha,
+    candidateFileName,
+    targetFileName,
+  };
+}
+
+/**
+ * Case-insensitive `.pdf` check on a basename. Used to route the update
+ * flow between the pptx and pdf compare modals.
+ */
+function isPdfBasename(name: string): boolean {
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  return name.slice(dot + 1).toLowerCase() === 'pdf';
 }
 
 async function handleUpdateConfirm(
@@ -440,10 +597,11 @@ function handleSearch(
   engine: SearchEngine,
   indexer: SearchIndexerHandle,
   query: string,
+  op: 'and' | 'or',
 ): void {
   let hits: SearchHit[] = [];
   try {
-    hits = engine.search(query);
+    hits = engine.search(query, op);
   } catch (err) {
     log(
       `pptxSearch: search threw — ${

@@ -5,13 +5,18 @@
 // matchedFields) means "no match" — the engine drops these hits.
 //
 // Matching rules:
-//   - AND across query terms. Every term in the query must match at
-//     least one field; if any term fails to match anywhere, the whole
-//     projection scores 0.
-//   - OR across fields. A term hits if it matches `filename` OR
-//     `author` OR `slideText`. Each term records every field it hit (so
-//     a term matching both filename and author contributes to both,
-//     boosting the score).
+//   - AND across query terms (default). Every term in the query must
+//     match at least one field; if any term fails to match anywhere, the
+//     whole projection scores 0.
+//   - OR across query terms (when query.op === 'or'). Any term hitting
+//     any field qualifies the projection. Files that match more terms
+//     still score higher because each hitting term adds to the running
+//     total — so ranking still favours the most-relevant results, the
+//     mode just widens what counts as a result at all.
+//   - OR across fields (regardless of op). A term hits if it matches
+//     `filename` OR `author` OR `slideText`. Each term records every
+//     field it hit (so a term matching both filename and author
+//     contributes to both, boosting the score).
 //   - Prefix beats substring. A token starting with the term scores
 //     higher than a token merely containing it. Exact-equal beats both.
 //   - Shorter matching token beats longer (so "Soren" beats "Sorenson"
@@ -91,6 +96,9 @@ export function scoreProjection(
 
   const fieldsHit = new Set<SearchField>();
   let total = 0;
+  // OR mode: surviving a single hitting term qualifies the projection. We
+  // still walk every term so ranking benefits from multi-term matches.
+  const orMode = query.op === 'or';
 
   for (const term of query.terms) {
     const fileScore = scoreTermAgainstField(term, projection.filenameTokens);
@@ -103,7 +111,9 @@ export function scoreProjection(
       slideScore * FIELD_WEIGHT.slideText;
 
     if (weighted === 0) {
-      // AND short-circuit — one missed term means no match.
+      // AND short-circuit — one missed term means no match. In OR mode
+      // we just skip this term and keep tallying the rest.
+      if (orMode) continue;
       return { score: 0, matchedFields: [] };
     }
     total += weighted;

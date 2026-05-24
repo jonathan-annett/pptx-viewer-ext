@@ -294,6 +294,31 @@ function test_script_wires_hash_palette(): void {
   console.log('  ok: panel script wires the hash-pairing badge');
 }
 
+// ───── OR-mode checkbox ─────────────────────────────────────────────────
+
+function test_or_checkbox_present(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /id="or-mode"/, 'OR-mode checkbox input present');
+  assert.match(html, /type="checkbox"/, 'OR control is a checkbox');
+  assert.match(html, /Any term \(OR\)/, 'OR control label text present');
+  console.log('  ok: OR-mode checkbox + label rendered in header');
+}
+
+function test_script_wires_op_field(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  // The inline script should read the checkbox and post `op` with the search.
+  assert.match(html, /currentOp/, 'currentOp() helper present');
+  assert.match(html, /op: currentOp\(\)/, 'search message carries op field');
+  assert.match(html, /'or-mode'/, 'script references the OR-mode checkbox id');
+  console.log('  ok: panel script threads op into the search message');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -319,6 +344,8 @@ const tests: Array<[string, () => void]> = [
   ['script wires multi-select + update flow', test_script_wires_multi_select],
   ['hash-badge CSS rule defined', test_hash_badge_css_defined],
   ['script wires hash-pairing palette + badge', test_script_wires_hash_palette],
+  ['OR-mode checkbox + label present', test_or_checkbox_present],
+  ['script threads op field into search message', test_script_wires_op_field],
 ];
 
 let failed = 0;

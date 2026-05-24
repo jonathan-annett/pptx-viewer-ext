@@ -220,6 +220,39 @@ function test_search_AND_across_terms(): void {
   console.log('  ok: AND across query terms drops decks missing any term');
 }
 
+function test_search_OR_across_terms(): void {
+  // OR mode: a deck matching any single query term qualifies. The first
+  // deck matches both terms; the second matches only "review" via its
+  // slideText. Both should appear; the multi-term hit ranks first.
+  const engine = createSearchEngine();
+  engine.addOrUpdate('uri-a', proj({
+    sha256: 'a'.repeat(64),
+    filename: 'quarterly review.pptx',
+    filenameTokens: ['quarterly', 'review', 'pptx'],
+  }));
+  engine.addOrUpdate('uri-b', proj({
+    sha256: 'b'.repeat(64),
+    filename: 'product roadmap.pptx',
+    filenameTokens: ['product', 'roadmap', 'pptx'],
+    slideText: 'review of progress',
+    slideTextTokens: ['review', 'of', 'progress'],
+  }));
+  const hitsAnd = engine.search('quarterly review', 'and');
+  assert.equal(hitsAnd.length, 1, 'AND drops the half-match');
+  const hitsOr = engine.search('quarterly review', 'or');
+  assert.equal(hitsOr.length, 2, 'OR keeps the half-match');
+  assert.equal(hitsOr[0].sha256, 'a'.repeat(64), 'both-term hit ranks first');
+  console.log('  ok: OR across query terms keeps single-term hits');
+}
+
+function test_parse_query_accepts_op(): void {
+  const qOr = parseQuery('alice bob', 'or');
+  assert.equal(qOr.op, 'or');
+  const qAnd = parseQuery('alice bob');
+  assert.equal(qAnd.op, 'and', 'default op is "and"');
+  console.log('  ok: parseQuery threads op through, defaults to "and"');
+}
+
 function test_search_ranking_filename_beats_slidetext(): void {
   // Same query term hits filename of A but only slideText of B.
   // Filename hit must rank above slideText hit (per the scorer's
@@ -291,6 +324,7 @@ async function main(): Promise<void> {
   console.log('parseQuery:');
   test_parse_query_empty();
   test_parse_query_folds_and_splits();
+  test_parse_query_accepts_op();
 
   console.log('load:');
   test_load_seeds_projections();
@@ -310,6 +344,7 @@ async function main(): Promise<void> {
   test_search_empty_returns_empty();
   test_search_basic_filename_match();
   test_search_AND_across_terms();
+  test_search_OR_across_terms();
   test_search_ranking_filename_beats_slidetext();
   test_search_ranking_prefix_beats_substring();
   test_search_no_match_returns_empty();

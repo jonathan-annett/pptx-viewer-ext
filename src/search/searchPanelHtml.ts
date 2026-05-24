@@ -74,6 +74,12 @@ export function renderSearchPanelHtml(
         >
         <button id="reindex" type="button" title="Re-walk source folders">Reindex</button>
       </div>
+      <div class="search-options-row">
+        <label class="search-option" title="When off (default), every word you type must match somewhere on the file. When on, files matching any one of your words appear — useful for fishing out a known filename fragment when the metadata isn't helping.">
+          <input id="or-mode" type="checkbox">
+          <span>Any term (OR)</span>
+        </label>
+      </div>
       <div id="multi-toolbar" class="multi-toolbar" hidden>
         <span id="multi-status" class="multi-status" aria-live="polite">Multi-select: 0 selected</span>
         <span class="multi-toolbar-spacer"></span>
@@ -184,7 +190,34 @@ h1 {
 .search-input-row {
   display: flex;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
+}
+
+/*
+ * Options row beneath the input — currently just the OR-mode checkbox, but
+ * the row is its own block so future toggles (file-type filter, etc.) can
+ * land here without re-flowing the input + Reindex layout above. Smaller
+ * font, descriptionForeground colour because these are secondary affordances
+ * rather than primary actions.
+ */
+.search-options-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+.search-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.search-option input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
 }
 
 #q {
@@ -539,6 +572,7 @@ function panelScript(): string {
 
   const qInput = document.getElementById('q');
   const reindex = document.getElementById('reindex');
+  const orToggle = document.getElementById('or-mode');
   const results = document.getElementById('results');
   const footerText = document.getElementById('footer-text');
   const multiToolbar = document.getElementById('multi-toolbar');
@@ -602,9 +636,13 @@ function panelScript(): string {
     return (hit && Array.isArray(hit.uris) && hit.uris[0]) || '';
   }
 
+  function currentOp() {
+    return orToggle && orToggle.checked ? 'or' : 'and';
+  }
+
   function postSearch(q) {
     latestQuery = q;
-    vscode.postMessage({ type: 'search', query: q });
+    vscode.postMessage({ type: 'search', query: q, op: currentOp() });
   }
 
   qInput.addEventListener('input', function () {
@@ -626,6 +664,17 @@ function panelScript(): string {
   reindex.addEventListener('click', function () {
     vscode.postMessage({ type: 'reindex' });
   });
+
+  if (orToggle) {
+    // Toggling AND↔OR with a non-empty query re-runs the search immediately;
+    // empty input just leaves the empty-state in place. No debounce — the
+    // user's just clicked once and is waiting for a single response.
+    orToggle.addEventListener('change', function () {
+      const q = qInput.value;
+      if (q.trim() === '') return;
+      postSearch(q);
+    });
+  }
 
   // Keyboard: Enter on input triggers immediate search (skip debounce);
   // Escape clears the box.
@@ -657,7 +706,7 @@ function panelScript(): string {
       // If user has typed something already, re-run the search now that
       // more files might be in the index.
       if (latestQuery && latestQuery.trim() !== '') {
-        vscode.postMessage({ type: 'search', query: latestQuery });
+        vscode.postMessage({ type: 'search', query: latestQuery, op: currentOp() });
       }
     } else if (msg.type === 'emptyState') {
       // Used by the extension to push a custom empty-state message after a

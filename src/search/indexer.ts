@@ -3,13 +3,15 @@
 // Responsibilities:
 //   1. Decide which workspace folders are in-scope (sources only — never
 //      destinations). Recomputed whenever the topology changes.
-//   2. Walk the in-scope folders for *.pptx files. For each file, compute
-//      its sha256 via `hashFileAtUri` (URI hash cache friendly) and
-//      either reuse a stored SearchProjection or build one fresh.
+//   2. Walk the in-scope folders for `*.pptx` and `*.pdf` files. For each
+//      file, compute its sha256 via `hashFileAtUri` (URI hash cache
+//      friendly) and either reuse a stored SearchProjection or build one
+//      fresh. PDFs take a short-cut path: no parse, filename-only
+//      projection (author + slide-text stay empty).
 //   3. Keep the in-memory engine in sync. Removed files / out-of-scope
 //      files drop out; created/changed files refresh.
-//   4. React to FS events via a `**/*.pptx` workspace watcher so the
-//      index stays live during the session.
+//   4. React to FS events via a `**/*.{pptx,pdf}` workspace watcher so
+//      the index stays live during the session.
 //
 // Layered cache strategy (matches the M5.3 architecture sketch):
 //   sha → SearchProjection in indexStore  → cheapest hit (no parse)
@@ -46,6 +48,7 @@ import type { SearchIndexStore } from './indexStore';
 import {
   basenameOf,
   decodeUriDisplay,
+  projectFilenameOnly,
   projectFromCached,
   projectFromParseResult,
 } from './projection';
@@ -261,8 +264,12 @@ export function startSearchIndexer(
       );
       if (!folder) continue;
       try {
+        // Walk both `.pptx` (full parse + projection) and `.pdf` (filename-
+        // only projection). The single brace-glob saves a second findFiles
+        // round-trip and keeps deterministic ordering between the two
+        // extensions within each folder.
         const found = await vscode.workspace.findFiles(
-          new vscode.RelativePattern(folder, '**/*.pptx'),
+          new vscode.RelativePattern(folder, '**/*.{pptx,pdf}'),
           // Use the global default exclude pattern (respects files.exclude
           // + search.exclude) — same as findFiles' standard behaviour.
         );
@@ -277,7 +284,7 @@ export function startSearchIndexer(
     }
 
     const total = allUris.length;
-    log(`search-indexer: pass starting — ${total} pptx file(s) across ${folders.length} folder(s)`);
+    log(`search-indexer: pass starting — ${total} pptx+pdf file(s) across ${folders.length} folder(s)`);
 
     // Sweep: any URIs the engine knows about that aren't in the found set
     // and that *should* be in scope must have been deleted on disk between
@@ -346,6 +353,50 @@ export function startSearchIndexer(
       size: hashed.size,
       mtime: hashed.mtime,
     };
+
+    // PDF fast path — no parse, no parseCache touch. Surface as a
+    // filename-only projection so the search panel can find it by
+    // basename. We still go through the indexStore so a warm-load on the
+    // next session picks the entry back up without re-hashing.
+    if (isPdfBasename(info.fileName)) {
+      if (opts.store) {
+        const cached = await opts.store.getBySha(sha);
+        if (cached) {
+          // Refresh URI-derived fields the same way the pptx path does;
+          // mirrors a possible file rename. Content-derived fields are
+          // empty for PDFs so there's nothing else to update.
+          const displayFilename = decodeUriDisplay(info.fileName);
+          const refreshed: SearchProjection = {
+            ...cached,
+            filename: fold(displayFilename),
+            displayFilename,
+            filenameTokens: tokenize(displayFilename),
+            sizeBytes: info.size,
+            mtime: info.mtime,
+          };
+          opts.engine.addOrUpdate(uri.toString(), refreshed);
+          await opts.store.putProjection(refreshed);
+          stats.processed++;
+          stats.indexStoreHits++;
+          return;
+        }
+      }
+      const projection = projectFilenameOnly({
+        sha256: sha,
+        fileName: info.fileName,
+        sizeBytes: info.size,
+        mtime: info.mtime,
+      });
+      opts.engine.addOrUpdate(uri.toString(), projection);
+      if (opts.store) await opts.store.putProjection(projection);
+      stats.processed++;
+      // PDFs don't go through parseCache at all, so charge them to a
+      // dedicated bucket would be nice but the existing stats shape
+      // doesn't have one — count them as fresh-projects via the freshParses
+      // counter so the running-total still reflects work performed.
+      stats.freshParses++;
+      return;
+    }
 
     // Step 2: indexStore hit — no parse needed. Refresh URI-derived fields
     // (filename, tokens, size, mtime) in case the file was moved to a new
@@ -450,8 +501,10 @@ export function startSearchIndexer(
   });
 
   // FileSystemWatcher fires for every workspace folder, not just sources.
-  // We filter inside the handlers via `isUnderScope`.
-  const watcher = vscode.workspace.createFileSystemWatcher('**/*.pptx');
+  // We filter inside the handlers via `isUnderScope`. The brace-glob
+  // mirrors the findFiles pattern so create/change/delete events for both
+  // pptx and pdf files reach the indexer.
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*.{pptx,pdf}');
   const onCreate = watcher.onDidCreate((uri) => {
     if (disposed) return;
     if (!isUnderScope(scope, uri.toString())) return;
@@ -495,6 +548,17 @@ export function startSearchIndexer(
     // Empty initial scope path — finish the first-pass promise so callers
     // awaiting `ready()` don't block forever.
     finishFirstPass();
+  }
+
+  /**
+   * Case-insensitive check on a basename (or any URI tail) for a `.pdf`
+   * extension. We branch on extension rather than carrying a `kind` field
+   * on SearchProjection so the existing IDB schema stays unchanged.
+   */
+  function isPdfBasename(name: string): boolean {
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    return name.slice(dot + 1).toLowerCase() === 'pdf';
   }
 
   return {

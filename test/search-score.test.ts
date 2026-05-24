@@ -38,8 +38,8 @@ function projection(opts: {
   };
 }
 
-function query(raw: string): SearchQuery {
-  return { raw, terms: tokenize(raw) };
+function query(raw: string, op: 'and' | 'or' = 'and'): SearchQuery {
+  return { raw, terms: tokenize(raw), op };
 }
 
 function test_empty_query_zero(): void {
@@ -157,6 +157,38 @@ function test_camelcase_query(): void {
   console.log('  ok: camelCase tokens searchable by component word');
 }
 
+function test_or_mode_one_term_matches(): void {
+  // In AND mode (default), "alice xyzzy" zeroes because xyzzy doesn't hit.
+  // In OR mode, "alice" matching alone is enough to score > 0.
+  const p = projection({ filename: 'Deck.pptx', author: 'Alice' });
+  const rAnd = scoreProjection(p, query('alice xyzzy', 'and'));
+  assert.equal(rAnd.score, 0);
+  const rOr = scoreProjection(p, query('alice xyzzy', 'or'));
+  assert.ok(rOr.score > 0, `OR-mode score should be > 0, got ${rOr.score}`);
+  assert.deepEqual(rOr.matchedFields, ['author']);
+  console.log('  ok: OR mode lets a single hitting term qualify');
+}
+
+function test_or_mode_multi_term_outranks_single(): void {
+  // OR mode still accumulates per-term scores, so a projection where
+  // both terms hit ranks above a projection where only one does.
+  const pBoth = projection({ filename: 'Alice-Plan.pptx', author: 'Alice' });
+  const pOne = projection({ filename: 'Deck.pptx', author: 'Alice' });
+  const sBoth = scoreProjection(pBoth, query('alice plan', 'or')).score;
+  const sOne = scoreProjection(pOne, query('alice plan', 'or')).score;
+  assert.ok(sBoth > sOne, `both-hit (${sBoth}) should outrank single-hit (${sOne})`);
+  console.log('  ok: OR mode — more matching terms still ranks higher');
+}
+
+function test_or_mode_no_terms_match(): void {
+  // Even in OR mode, if no term hits anywhere, score stays 0.
+  const p = projection({ filename: 'Deck.pptx', author: 'Alice' });
+  const r = scoreProjection(p, query('xyzzy nopezone', 'or'));
+  assert.equal(r.score, 0);
+  assert.deepEqual(r.matchedFields, []);
+  console.log('  ok: OR mode — no hits anywhere → score 0');
+}
+
 function test_multiple_fields_boost(): void {
   // Same term hits BOTH filename and author → both fields listed in
   // matchedFields. Score is higher than a single-field hit.
@@ -183,6 +215,9 @@ async function main(): Promise<void> {
   test_filename_beats_slidetext();
   test_diacritic_query();
   test_camelcase_query();
+  test_or_mode_one_term_matches();
+  test_or_mode_multi_term_outranks_single();
+  test_or_mode_no_terms_match();
   test_multiple_fields_boost();
   console.log('all search-score tests passed');
 }

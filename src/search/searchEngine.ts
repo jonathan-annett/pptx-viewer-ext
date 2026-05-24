@@ -35,6 +35,7 @@
 import type {
   SearchField,
   SearchHit,
+  SearchOp,
   SearchProjection,
   SearchQuery,
 } from './index-types';
@@ -73,8 +74,9 @@ export interface SearchEngine {
    *  worrying about concurrent mutations during a walk. */
   getAllUris(): string[];
   /** Run a search. Empty input → empty array (the panel chooses what to
-   *  render for an empty input box; we don't dump the whole index). */
-  search(query: string): SearchHit[];
+   *  render for an empty input box; we don't dump the whole index).
+   *  `op` defaults to 'and'; pass 'or' to widen the search. */
+  search(query: string, op?: SearchOp): SearchHit[];
   /** Diagnostic: counts for the activation log + probe command. */
   stats(): SearchEngineStats;
 }
@@ -95,15 +97,15 @@ export interface SearchEngineStats {
  * Exported because the eventual webview / probe command may want to
  * inspect the parsed form independently of running a search.
  */
-export function parseQuery(raw: string): SearchQuery {
+export function parseQuery(raw: string, op: SearchOp = 'and'): SearchQuery {
   const trimmed = raw.trim();
-  if (!trimmed) return { raw, terms: [] };
+  if (!trimmed) return { raw, terms: [], op };
   // The tokeniser folds internally; using it directly on the raw input
   // gives us the same camelCase / snake_case / punctuation handling we
   // apply at index time. `fold(raw)` would lowercase but not split —
   // and a query like "weeklyPlan" should match the same tokens that
   // got indexed from a filename "WeeklyPlan.pptx".
-  return { raw, terms: tokenize(trimmed) };
+  return { raw, terms: tokenize(trimmed), op };
 }
 
 export function createSearchEngine(): SearchEngine {
@@ -194,8 +196,8 @@ export function createSearchEngine(): SearchEngine {
       return [...uriToSha.keys()];
     },
 
-    search(rawQuery) {
-      const query = parseQuery(rawQuery);
+    search(rawQuery, op) {
+      const query = parseQuery(rawQuery, op);
       if (query.terms.length === 0) return [];
       // Folded raw query — useful for whole-string matches against the
       // projection's pre-folded fields if we ever want them; not used
