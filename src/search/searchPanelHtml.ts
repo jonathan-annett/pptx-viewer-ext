@@ -746,6 +746,15 @@ function panelScript(): string {
         selectionMode = false;
         applySelectionStyles();
         updateMultiToolbar();
+      } else if (msg.outcome === 'pdf-import-routed') {
+        // The PDF source was handed off to the viewer's PDF-import modal.
+        // We don't disable the rows — the user may cancel inside the
+        // viewer or convert and want to keep the source visible. Just
+        // clear selection so the panel is ready for the next pair.
+        selectedKeys.clear();
+        selectionMode = false;
+        applySelectionStyles();
+        updateMultiToolbar();
       }
       // 'error' / 'identical' outcomes leave selection alone — the user may
       // want to retry, pick a different source, or cancel manually.

@@ -49,6 +49,95 @@ class PptxDocument implements vscode.CustomDocument {
   }
 }
 
+// ───── cross-feature: PDF → PPTX import from the search panel ──────────
+//
+// The search panel surfaces pairs of (canonical PPTX, candidate PDF) and
+// needs a way to drive the existing viewer-side PDF-import modal against
+// the canonical PPTX target. The viewer's webview already accepts an
+// `uploadedBytes` message (the upload flow uses it) and routes PDFs
+// through `handlePdfFile()` — which opens the PDF-import modal. We
+// reuse that path verbatim instead of re-implementing the import in
+// the search panel.
+//
+// Mechanism:
+//   - activePanels maps `uri.toString()` → the currently-mounted viewer
+//     panel for that document. Populated on `resolveCustomEditor`, torn
+//     down on panel dispose. Used to push `uploadedBytes` into an
+//     already-open viewer without going through `vscode.open`.
+//   - pendingPdfImports stashes a `{fileName, bytes}` payload keyed by
+//     target URI. The provider drains it after the initial render of
+//     each panel, posting `uploadedBytes` if there's a stash for this
+//     URI. Used for the "viewer isn't open yet" branch: the caller
+//     stashes the bytes, asks vscode.dev to open the URI, and the
+//     freshly-mounted panel picks the bytes up at the end of its first
+//     render.
+//
+// Why both: vscode.open on an already-open URI just reveals the tab —
+// resolveCustomEditor doesn't fire. Without the activePanels registry
+// the bytes would never be delivered in that case. Conversely, on a
+// cold open we don't have a panel object to post to until
+// resolveCustomEditor runs, hence the stash.
+
+interface PendingPdfImport {
+  fileName: string;
+  bytes: Uint8Array;
+}
+
+const activePanels = new Map<string, vscode.WebviewPanel>();
+const pendingPdfImports = new Map<string, PendingPdfImport>();
+
+/**
+ * Push a PDF into the viewer for `targetUri` and trigger the PDF-import
+ * modal. Opens the viewer if it isn't already open.
+ *
+ * Used by the search panel when the user primes a (canonical PPTX,
+ * candidate PDF) pair and clicks Update — instead of writing the PDF
+ * bytes verbatim over the PPTX (which would corrupt it), we route into
+ * the viewer's existing PDF → PPTX import pipeline. The user confirms
+ * the conversion via the modal there.
+ *
+ * Idempotent: a second call before the first has been consumed
+ * overwrites the stash. Concurrent imports for two different URIs work
+ * because the stash is keyed by URI.
+ */
+export async function requestPdfImportIntoViewer(
+  targetUri: vscode.Uri,
+  fileName: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  const key = targetUri.toString();
+  const existing = activePanels.get(key);
+  if (existing) {
+    // Viewer is already mounted — push the bytes directly. The webview's
+    // `uploadedBytes` handler routes PDFs through `handlePdfFile` which
+    // opens the import modal.
+    try {
+      existing.reveal(vscode.ViewColumn.Beside, false);
+    } catch {
+      // reveal can throw if the panel was disposed between get + use.
+      // Fall through to the open-and-stash path.
+      activePanels.delete(key);
+      pendingPdfImports.set(key, { fileName, bytes });
+      await vscode.commands.executeCommand('vscode.open', targetUri, {
+        viewColumn: vscode.ViewColumn.Beside,
+        preserveFocus: false,
+      });
+      return;
+    }
+    existing.webview.postMessage({ type: 'uploadedBytes', fileName, bytes });
+    log(`pdf-import: pushed ${bytes.byteLength} bytes into open viewer ${key}`);
+    return;
+  }
+  // Viewer not open — stash and open. The post-render drain inside
+  // resolveCustomEditor will deliver the bytes once the panel mounts.
+  pendingPdfImports.set(key, { fileName, bytes });
+  log(`pdf-import: stashed ${bytes.byteLength} bytes for ${key} (opening viewer)`);
+  await vscode.commands.executeCommand('vscode.open', targetUri, {
+    viewColumn: vscode.ViewColumn.Beside,
+    preserveFocus: false,
+  });
+}
+
 export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<PptxDocument> {
   public static readonly viewType = 'pptxViewer.viewer';
 
@@ -190,10 +279,22 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     // on cancel/close finishing, and on panel dispose.
     let currentUploadFlow: UploadFlowHandle | null = null;
 
+    // Register this panel so the search panel's PDF-import flow can find
+    // it. Deregistered on dispose; overwrites any prior entry for the
+    // same URI (one viewer per document, per provider config).
+    const registryKey = document.uri.toString();
+    activePanels.set(registryKey, webviewPanel);
+
     webviewPanel.onDidDispose(() => {
       pendingCandidate = null;
       currentUploadFlow?.dispose();
       currentUploadFlow = null;
+      // Only delete the entry if it still points at *this* panel — a
+      // brand-new resolveCustomEditor for the same URI may have replaced
+      // it before dispose fires on the old panel.
+      if (activePanels.get(registryKey) === webviewPanel) {
+        activePanels.delete(registryKey);
+      }
     });
 
     webviewPanel.webview.onDidReceiveMessage(async (msg: unknown) => {
@@ -472,6 +573,25 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       );
       if (result.timings) logParseTimings(fileName, '', result.timings, readMs);
       await renderWithSyncTarget(result);
+
+      // Drain any pending PDF-import stash. The search panel's update flow
+      // for a (canonical PPTX, candidate PDF) pair stashes the PDF bytes
+      // before calling vscode.open; once the viewer has finished its first
+      // render we push the bytes through so `handlePdfFile` opens the
+      // import modal.
+      const pendingImport = pendingPdfImports.get(registryKey);
+      if (pendingImport) {
+        pendingPdfImports.delete(registryKey);
+        log(
+          `pdf-import: delivering stashed bytes for ${registryKey} — ` +
+            `${pendingImport.fileName} (${pendingImport.bytes.byteLength} bytes)`,
+        );
+        webviewPanel.webview.postMessage({
+          type: 'uploadedBytes',
+          fileName: pendingImport.fileName,
+          bytes: pendingImport.bytes,
+        });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`ERROR opening ${fileName}: ${message}`);

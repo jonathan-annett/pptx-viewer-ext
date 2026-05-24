@@ -82,53 +82,6 @@ export function renderSearchUpdateIdenticalModalHtml(input: {
 </div>`;
 }
 
-/**
- * PDF-flavour of the side-by-side compare modal. The search subsystem
- * doesn't parse PDFs (no slide count, no author, no thumbnail), so this
- * thinner variant just shows the four fields we have on hand for every
- * file regardless of type: filename, size, mtime, sha256. Same three
- * buttons as the pptx variant — the downstream confirm flow is shared
- * (a write is a write).
- */
-export interface SearchUpdatePdfModalInput {
-  target: PdfFileInfo;
-  candidate: PdfFileInfo;
-  targetFolderLabel: string;
-  candidateFolderLabel: string;
-}
-
-export interface PdfFileInfo {
-  fileName: string;
-  sizeBytes: number;
-  /** epoch-ms — same scale as vscode.FileStat.mtime. */
-  mtime: number;
-  sha256: string;
-}
-
-export function renderSearchUpdatePdfModalHtml(input: SearchUpdatePdfModalInput): string {
-  const { target, candidate, targetFolderLabel, candidateFolderLabel } = input;
-  return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="search-update-pdf-title">
-  <h2 id="search-update-pdf-title" class="modal-title">Update canonical PDF?</h2>
-  <p class="modal-sub">Replace the file on the left with the file on the right. PDFs aren\u2019t parsed by the search subsystem &mdash; only filename, size, modified time, and SHA are compared.</p>
-  <div class="compare-grid">
-    <div class="compare-col">
-      <h3 class="compare-col-head">Canonical &mdash; ${escapeHtml(targetFolderLabel)}</h3>
-      ${renderPdfColumn(target)}
-    </div>
-    <div class="compare-col">
-      <h3 class="compare-col-head">Incoming &mdash; ${escapeHtml(candidateFolderLabel)}</h3>
-      ${renderPdfColumn(candidate)}
-    </div>
-  </div>
-  <div class="modal-actions">
-    <span class="modal-actions-spacer"></span>
-    <button type="button" class="action-btn action-btn-secondary" id="search-update-cancel-btn">Cancel</button>
-    <button type="button" class="action-btn action-btn-secondary" id="search-update-remove-btn" title="Overwrite the canonical PDF with the incoming PDF, then delete the incoming PDF from its folder.">Update &amp; remove source</button>
-    <button type="button" class="action-btn" id="search-update-confirm-btn">Update file</button>
-  </div>
-</div>`;
-}
-
 // ───── pieces ───────────────────────────────────────────────────────────
 
 function renderColumn(r: ParseResult): string {
@@ -150,29 +103,6 @@ function renderColumn(r: ParseResult): string {
     <dl class="compare-meta">
       ${rows.map(([k, v]) => `<div class="compare-row"><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('\n      ')}
     </dl>`;
-}
-
-function renderPdfColumn(p: PdfFileInfo): string {
-  const rows: Array<[string, string]> = [
-    ['File name', p.fileName],
-    ['Size', `${humanBytes(p.sizeBytes)} (${p.sizeBytes.toLocaleString()} bytes)`],
-    ['Modified', new Date(p.mtime).toISOString()],
-    ['SHA-256', p.sha256],
-  ];
-  return `<div class="compare-thumb compare-thumb-empty">PDF</div>
-    <dl class="compare-meta">
-      ${rows.map(([k, v]) => `<div class="compare-row"><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd></div>`).join('\n      ')}
-    </dl>`;
-}
-
-/** Cheap human-bytes formatter — keeps the modal renderer pure (no
- *  dependency on a helper that imports vscode). Matches the unit suffixes
- *  the pptx parser's `sizeHuman` field uses. */
-function humanBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function formatMedia(media: ParseResult['embeddedMedia']): string {

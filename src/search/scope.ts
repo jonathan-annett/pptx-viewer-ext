@@ -69,6 +69,28 @@ export function isUnderScope(scope: SearchScope, fileUri: string): boolean {
 }
 
 /**
+ * True when `fileUri` sits under the first scope folder (the canonical
+ * workspace folder by declaration order).
+ *
+ * Used by the indexer to exclude PDFs from the canonical folder: search
+ * surfaces PDFs as sources for a PDF → PPTX update, and the update flow
+ * only supports the canonical folder as the *target* (a PPTX). Letting
+ * PDFs into the canonical group would offer the user a primed pair that
+ * the update flow can't act on.
+ *
+ * Empty-scope guard: returns false so callers don't accidentally treat a
+ * file as "in the first folder" when there is no first folder.
+ */
+export function isUnderFirstScopeFolder(scope: SearchScope, fileUri: string): boolean {
+  if (!fileUri) return false;
+  if (scope.folderUris.length === 0) return false;
+  const first = scope.folderUris[0];
+  if (fileUri === first) return true;
+  const prefix = first.endsWith('/') ? first : `${first}/`;
+  return fileUri.startsWith(prefix);
+}
+
+/**
  * Given an old scope and a new scope, return URIs from `currentUris`
  * that are in the old scope but not the new — i.e. files the engine
  * holds entries for that should be evicted on a topology change.

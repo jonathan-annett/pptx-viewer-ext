@@ -55,6 +55,7 @@ import {
 import { tokenize } from './tokenize';
 import {
   computeSearchScope,
+  isUnderFirstScopeFolder,
   isUnderScope,
   urisLeavingScope,
   type SearchScope,
@@ -255,21 +256,26 @@ export function startSearchIndexer(
     // the search is scoped exactly to the folders we want (not every
     // workspace folder). Per-folder calls also let us avoid leaking
     // results from destination folders.
+    //
+    // First-folder rule: the canonical workspace folder (folders[0]) is
+    // pptx-only. PDFs in the canonical folder can't be valid update
+    // sources (their target would need to be a PDF, which is out of
+    // scope) and they can't be valid targets (the update flow only
+    // writes PPTX), so we don't index them. Every other in-scope folder
+    // walks both extensions.
     const allUris: vscode.Uri[] = [];
-    for (const folderUriStr of folders) {
+    for (let i = 0; i < folders.length; i++) {
       if (disposed) return;
+      const folderUriStr = folders[i];
       const folderUri = vscode.Uri.parse(folderUriStr);
       const folder = (vscode.workspace.workspaceFolders ?? []).find(
         (f) => f.uri.toString() === folderUriStr,
       );
       if (!folder) continue;
+      const glob = i === 0 ? '**/*.pptx' : '**/*.{pptx,pdf}';
       try {
-        // Walk both `.pptx` (full parse + projection) and `.pdf` (filename-
-        // only projection). The single brace-glob saves a second findFiles
-        // round-trip and keeps deterministic ordering between the two
-        // extensions within each folder.
         const found = await vscode.workspace.findFiles(
-          new vscode.RelativePattern(folder, '**/*.{pptx,pdf}'),
+          new vscode.RelativePattern(folder, glob),
           // Use the global default exclude pattern (respects files.exclude
           // + search.exclude) — same as findFiles' standard behaviour.
         );
@@ -505,9 +511,19 @@ export function startSearchIndexer(
   // mirrors the findFiles pattern so create/change/delete events for both
   // pptx and pdf files reach the indexer.
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.{pptx,pdf}');
+  const acceptForWatcher = (uri: vscode.Uri): boolean => {
+    const uriStr = uri.toString();
+    if (!isUnderScope(scope, uriStr)) return false;
+    // First-folder rule: drop PDF events under the canonical folder.
+    // Mirrors the per-folder glob choice in doFullPass.
+    if (isPdfBasename(basenameOf(uriStr)) && isUnderFirstScopeFolder(scope, uriStr)) {
+      return false;
+    }
+    return true;
+  };
   const onCreate = watcher.onDidCreate((uri) => {
     if (disposed) return;
-    if (!isUnderScope(scope, uri.toString())) return;
+    if (!acceptForWatcher(uri)) return;
     void processUri(uri).catch((err) => {
       stats.errors++;
       log(
@@ -519,7 +535,7 @@ export function startSearchIndexer(
   });
   const onChange = watcher.onDidChange((uri) => {
     if (disposed) return;
-    if (!isUnderScope(scope, uri.toString())) return;
+    if (!acceptForWatcher(uri)) return;
     void processUri(uri).catch((err) => {
       stats.errors++;
       log(

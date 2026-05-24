@@ -28,12 +28,9 @@ import { groupHitsByFolder, folderLabelFor } from './scope';
 import {
   renderSearchUpdateModalHtml,
   renderSearchUpdateIdenticalModalHtml,
-  renderSearchUpdatePdfModalHtml,
 } from './updateModalHtml';
 import { getParseCacheSingleton, parsePptxCached } from '../sync/parseCache';
-import { hashFileAtUri } from '../sync/hash';
-import { getHashCacheSingleton } from '../sync/hashCache';
-import { vscodeFs } from '../sync/vscodeFs';
+import { requestPdfImportIntoViewer } from '../provider';
 
 export interface OpenSearchPanelDeps {
   engine: SearchEngine;
@@ -235,21 +232,26 @@ async function handleUpdateFile(
   const targetFileName = basenameFromUri(targetUri);
   const candidateFileName = basenameFromUri(sourceUri);
 
-  // Type-routing before the parse step. PDFs go through a different
-  // compare path (no pptx parser); mixed pairs are refused outright
-  // because the search panel doesn't yet know how to render the
-  // PDF→PPTX import flow (the viewer's drag-and-drop is the existing
-  // path for that). The "no-PDF support" case is logged so a future
-  // milestone can decide whether to add cross-type routing here.
+  // Type-routing before the parse step.
+  //
+  // After the first-folder PDF exclusion (canonical group = pptx-only),
+  // primed pairs always have target=PPTX. Sources can be PPTX or PDF:
+  //   - PPTX → PPTX: existing compare-and-write flow (falls through).
+  //   - PPTX ← PDF: route into the viewer's PDF-import modal. We hand
+  //     the bytes off via the provider's `requestPdfImportIntoViewer`
+  //     and let the user confirm conversion there. No search-side
+  //     modal — the viewer's modal already shows aspect/quality tuning
+  //     and a preview, which is the natural compare surface for this
+  //     case.
+  //   - PDF target: shouldn't happen (canonical is pptx-only) — refuse
+  //     defensively in case some future regression lets a PDF into
+  //     group[0].
   const targetIsPdf = isPdfBasename(targetFileName);
   const sourceIsPdf = isPdfBasename(candidateFileName);
-  if (targetIsPdf !== sourceIsPdf) {
-    const message =
-      'Cannot update across file types. ' +
-      'For PDF → PPTX, use the viewer\u2019s drag-and-drop or "Update from file\u2026" instead.';
+  if (targetIsPdf) {
+    const message = 'PDFs cannot be updated from the search panel.';
     log(
-      `pptxSearch: updateFile — refused mixed pair ` +
-        `(target=${targetIsPdf ? 'pdf' : 'pptx'} source=${sourceIsPdf ? 'pdf' : 'pptx'})`,
+      `pptxSearch: updateFile — refused (target is PDF: ${targetFileName})`,
     );
     void vscode.window.showWarningMessage(message);
     void panel.webview.postMessage({
@@ -259,15 +261,12 @@ async function handleUpdateFile(
     });
     return null;
   }
-  if (targetIsPdf && sourceIsPdf) {
-    return await handleUpdateFilePdf(
+  if (sourceIsPdf) {
+    return await handleUpdatePptxFromPdf(
       panel,
       targetUri,
       sourceUri,
-      targetFileName,
       candidateFileName,
-      targetFolderLabel,
-      candidateFolderLabel,
     );
   }
 
@@ -363,54 +362,29 @@ async function handleUpdateFile(
 }
 
 /**
- * PDF↔PDF update path. We never parse PDFs in the search subsystem, so the
- * compare modal is a thin filename/size/sha grid rather than the
- * slide-metadata grid the pptx path uses. The Confirm flow downstream is
- * shared with the pptx path — `handleUpdateConfirm` just does fs.writeFile
- * (+ optional fs.delete + open) and the parse-cache forget is a safe no-op
- * for a sha we never inserted into the cache.
+ * PPTX-target ← PDF-source flow. Instead of writing PDF bytes verbatim
+ * over the PPTX (which would corrupt it), we route the bytes into the
+ * viewer's existing PDF → PPTX import pipeline. The viewer's modal is
+ * the compare surface here — it shows the conversion preview and lets
+ * the user tune aspect/quality before writing.
+ *
+ * We do not stash a PendingUpdate here: the search panel is no longer
+ * the actor that performs the write. The viewer takes over and the
+ * search panel just gets an outcome notification so it can dismiss any
+ * intermediate UI state.
  */
-async function handleUpdateFilePdf(
+async function handleUpdatePptxFromPdf(
   panel: vscode.WebviewPanel,
   targetUri: vscode.Uri,
   sourceUri: vscode.Uri,
-  targetFileName: string,
   candidateFileName: string,
-  targetFolderLabel: string,
-  candidateFolderLabel: string,
 ): Promise<PendingUpdate | null> {
-  const hashCache = getHashCacheSingleton();
-  let candidateBytes: Uint8Array;
-  let targetSha: string;
-  let candidateSha: string;
-  let targetSize: number;
-  let candidateSize: number;
-  let targetMtime: number;
-  let candidateMtime: number;
+  let bytes: Uint8Array;
   try {
-    // Hash the target via the URI hash cache (no bytes needed unless the
-    // cache misses). The source needs bytes anyway — they're what we'll
-    // write to the target on confirm — so request needBytes:true.
-    const [targetHashed, candidateHashed] = await Promise.all([
-      hashFileAtUri(vscodeFs(), targetUri, hashCache, { needBytes: false }),
-      hashFileAtUri(vscodeFs(), sourceUri, hashCache, { needBytes: true }),
-    ]);
-    targetSha = targetHashed.sha256;
-    candidateSha = candidateHashed.sha256;
-    targetSize = targetHashed.size;
-    candidateSize = candidateHashed.size;
-    targetMtime = targetHashed.mtime;
-    candidateMtime = candidateHashed.mtime;
-    if (!candidateHashed.bytes) {
-      // Should not happen — hashFileAtUri returns bytes when needBytes is
-      // true. If it ever does, fall back to a direct read.
-      candidateBytes = await vscode.workspace.fs.readFile(sourceUri);
-    } else {
-      candidateBytes = candidateHashed.bytes;
-    }
+    bytes = await vscode.workspace.fs.readFile(sourceUri);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`pptxSearch: updateFile (pdf) — read/hash failed — ${message}`);
+    log(`pptxSearch: updatePptxFromPdf — read failed — ${message}`);
     void panel.webview.postMessage({
       type: 'updateResult',
       outcome: 'error',
@@ -418,54 +392,33 @@ async function handleUpdateFilePdf(
     });
     return null;
   }
-
-  if (candidateSha === targetSha) {
-    const html = renderSearchUpdateIdenticalModalHtml({
-      targetFileName,
-      candidateFileName,
-      targetFolderLabel,
-      candidateFolderLabel,
-      sha256: candidateSha,
-    });
-    void panel.webview.postMessage({ type: 'updateModal', html });
+  try {
+    await requestPdfImportIntoViewer(targetUri, candidateFileName, bytes);
     log(
-      `pptxSearch: updateFile (pdf) — identical content ` +
-        `(sha256=${candidateSha.slice(0, 12)}…), no update offered`,
+      `pptxSearch: updatePptxFromPdf — routed ${candidateFileName} ` +
+        `(${bytes.byteLength} bytes) → ${targetUri.toString()} via viewer`,
     );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`pptxSearch: updatePptxFromPdf — handoff failed — ${message}`);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message: `Could not open viewer for PDF import: ${message}`,
+    });
     return null;
   }
-
-  const html = renderSearchUpdatePdfModalHtml({
-    target: {
-      fileName: targetFileName,
-      sizeBytes: targetSize,
-      mtime: targetMtime,
-      sha256: targetSha,
-    },
-    candidate: {
-      fileName: candidateFileName,
-      sizeBytes: candidateSize,
-      mtime: candidateMtime,
-      sha256: candidateSha,
-    },
-    targetFolderLabel,
-    candidateFolderLabel,
+  // Tell the panel to dismiss any modal/selection state. We use a
+  // distinct outcome so the panel can decide whether to mark the rows
+  // as disabled (no — the user may still cancel the import in the
+  // viewer) or simply clear the primed-pair state.
+  void panel.webview.postMessage({
+    type: 'updateResult',
+    outcome: 'pdf-import-routed',
+    targetUri: targetUri.toString(),
+    sourceUri: sourceUri.toString(),
   });
-  void panel.webview.postMessage({ type: 'updateModal', html });
-  log(
-    `pptxSearch: updateFile (pdf) — comparing ${candidateFileName} ` +
-      `(sha=${candidateSha.slice(0, 12)}…) → ${targetFileName} ` +
-      `(sha=${targetSha.slice(0, 12)}…)`,
-  );
-
-  return {
-    targetUri,
-    sourceUri,
-    candidateBytes,
-    candidateSha,
-    candidateFileName,
-    targetFileName,
-  };
+  return null;
 }
 
 /**

@@ -6,6 +6,7 @@ import type { SearchHit } from '../src/search/index-types';
 import {
   computeSearchScope,
   groupHitsByFolder,
+  isUnderFirstScopeFolder,
   isUnderScope,
   urisLeavingScope,
 } from '../src/search/scope';
@@ -96,6 +97,46 @@ function test_under_scope_empty(): void {
   const scope = { folderUris: [] };
   assert.equal(isUnderScope(scope, 'file:///work/source/deck.pptx'), false);
   console.log('  ok: empty scope → nothing in scope');
+}
+
+// ───── isUnderFirstScopeFolder ───────────────────────────────────────────
+
+function test_under_first_basic(): void {
+  const scope = {
+    folderUris: ['file:///work/canonical', 'file:///work/staging'],
+  };
+  assert.equal(
+    isUnderFirstScopeFolder(scope, 'file:///work/canonical/deck.pdf'),
+    true,
+  );
+  assert.equal(
+    isUnderFirstScopeFolder(scope, 'file:///work/staging/deck.pdf'),
+    false,
+  );
+  console.log('  ok: classifies URIs relative to the first scope folder');
+}
+
+function test_under_first_empty_scope(): void {
+  assert.equal(
+    isUnderFirstScopeFolder({ folderUris: [] }, 'file:///work/canonical/deck.pdf'),
+    false,
+  );
+  console.log('  ok: empty scope → never "under first folder"');
+}
+
+function test_under_first_trailing_slash_guard(): void {
+  // Same trailing-slash guard as isUnderScope — /work/foo must not match
+  // a URI living under /work/foobar.
+  const scope = { folderUris: ['file:///work/foo', 'file:///work/bar'] };
+  assert.equal(
+    isUnderFirstScopeFolder(scope, 'file:///work/foobar/deck.pdf'),
+    false,
+  );
+  assert.equal(
+    isUnderFirstScopeFolder(scope, 'file:///work/foo/deck.pdf'),
+    true,
+  );
+  console.log('  ok: trailing-slash guard prevents prefix-name collisions');
 }
 
 // ───── urisLeavingScope ──────────────────────────────────────────────────
@@ -265,6 +306,9 @@ const tests: Array<[string, () => void]> = [
   ['isUnderScope: trailing-slash guard', test_under_scope_trailing_slash_guard],
   ['isUnderScope: folder with trailing slash', test_under_scope_handles_folder_with_trailing_slash],
   ['isUnderScope: empty scope', test_under_scope_empty],
+  ['isUnderFirstScopeFolder: basic', test_under_first_basic],
+  ['isUnderFirstScopeFolder: empty scope', test_under_first_empty_scope],
+  ['isUnderFirstScopeFolder: trailing-slash guard', test_under_first_trailing_slash_guard],
   ['urisLeavingScope: dest promotion evicts', test_evictions_after_dest_promotion],
   ['urisLeavingScope: empty when unchanged', test_evictions_empty_when_unchanged],
   ['groupHitsByFolder: scope order preserved', test_group_preserves_scope_order],
