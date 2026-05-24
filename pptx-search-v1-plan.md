@@ -6,7 +6,7 @@ Search across `.pptx` files in workspace source folders by filename, author, and
 
 ## Status
 
-**M1–M5, M-MULTI, and M-PDF-OR all complete and live on the VPS test harness. M6 (polish + sign-off) is the remaining milestone for v1 DoD.**
+**M1–M5, M-MULTI, M-PDF-OR, post-M-PDF-OR follow-ups, and M-PDF-VIEW all complete and live on the VPS test harness. M6 (polish + sign-off) is the remaining milestone for v1 DoD.**
 
 Progress:
 
@@ -25,7 +25,7 @@ Post-M5 follow-ups (between M5 and M6 sign-off):
 
 All commits pushed and live on `vscode.sophtwhere.com`. v1 DoD bullets 1–8 are met; only the substrate-update bullets remain (9 + 10).
 
-**Next session is M6 polish + sign-off. The multi-result actions hook (originally listed below) has shipped as M-MULTI; the PDF-indexing + OR-mode follow-on hook has shipped as M-PDF-OR.**
+**Next session is M6 polish + sign-off. The multi-result actions hook (originally listed below) has shipped as M-MULTI; the PDF-indexing + OR-mode follow-on hook has shipped as M-PDF-OR; the follow-up "PDFs open as binary noise" surface bug is resolved by M-PDF-VIEW (basic PDF viewer custom editor).**
 
 This plan was written deliberately self-contained so it can be resumed in a fresh session without re-reading the full project substrate. Read `CLAUDE.md` only when you need wider context (other features, dev workflow, dead ends). The "Pointers into the existing codebase" section below lists every existing file you need to know about for this feature.
 
@@ -322,6 +322,60 @@ All 6 `test:search-*` suites green; `npx tsc --noEmit` clean; `npm run bundle` c
 
 - PDF metadata / text extraction via a hidden helper webview. PDF.js could run in a DOM-having webview iframe (same pattern as the pdfImport webview entry), but adds lifecycle complexity and bundle size. Filename-only is enough for current real-world usage. Revisit if a user signal warrants it.
 - Schema-bumping the projection to carry a `kind: 'pptx'|'pdf'` discriminator. Today the consumer that needs the distinction (update-flow type-router) derives it cheaply from the filename extension; not worth the IDB eviction cost.
+
+### Post-M-PDF-OR follow-ups ✅ DONE
+
+Two adjustments landed after M-PDF-OR shipped, both motivated by dog-fooding the multi-select + PDF flow:
+
+1. **Exclude PDFs from the canonical (first) scope folder.** Originally the indexer walked `**/*.{pptx,pdf}` for every in-scope folder. That meant a PDF could surface as the *canonical* side of a multi-select pair, opening the door to "update a PDF with a PDF" (out of scope) and "update a PDF with a PPTX" (would clobber the PDF). The fix:
+   - Per-folder glob in `src/search/indexer.ts` `doFullPass`: `'**/*.pptx'` for `folders[0]`, `'**/*.{pptx,pdf}'` for the rest.
+   - New pure `isUnderFirstScopeFolder(scope, fileUri)` in `src/search/scope.ts` (with `test_under_first_*` cases in `test/search-scope.test.ts`).
+   - Watcher accept-filter in `indexer.ts`: PDFs under `folders[0]` are dropped before they reach `processUri`, so a freshly-added PDF in the canonical folder never makes it into the engine.
+
+2. **PDF↔PPTX pairs route through the viewer's import pipeline instead of a search-side compare modal.** The original M-PDF-OR design had `handleUpdateFile` type-routing on the canonical filename: PPTX↔PPTX → parse modal; PDF↔PDF → thin compare modal; mixed → refused with toast. With PDFs gone from the canonical folder, the only remaining shape is "canonical PPTX + candidate PDF" — and the right destination for that is the existing PDF→PPTX import modal inside the pptx viewer, not a new compare path. Changes:
+   - **Removed** `renderSearchUpdatePdfModalHtml`, `SearchUpdatePdfModalInput`, `PdfFileInfo`, `renderPdfColumn`, and `humanBytes` from `src/search/updateModalHtml.ts`. The PDF↔PDF compare modal is gone.
+   - **Removed** `handleUpdateFilePdf` from `src/search/searchPanel.ts` along with its imports (`hashFileAtUri`, `getHashCacheSingleton`, `vscodeFs`).
+   - **New** module-scope registries in `src/provider.ts`: `activePanels` (uri → currently-mounted viewer panel) and `pendingPdfImports` (uri → `{fileName, bytes}` stash for cold opens). Populated on `resolveCustomEditor` entry; deregistered on dispose; stash drained at end of the initial render by posting `{type:'uploadedBytes', fileName, bytes}` into the webview.
+   - **New** exported entry point `requestPdfImportIntoViewer(targetUri, fileName, bytes)` in `src/provider.ts`. If a viewer is already mounted for `targetUri`, reveal it and post the bytes directly; otherwise stash + `vscode.commands.executeCommand('vscode.open', targetUri, …)` and let the resolve path drain the stash.
+   - **New** `handleUpdatePptxFromPdf` in `src/search/searchPanel.ts` that reads PDF bytes via `vscode.workspace.fs.readFile` and calls `requestPdfImportIntoViewer`, then posts `{type:'updateResult', outcome:'pdf-import-routed', targetUri, sourceUri}` back to the panel.
+   - **New** `updateResult` outcome `'pdf-import-routed'` handled in the panel's inline script (`src/search/searchPanelHtml.ts`): clears `selectedKeys` + selection mode and reconciles the toolbar. The disabled-state machinery (used by `'updated'` / `'updated-removed'`) is deliberately not applied here — the user's confirmation happens inside the viewer's import modal, not in the search panel.
+
+Net effect: the search-side update flow is now PPTX↔PPTX (compare modal) or PPTX←PDF (viewer hand-off), with the canonical side guaranteed to be a PPTX by the indexer's per-folder glob. The `handleUpdateConfirm` path remains unchanged because PDF→PPTX writes never reach it — they happen later inside the viewer's existing `handleIngest` path with `source='picker'`.
+
+### M-PDF-VIEW — Basic PDF viewer ✅ DONE
+
+Strictly downstream of M-PDF-OR: indexing PDFs surfaced them in search results, and clicking through opened vscode.dev's plain-text editor — which renders binary PDF bytes as garbled noise. A minimal custom editor for `*.pdf` closes that loop.
+
+**Files**
+
+- `src/pdfViewerHtml.ts` (pure) — renderer. Same CSP/nonce pattern as the pptx viewer (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-<random>'`). Emits the metadata grid (filename / size / mtime / sha256 / page count) plus a preview placeholder + error states styled to match the pptx panel's chrome. Page count starts as an em-dash and is filled in by the inline script once the parse lands.
+- `src/pdfViewer.ts` (vscode-wired) — `CustomReadonlyEditorProvider<PdfDocument>` registered as `pptxViewer.pdfViewer`. `resolveCustomEditor` reads bytes via `vscode.workspace.fs.readFile`, stats for size/mtime, computes sha256 via `sync/hash.sha256Hex`, renders the shell, then waits for the webview's `{type:'pdf-viewer-ready'}` ping before posting `{type:'pdfBytes', bytes}`. The ready-handshake avoids racing the iframe boot — there's no equivalent in the pptx viewer because that one inlines synthesis hints into the HTML rather than streaming bytes after render.
+
+**Webview rendering**
+
+Reuses the existing `__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__` substitution so the inlined pdfjs-dist bundle is available as `window.__pptxPdfImport`. The inline script:
+
+1. Receives bytes (coerces marshalled Uint8Array variants).
+2. Calls `__pptxPdfImport.renderPdfPages(bytes, {pdfjsLib, renderScale: 1.5})` — renders every page; we use `pages[0]` for the preview. No page-range option exists today; the cost of rendering all pages just to throw most away is acceptable for a read-only preview surface.
+3. Writes the page count into the metadata row via `[data-row="pages"] dd` (data-attribute selector picked so the renderer can move the row without breaking the script).
+4. `canvas.toDataURL('image/png')` → `<img src="data:…">` swap into the placeholder. Canvas is dropped from the DOM after the swap; reasoning matches the pptx viewer's thumbnail handling.
+
+**Wiring**
+
+- `package.json` — registered as a fourth `contributes.customEditors` entry: `viewType: pptxViewer.pdfViewer`, `displayName: "PDF Preview"`, `filenamePattern: "*.pdf"`, `priority: "default"`.
+- `src/extension.ts` — `PdfEditorProvider.register()` called immediately after the pptx provider registration; activation log line `activate: custom editor registered for *.pdf`.
+
+**Build-system fix discovered during integration**
+
+The `__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__` literal now appears in two source modules (`src/webview.ts` for the pptx viewer + `src/pdfViewerHtml.ts` for the pdf viewer). `esbuild.config.js`'s `pdfImportBundlePlugin` substituted only the first quoted-literal occurrence because the regex was non-global — the pdf viewer's `<script>` tag rendered the bare placeholder string as a no-op, and the inline script reported "PDF renderer not available in this build." Fix: add the `g` flag to `PDF_IMPORT_BUNDLE_QUOTED_RE` so every declaration gets substituted. Future modules that declare the same placeholder constant inherit the fix.
+
+**Out of scope for M-PDF-VIEW**
+
+- Page navigation. Preview is page-1-only. The user's stated need ("currently it displays it as text") is met by any rendered page; pager UI can land if there's signal.
+- IDB-cached PDF previews. The render runs on every panel open. Acceptable for current volumes; would plug into the same IDB pattern `parseCache` uses if it earns its keep.
+- Author / title metadata from the PDF's info dict. PDF.js exposes it via `getMetadata()`; not surfaced today because the panel already shows the four fields the user wanted (filename / size / mtime / sha256 + page count). Easy add later.
+
+**DoD achieved**: typecheck clean; `npm run bundle` clean (2.1MB extension.js after webview inline); existing `test:parse`, `test:viewer-render`, `test:search-scope` suites green; live-verified on `vscode.sophtwhere.com` after the regex fix landed.
 
 ### M6 — Polish + sign-off
 
