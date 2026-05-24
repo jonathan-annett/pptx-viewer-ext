@@ -6,7 +6,17 @@ Search across `.pptx` files in workspace source folders by filename, author, and
 
 ## Status
 
-**Not started.** Plan signed off 2026-05-24. Next: implement M1.
+**M1+M2+M3 complete (local commits, unpushed). Next: M4.**
+
+Progress:
+
+- **M1** — pure projection + tokenizer + scorer. Shipped in commit `673ec79` (local). Files: `src/search/{fold,tokenize,score,projection,index-types}.ts`. Tests: `test/search-{fold,tokenize,score,projection}.test.ts` — all pass via `npm run test:search-*`.
+- **M2** — parser extension for first-visible-slide text. Shipped in the same commit `673ec79`. `extractAllSlideText` added to `src/pptx.ts`; `ParseResult.firstVisibleSlideText: string` is now a required field (defaults to '' for old IDB cache hydration via `parseCacheIdb` v5→v6 bump). Tests: `test/pptx-first-visible-slide-text.test.ts`.
+- **M3** — IDB store + in-memory engine. Shipped in commit `1517e41` (local). Files: `src/search/{indexStore,searchEngine}.ts`. The IDB store wraps a dedicated `pptxSearch.index` DB with a `projections` store (separate from the hash + parse cache DBs — independent lifecycle). The engine holds three coordinated maps (`sha→projection`, `uri→sha`, `sha→Set<uri>`) and exposes `load / addOrUpdate / removeUri / search / stats`. `getAll()` was added to the `IdbStore` interface in `src/sync/idbAdapter.ts` (with fake-store updates in the affected hash + parse cache tests). DoD scenarios — dedup-by-sha, removal cascade, ranking sanity — all covered by `test/search-engine.test.ts` (17 cases, all green).
+
+Both commits are local-only; push timing is up to the user.
+
+**Next session: implement M4** (wired indexer + activation). See the milestone below. Open question 3 from this plan ("does `SyncManager` expose a destination-folder-URIs getter?") needs answering at the start of M4.
 
 This plan was written deliberately self-contained so it can be resumed in a fresh session without re-reading the full project substrate. Read `CLAUDE.md` only when you need wider context (other features, dev workflow, dead ends). The "Pointers into the existing codebase" section below lists every existing file you need to know about for this feature.
 
@@ -149,7 +159,7 @@ Every module above marked `pure` has zero vscode imports and is tsx-testable. Sp
 
 ## Milestones
 
-### M1 — Pure projection + tokenizer + scorer
+### M1 — Pure projection + tokenizer + scorer ✅ DONE (commit `673ec79`)
 
 Land the deterministic core with tests. No vscode, no IDB.
 
@@ -161,7 +171,7 @@ Land the deterministic core with tests. No vscode, no IDB.
 
 DoD: `npm run test:search-fold test:search-tokenize test:search-projection test:search-score` all pass; coverage includes the camelCase + diacritic + AND/OR + ranking cases.
 
-### M2 — Parser extension (if needed)
+### M2 — Parser extension ✅ DONE (commit `673ec79`)
 
 Check `src/pptx.ts`. The author field is already extracted (per substrate). First-slide visible text probably isn't — the existing test `pptx-title-extract.test.ts` suggests there's *some* slide-text extraction. If extraction of slide-1 text doesn't exist, add it as a *new* field on `ParseResult` (don't change existing fields — viewer + sync depend on them).
 
@@ -169,13 +179,14 @@ Naming: `firstVisibleSlideText: string` on `ParseResult`. Empty string if no vis
 
 DoD: `npm run test:parse` still passes; new test cases for first-visible-slide extraction (hidden first slide → second is used; image-only first slide → empty string; text inside groups + tables → included).
 
-### M3 — IDB store + engine
+### M3 — IDB store + engine ✅ DONE (commit `1517e41`)
 
-- `src/search/indexStore.ts` — open `pptxSearchIndex` store via existing `idbAdapter.ts`. CRUD: `getBySha`, `putProjection`, `deleteBySha`, `getAll`. Bump IDB version, handle `onupgradeneeded`.
-- `src/search/searchEngine.ts` — in-memory `Map<sha256, SearchProjection>` + `Map<uriString, sha256>` reverse index. `load(projections)`, `addOrUpdate(uri, projection)`, `removeUri(uri)`, `search(query) → SearchHit[]`.
-- Tests for the engine logic (the IDB layer is harder to unit-test cleanly; a probe command can verify behavior in vscode.dev — see M-search probe in M5).
+- `src/search/indexStore.ts` — opens a **dedicated** `pptxSearch.index` DB (store `projections`, key = sha256, version 1). The plan originally suggested sharing a DB with hash/parse caches; M3 chose a separate DB to keep schema-bump cadence and reset lifecycles independent — same pattern as `folderSync.hashCache` vs `folderSync.parseCache`. Surface: `getBySha`, `putProjection`, `deleteBySha`, `getAll`, `clear`, `count`, `close`. Schema-version drift handled at read (mismatched-version entries silently dropped, indexer re-projects on next pass); `DB_VERSION` bumps reserved for actual IDB schema changes.
+- `src/search/searchEngine.ts` — three coordinated maps (`sha→projection`, `uri→sha`, `sha→Set<uri>`) with documented I1/I2/I3 invariants. Pure module, no IDB/vscode imports. Surface: `load`, `addOrUpdate`, `removeUri`, `getProjection`, `getUrisForSha`, `search`, `stats`. Plus exported `parseQuery`. Hit ordering: score desc → filename asc → sha asc (deterministic).
+- `src/sync/idbAdapter.ts` — added `getAll(): Promise<V[]>` to `IdbStore`. The hash + parse caches deliberately don't use it (they're lookup-on-demand); search is the warm-load consumer. Test fakes in `test/sync-{hash,parse}-cache.test.ts` gained `getAll()` stubs.
+- `test/search-engine.test.ts` — 17 cases. DoD bullets all covered: dedup-by-sha, removal cascade (last URI removed → projection dropped), URI re-sha (orphan-drop + shared-keep variants), AND across terms, filename-beats-slideText, prefix-beats-substring.
 
-DoD: engine handles dedup-by-sha (same projection at two URIs → one hit with both URIs), removal cascade (last URI removed → projection dropped), and basic ranking sanity.
+DoD achieved.
 
 ### M4 — Wired indexer + activation
 
@@ -255,10 +266,10 @@ If you need wider context (commit conventions, dev workflow, dead ends to avoid)
 
 ## Open questions to resolve before / during M1
 
-1. **Does `src/pptx.ts` already extract first-visible-slide text?** Check `pptx-title-extract.test.ts` and the `ParseResult` shape. Influences M2 scope.
-2. **Does `parseCache.ts` already implement M5.3?** If yes, `getProjectionForSha` derives from it; if no, projection.ts parses directly. Determines M3 wiring.
-3. **Does `SyncManager` expose a "destination folder URIs" getter?** If not, derive from topology in M4 and consider adding a typed getter as a small bonus.
-4. **What IDB DB name + current version?** Look in `src/sync/idbAdapter.ts` — search needs to be added as a new object store at the next version bump.
+1. **Does `src/pptx.ts` already extract first-visible-slide text?** ✅ *Resolved during M1: no, only the title placeholder via `extractFirstSlideTitle`. M2 added `extractAllSlideText` + `ParseResult.firstVisibleSlideText` as a new required field.*
+2. **Does `parseCache.ts` already implement M5.3?** ✅ *Resolved during M1: yes — full ParseResult cache shipped (in-memory LRU + IDB write-through + Phase D identity index). For M4, `getProjectionForSha` should derive projections via `parsePptxCached` (the cache-aware parser) and `projectFromCached` / `projectFromParseResult` rather than re-implementing a separate parse path.*
+3. **Does `SyncManager` expose a "destination folder URIs" getter?** *Still open — answer at the start of M4 by reading `src/sync/manager.ts`. If not present, derive from topology + `onDidChange` for now.*
+4. **What IDB DB name + current version?** ✅ *Resolved during M3: separate DB `pptxSearch.index` v1 with store `projections`. Did not coexist with `folderSync.parseCache` (which is now at v6 after the M2 `firstVisibleSlideText` field landed) for the reasons in M3 above.*
 
 ---
 
