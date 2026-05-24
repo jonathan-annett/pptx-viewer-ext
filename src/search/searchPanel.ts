@@ -81,13 +81,17 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
   );
 
   // Forward indexer progress to the panel so the footer stays live during
-  // walks. Disposed when the panel goes away.
+  // walks. Disposed when the panel goes away. `errors` and
+  // `scopeFolderCount` ride along so the panel can show degraded-run
+  // suffixes and react to topology changes without an extra channel.
   const progressSub = deps.indexer.onProgress((p: IndexerProgress) => {
     void panel.webview.postMessage({
       type: p.phase === 'idle' ? 'indexComplete' : 'indexProgress',
       phase: p.phase,
       done: p.done,
       total: p.total,
+      errors: p.errors,
+      scopeFolderCount: p.scopeFolderCount,
     });
   });
 
@@ -619,44 +623,3 @@ function makeNonce(): string {
   return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Diagnostic: log index + store stats and a sample of entries to the output
- * channel. Removed at M6 polish. Cheap; safe to call anytime.
- */
-export async function probeSearchIndex(deps: {
-  engine: SearchEngine;
-  indexer: SearchIndexerHandle;
-}): Promise<void> {
-  const engineStats = deps.engine.stats();
-  const indexerStats = deps.indexer.stats();
-  const scope = deps.indexer.getScope();
-  log('pptxSearch: probeIndex — engine + indexer snapshot');
-  log(`  scope folders: ${scope.folderUris.length}`);
-  for (const f of scope.folderUris) log(`    - ${f}`);
-  log(
-    `  engine: projections=${engineStats.projections} uris=${engineStats.uris}`,
-  );
-  log(
-    `  indexer: processed=${indexerStats.processed} ` +
-      `indexStoreHits=${indexerStats.indexStoreHits} ` +
-      `parseCacheHits=${indexerStats.parseCacheHits} ` +
-      `fresh=${indexerStats.freshParses} errors=${indexerStats.errors}`,
-  );
-  // Sample up to 5 URIs and their projections so a sign-off run can
-  // eyeball that filenames + authors look right. URIs → sha → projection
-  // is two hops via the engine's lookup helpers.
-  const sample = deps.engine.getAllUris().slice(0, 5);
-  for (const uri of sample) {
-    const sha = deps.engine.getShaForUri(uri);
-    const projection = sha ? deps.engine.getProjection(sha) : undefined;
-    if (projection) {
-      log(
-        `  sample: ${uri} → ${projection.filename} ` +
-          `(author=${projection.author || '(none)'}, ` +
-          `slideText=${(projection.slideText || '').length} chars)`,
-      );
-    } else {
-      log(`  sample: ${uri} → (no projection)`);
-    }
-  }
-}

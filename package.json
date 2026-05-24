@@ -135,11 +135,6 @@
         "command": "pptxSearch.openPanel",
         "title": "Presentation Search: Open",
         "category": "Presentation Search"
-      },
-      {
-        "command": "pptxSearch.probeIndex",
-        "title": "Presentation Search: Probe Index (M5 diagnostic)",
-        "category": "Presentation Search"
       }
     ],
     "configuration": {

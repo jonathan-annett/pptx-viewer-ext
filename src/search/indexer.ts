@@ -63,14 +63,26 @@ import {
 import type { SearchEngine } from './searchEngine';
 
 /**
- * Per-event progress payload. M4 doesn't have a panel yet, so the
- * activation log is the only consumer — but the type is wired now so
- * M5's panel can subscribe without refactoring this module.
+ * Per-event progress payload. The panel subscribes to this to keep its
+ * footer live during walks.
+ *
+ * `errors` is the running tally of file-level failures (read/parse errors)
+ * since the indexer started. The panel surfaces this as a suffix on the
+ * footer text ("N indexed · M error(s)") so a degraded run is visible
+ * without the user having to open the Output Channel. `scopeFolderCount`
+ * lets the panel respond to topology changes that drop the scope to zero
+ * (or restore it) while the panel is open — no walks ever produce results
+ * if there's nothing in scope to walk.
  */
 export interface IndexerProgress {
   phase: 'walking' | 'projecting' | 'idle';
   done: number;
   total: number;
+  /** Running total of file-level errors since the indexer started. */
+  errors: number;
+  /** Current scope folder count. 0 ⇒ panel should switch to the empty-scope
+   *  surface; >0 ⇒ panel renders the normal indexed-N footer. */
+  scopeFolderCount: number;
 }
 
 export interface IndexerStats {
@@ -148,10 +160,21 @@ export function startSearchIndexer(
   });
   let firstPassDone = false;
 
-  const emitProgress = (p: IndexerProgress): void => {
+  // Call sites only specify the dynamic fields (phase/done/total); the
+  // helper folds in the live error count and scope folder count so the
+  // panel can react to topology changes mid-walk without us threading
+  // them through every emit site.
+  const emitProgress = (
+    p: Pick<IndexerProgress, 'phase' | 'done' | 'total'>,
+  ): void => {
+    const full: IndexerProgress = {
+      ...p,
+      errors: stats.errors,
+      scopeFolderCount: scope.folderUris.length,
+    };
     for (const fn of progressListeners) {
       try {
-        fn(p);
+        fn(full);
       } catch (err) {
         log(
           `search-indexer: progress listener threw — ${

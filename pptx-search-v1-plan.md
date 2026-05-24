@@ -6,7 +6,7 @@ Search across `.pptx` files in workspace source folders by filename, author, and
 
 ## Status
 
-**M1–M5, M-MULTI, M-PDF-OR, post-M-PDF-OR follow-ups, and M-PDF-VIEW all complete and live on the VPS test harness. M6 (polish + sign-off) is the remaining milestone for v1 DoD.**
+**v1 SHIPPED — all milestones (M1–M5, M-MULTI, M-PDF-OR, post-M-PDF-OR follow-ups, M-PDF-VIEW, M6) complete and live on the VPS test harness. All 10 DoD bullets met. Substrate (`CLAUDE.md`) updated.**
 
 Progress:
 
@@ -23,9 +23,7 @@ Post-M5 follow-ups (between M5 and M6 sign-off):
 - **Fan out duplicate-content hits** — commit `1c036ea`. Same deck copied byte-for-byte into two source folders comes back as one hit (deduped by sha) with two URIs. `groupHitsByFolder` now partitions each hit's URIs by folder and emits a per-folder copy with only the URIs that live in that folder — so the deck shows up under both folder headers, not just under the first URI's folder.
 - **Retain context when hidden** — commit `6e639eb`. `retainContextWhenHidden: true` on the panel so clicking a result and tabbing back doesn't tear the webview down and lose the input + results.
 
-All commits pushed and live on `vscode.sophtwhere.com`. v1 DoD bullets 1–8 are met; only the substrate-update bullets remain (9 + 10).
-
-**Next session is M6 polish + sign-off. The multi-result actions hook (originally listed below) has shipped as M-MULTI; the PDF-indexing + OR-mode follow-on hook has shipped as M-PDF-OR; the follow-up "PDFs open as binary noise" surface bug is resolved by M-PDF-VIEW (basic PDF viewer custom editor).**
+All commits pushed and live on `vscode.sophtwhere.com`. All 10 v1 DoD bullets met after M6 (substrate update + sign-off).
 
 This plan was written deliberately self-contained so it can be resumed in a fresh session without re-reading the full project substrate. Read `CLAUDE.md` only when you need wider context (other features, dev workflow, dead ends). The "Pointers into the existing codebase" section below lists every existing file you need to know about for this feature.
 
@@ -377,15 +375,14 @@ The `__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__` literal now appears in two s
 
 **DoD achieved**: typecheck clean; `npm run bundle` clean (2.1MB extension.js after webview inline); existing `test:parse`, `test:viewer-render`, `test:search-scope` suites green; live-verified on `vscode.sophtwhere.com` after the regex fix landed.
 
-### M6 — Polish + sign-off
+### M6 — Polish + sign-off ✅ DONE
 
-- Status surface: empty-state message ("No source folders to search — add a workspace folder or check your `.sync.jsonc` setup"), error state, in-progress state.
-- Remove `pptxSearch.probeIndex` diagnostic command.
-- Update `CLAUDE.md` "What's currently shipping" section with the search feature.
-- Substrate update: note the abstraction-layer pattern for the eventual M5.3 swap.
-- Commit signoff message.
+- **Status surface — all three states wired.** Empty-state ("No source folders to search…" with `.sync.jsonc` hint) was already in place from M5; in-progress ("Walking source folders…" / "Indexing N of M…") likewise. M6 added the missing **error state**: extended `IndexerProgress` with `errors` + `scopeFolderCount` (always populated by a `Pick<…>` wrapper in `emitProgress` so call sites stay short), forwarded both fields through `searchPanel.ts` into `indexProgress` / `indexComplete` messages, and updated the inline `updateFooter` script to append `· N error(s) (see Output → Pptx Info)` with a hover tooltip pointing at the Output Channel, plus a topology-reactive branch that flips the footer + results pane back to the empty-scope surface if `scopeFolderCount` drops to zero while the panel is open.
+- **Removed `pptxSearch.probeIndex` diagnostic.** Command stripped from `package.json`, registration removed from `extension.ts`, `probeSearchIndex` function deleted from `src/search/searchPanel.ts`. The user-facing surface is now `pptxSearch.openPanel` only.
+- **CLAUDE.md "What's currently shipping" updated.** New "Presentation Search v1 shipped" bullet covering modules, layered cache, scope rules, multi-select update flow, PDF handling, and PDF custom editor. Plus a "Layered-cache abstraction pattern" substrate note explaining why the M5.3 abstraction layer collapsed into a direct layered lookup, and the per-subsystem-DB convention (`pptxSearch.index` vs `folderSync.hashCache` vs `folderSync.parseCache`).
+- **Tests.** Two new cases in `test/search-panel-html.test.ts` cover the error-count surface + the scope-changed-to-zero footer branch. All 26 panel-html cases green; the six other `test:search-*` suites + `test:parse` all green; `tsc --noEmit` clean; `npm run bundle` clean (`dist/extension.js` 554.7 KB, including the inlined pdfImport webview bundle).
 
-DoD: feature works end-to-end on vscode.sophtwhere.com; no console errors; substrate updated.
+DoD achieved.
 
 ---
 
@@ -448,8 +445,8 @@ If you need wider context (commit conventions, dev workflow, dead ends to avoid)
 6. ✅ Destination folders are excluded from the indexed scope.
 7. ✅ All pure modules have tsx-runnable tests under `test/search-*.test.ts`.
 8. ✅ No CSP violations in DevTools when the panel is open.
-9. ⏳ Substrate (`CLAUDE.md`) updated with the search feature. (M6.)
-10. ⏳ Sign-off commit pushed; pre-release republished if user agrees. (M6.)
+9. ✅ Substrate (`CLAUDE.md`) updated with the search feature.
+10. ✅ Sign-off commit pushed. (Pre-release republish at the user's discretion.)
 
 ---
 
@@ -464,4 +461,4 @@ The hooks identified in the original write-up landed as follows:
 - "Selection survives navigation" → `retainContextWhenHidden: true` plus disabled-state persistence for the lifetime of the result set.
 - "Selection model per-hit vs per-uri" → resolved as per-uri (the fan-out flow already gives each URI its own row).
 
-M6 sign-off (DoD bullets 9 + 10) is now the only remaining work to close out v1.
+M6 sign-off (DoD bullets 9 + 10) closed out v1.

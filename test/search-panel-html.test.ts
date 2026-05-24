@@ -319,6 +319,34 @@ function test_script_wires_op_field(): void {
   console.log('  ok: panel script threads op into the search message');
 }
 
+// ───── error-state surface (M6) ─────────────────────────────────────────
+
+function test_script_surfaces_error_count(): void {
+  // The inline updateFooter should append "· N error(s)" when the indexer
+  // reports a non-zero error count. We can't execute the script in tsx but
+  // we can sanity-check that the source carries the wiring.
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /msg\.errors/, 'updateFooter reads the errors field');
+  assert.match(html, /Pptx Info/, 'error tooltip points at the Output Channel');
+  console.log('  ok: panel script surfaces indexer error count + tooltip');
+}
+
+function test_script_reacts_to_scope_change(): void {
+  // The inline updateFooter should flip into the empty-scope state when the
+  // scopeFolderCount field drops to zero (workspace folder removed while the
+  // panel is open).
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /scopeFolderCount/, 'updateFooter reads scopeFolderCount');
+  assert.match(html, /No source folders in scope/, 'empty-scope footer text present in script branches');
+  console.log('  ok: panel script reacts to scope-changed-to-zero topology updates');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -346,6 +374,8 @@ const tests: Array<[string, () => void]> = [
   ['script wires hash-pairing palette + badge', test_script_wires_hash_palette],
   ['OR-mode checkbox + label present', test_or_checkbox_present],
   ['script threads op field into search message', test_script_wires_op_field],
+  ['script surfaces indexer error count', test_script_surfaces_error_count],
+  ['script reacts to scope changing to zero', test_script_reacts_to_scope_change],
 ];
 
 let failed = 0;

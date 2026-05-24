@@ -1261,19 +1261,55 @@ function panelScript(): string {
   function updateFooter(msg) {
     const total = typeof msg.total === 'number' ? msg.total : 0;
     const done = typeof msg.done === 'number' ? msg.done : 0;
+    const errors = typeof msg.errors === 'number' ? msg.errors : 0;
+    const scopeFolderCount = typeof msg.scopeFolderCount === 'number'
+      ? msg.scopeFolderCount
+      : -1; // -1 = unknown → don't override existing empty-state handling
+
+    // Scope-changed-to-zero: surface the empty-scope state in the footer
+    // and (when no query is active) in the results pane, so a user who
+    // had the panel open through a workspace-folder removal sees the
+    // dropped state instead of stale "N indexed".
+    if (scopeFolderCount === 0) {
+      footerText.textContent = 'No source folders in scope.';
+      results.setAttribute('aria-busy', 'false');
+      if (!latestQuery || latestQuery.trim() === '') {
+        renderEmpty(
+          'No source folders to search. Add a workspace folder, or check that it is not claimed as a destination by an active .sync.jsonc.',
+        );
+      }
+      return;
+    }
+
     if (msg.type === 'indexComplete' || msg.phase === 'idle') {
-      footerText.textContent = total === 0
+      let text = total === 0
         ? 'No presentations indexed.'
         : (total + ' presentation' + (total === 1 ? '' : 's') + ' indexed');
+      if (errors > 0) {
+        text += ' · ' + errors + ' error' + (errors === 1 ? '' : 's') +
+          ' (see Output → Pptx Info)';
+      }
+      footerText.textContent = text;
+      footerText.title = errors > 0
+        ? 'Some files could not be read or parsed during indexing. See the Output Channel "Pptx Info" for details.'
+        : '';
       results.setAttribute('aria-busy', 'false');
       return;
     }
     results.setAttribute('aria-busy', 'true');
+    let progressText;
     if (msg.phase === 'walking') {
-      footerText.textContent = 'Walking source folders…';
+      progressText = 'Walking source folders…';
     } else {
-      footerText.textContent = 'Indexing ' + done + ' of ' + total + '…';
+      progressText = 'Indexing ' + done + ' of ' + total + '…';
     }
+    if (errors > 0) {
+      progressText += ' · ' + errors + ' error' + (errors === 1 ? '' : 's');
+    }
+    footerText.textContent = progressText;
+    footerText.title = errors > 0
+      ? 'Some files could not be read or parsed during indexing. See the Output Channel "Pptx Info" for details.'
+      : '';
   }
 })();
 `.trim();
