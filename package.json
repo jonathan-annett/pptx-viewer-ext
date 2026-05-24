@@ -120,6 +120,16 @@
         "command": "pptxViewer.probeUpload",
         "title": "Pptx Info: Probe Upload (M4 diagnostic)",
         "category": "Pptx Info"
+      },
+      {
+        "command": "pptxSearch.openPanel",
+        "title": "Presentation Search: Open",
+        "category": "Presentation Search"
+      },
+      {
+        "command": "pptxSearch.probeIndex",
+        "title": "Presentation Search: Probe Index (M5 diagnostic)",
+        "category": "Presentation Search"
       }
     ],
     "configuration": {
@@ -181,6 +191,7 @@
     "test:search-projection": "node --import tsx test/search-projection.test.ts",
     "test:search-engine": "node --import tsx test/search-engine.test.ts",
     "test:search-scope": "node --import tsx test/search-scope.test.ts",
+    "test:search-panel-html": "node --import tsx test/search-panel-html.test.ts",
     "test:pptx-first-visible-slide-text": "node --import tsx test/pptx-first-visible-slide-text.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",

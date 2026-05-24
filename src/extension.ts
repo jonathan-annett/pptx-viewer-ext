@@ -28,6 +28,7 @@ import {
 import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
+import { openSearchPanel, probeSearchIndex } from './search/searchPanel';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -255,6 +256,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       context.subscriptions.push({ dispose: () => store.close() });
     }
     log(`search-index: scope folders=${indexer.getScope().folderUris.length}`);
+
+    // M5 commands — only register when the search subsystem started cleanly.
+    // If init throws above, the catch branch logs and we skip these so the
+    // user doesn't see "search: open" wired to nothing.
+    context.subscriptions.push(
+      vscode.commands.registerCommand('pptxSearch.openPanel', () => {
+        openSearchPanel({ engine, indexer });
+      }),
+      vscode.commands.registerCommand('pptxSearch.probeIndex', async () => {
+        await probeSearchIndex({ engine, indexer });
+      }),
+    );
   } catch (err) {
     log(
       `search-index: init failed — ${err instanceof Error ? err.message : String(err)} (search disabled this session)`,
