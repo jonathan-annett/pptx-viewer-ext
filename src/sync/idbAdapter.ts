@@ -20,6 +20,15 @@ export interface IdbStore<V> {
   clear(): Promise<void>;
   /** Total number of entries — diagnostic only. */
   count(): Promise<number>;
+  /**
+   * Read every value in the store. Used by callers that want a one-shot
+   * warm-load into an in-memory index at activation (e.g. the search
+   * engine's projection load). Linear in store size — not for stores that
+   * could grow unbounded. The hash cache and parse cache deliberately
+   * don't use this; they're lookup-on-demand and don't want to materialise
+   * the whole store on startup.
+   */
+  getAll(): Promise<V[]>;
   /** Release the connection. Idempotent. */
   close(): void;
 }
@@ -205,6 +214,13 @@ function makeStoreView<V>(db: IDBDatabase, storeName: string, ownsConnection: bo
         const req = tx('readonly').count();
         req.onerror = () => reject(req.error);
         req.onsuccess = () => resolve(req.result);
+      });
+    },
+    getAll() {
+      return new Promise<V[]>((resolve, reject) => {
+        const req = tx('readonly').getAll();
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result as V[]);
       });
     },
     close() {

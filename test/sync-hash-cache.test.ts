@@ -303,6 +303,10 @@ function makeFakeIdb<V>(): IdbStore<V> & { backing: Map<string, V>; ops: string[
     async count() {
       return backing.size;
     },
+    async getAll() {
+      ops.push('getAll');
+      return [...backing.values()];
+    },
     close() {
       ops.push('close');
     },
@@ -373,6 +377,7 @@ test('IndexedDbHashCache: tolerates IDB.put failure (in-memory still works)', as
     async delete() { /* ok */ },
     async clear() { /* ok */ },
     async count() { return 0; },
+    async getAll() { return []; },
     close() { /* ok */ },
   };
   const cache = await IndexedDbHashCache.open<string>({ open: async () => store });

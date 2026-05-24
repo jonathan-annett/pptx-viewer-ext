@@ -87,6 +87,10 @@ function makeFakeIdb<V>(): IdbStore<V> & { backing: Map<string, V>; ops: string[
     async count() {
       return backing.size;
     },
+    async getAll() {
+      ops.push('getAll');
+      return [...backing.values()];
+    },
     close() {
       ops.push('close');
     },
@@ -432,6 +436,7 @@ async function run(): Promise<void> {
       async delete() { /* noop */ },
       async clear() { /* noop */ },
       async count() { return 0; },
+      async getAll() { return []; },
       close() { /* noop */ },
     };
     const thumbs = makeFakeIdb<Thumbnail>();
