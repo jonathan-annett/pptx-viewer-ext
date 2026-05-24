@@ -2,6 +2,7 @@
 // Runs inside a web worker in vscode.dev — no Node APIs available.
 import * as vscode from 'vscode';
 import { PptxEditorProvider } from './provider';
+import { PdfEditorProvider } from './pdfViewer';
 import { initLog, log } from './log';
 import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
@@ -73,6 +74,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     PptxEditorProvider.register(managerPromise, context.globalState),
   );
   log('activate: custom editor registered for *.pptx');
+  context.subscriptions.push(PdfEditorProvider.register());
+  log('activate: custom editor registered for *.pdf');
 
   // Re-open the last-active tab. vscode.dev does not preserve open editor
   // tabs across PWA refresh — workspace folders come back (via maybeRestore

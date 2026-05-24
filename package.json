@@ -39,6 +39,16 @@
         "priority": "default"
       },
       {
+        "viewType": "pptxViewer.pdfViewer",
+        "displayName": "PDF Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ],
+        "priority": "default"
+      },
+      {
         "viewType": "folderSync.configEditor",
         "displayName": "Folder Sync configuration",
         "selector": [
