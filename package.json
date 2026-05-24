@@ -1,8 +1,8 @@
 {
   "name": "pptx-sync",
   "displayName": "Presentation Folder Sync",
-  "description": "One-way folder sync and pptx inspector for vscode.dev.",
-  "version": "0.1.0",
+  "description": "Inspect, search, and one-way folder sync for PowerPoint decks. Built for vscode.dev; runs in desktop VS Code too.",
+  "version": "0.1.1",
   "publisher": "sophtwhere",
   "license": "MIT",
   "repository": {

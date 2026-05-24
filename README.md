@@ -1,254 +1,251 @@
-# Pptx Info — VS Code web extension
+# Presentation Folder Sync
 
-A VS Code web extension that combines two features:
+A VS Code extension for working with PowerPoint decks: inspect them at a
+glance, push them between folders with a reviewable plan, and search
+across hundreds of decks by content. Designed first for **vscode.dev**
+(works there without installing anything locally), and also runs in
+desktop VS Code.
 
-1. **Pptx viewer** — a read-only viewer for `.pptx` files that surfaces
-   metadata and three safety-relevant validation flags so a file can be
-   inspected at a glance before opening it in PowerPoint. (No slide
-   rendering — by design.)
-2. **Folder sync** *(in development)* — a one-way folder sync for
-   vscode.dev: read access on a source folder tree, write access on one or
-   more destination folders, user-convened with a plan-gate-execute model.
-   The pptx viewer's validation checks plug into the sync as flagged items.
+> No slide rendering — this isn't a viewer that shows you the slides. It
+> shows you everything *around* the slides (metadata, validation,
+> thumbnail) so you can tell what a file is at a glance before opening
+> it in PowerPoint, Keynote, or LibreOffice.
 
-## What the pptx viewer shows
+---
 
-**Metadata**: file name, size, mtime, SHA-256, slide count, hidden slide count,
-author, last-modified-by, embedded media (mime → count).
+## Three features, useable independently
 
-**Validation flags** (pass/warn):
+### 1. Presentation viewer
 
-| Flag                  | Warns when                                                              |
-|-----------------------|-------------------------------------------------------------------------|
-| Linked media          | A slide rels file links to external video/audio/media                   |
-| Show type             | `<p:browse/>` or `<p:kiosk/>` is set on `<p:showPr>`                    |
-| Show media controls   | `showMediaControls="1"` (or `"true"`) on `<p:showPr>`                   |
+Open any `.pptx` and a metadata panel takes the place of the usual
+"binary file" treatment:
 
-## Logging
+- File name, size, hash, slide count, hidden-slide count, author,
+  last-modified-by
+- Embedded media summary (audio / video / image counts by mime type)
+- **Thumbnail** — the deck's own embedded thumbnail when present, or a
+  synthesised coloured-box + title-text fallback so every deck has one
+- **Three safety checks** as pass/warn flags:
+  - **Linked media** — slides reference video or audio that lives
+    *outside* the file (won't play on a different machine)
+  - **Show type** — file is set to kiosk or window mode instead of
+    normal presenter mode
+  - **Media controls** — on-screen player bar is enabled (visually
+    noisy during a talk; usually a leftover from authoring)
 
-Once installed, activation and per-file events are logged in two places:
+**Actions in the viewer:**
 
-- **Output panel** — *View → Output → Pptx Info*
-- **DevTools console** — *Help → Toggle Developer Tools*, lines are prefixed `[pptx-viewer]`
+- **Save As…** — download a copy
+- **Update…** — pick a new `.pptx` and replace this one (compares first,
+  refuses if identical)
+- **Extract media** — pull any embedded video out as a standalone file
+- **Drag & drop** a `.pptx` onto the viewer — same compare-and-update
+  flow without picking
+- **Drag & drop** a `.pdf` onto the viewer — open the PDF → PPTX import
+  modal (resolution, aspect, format, quality), one slide per page
 
-## Folder sync (in development)
+A separate **PDF preview** also opens any `.pdf` and renders page 1, so
+files clicked from search don't open as raw bytes.
 
-The folder-sync feature is being shipped incrementally. Currently landed
-(milestones M1 through M4.5):
+### 2. Folder sync
 
-- `.sync.jsonc` discovery across all workspace folders (JSON with comments
-  + trailing commas, same dialect as VS Code's `settings.json`)
-- Schema validation and topology resolution (matching destination names to
-  open workspace folders, detecting subpath collisions)
-- Hot-reload via `FileSystemWatcher` — edit a config and the topology
-  re-resolves
-- Bundled JSON Schema → IntelliSense + red squiggles when editing as text
-- Custom editor for `.sync.jsonc` with form-style destination/path/glob
-  controls and a Dry run button
-- Plan engine + categorised plan webview + executor with manifest writes
-- Status bar item showing source/destination counts and any issues
-- Commands: **Folder Sync: Show Topology**, **Show Plan**, **Dry-Run Plan**
+One-way push from a source folder to one or more destination folders.
+You convene every sync; nothing fires in the background.
 
-Interactive decision UI (collisions, destination-only, validator warnings,
-"don't ask again" persistence) ships in M5. See `folder-sync-v1-plan.md` at
-the repo root for the full spec.
+**The flow:**
 
-### `.sync.jsonc` example
+1. Drop a `.sync.jsonc` in any folder you want to push *from*. A custom
+   editor opens by default with form fields for destinations, paths, and
+   include/exclude globs; the file is regular JSONC and IntelliSense
+   works in the text editor too.
+2. Add the destination folders to your workspace (in vscode.dev: drag
+   from File Explorer, or use *File → Add Folder to Workspace*).
+3. Click **Folder Sync** in the status bar, or right-click any folder
+   under a source in the Explorer → **Sync This Folder**.
+4. A **plan webview** opens, showing every file that would be created,
+   updated, or deleted. Operations are grouped into six categories:
+   - To create
+   - To update (already tracked)
+   - To delete (source removed)
+   - **Collisions** — destination has drifted from what the manifest
+     expected (per-row "overwrite this file" toggle, plus a "don't ask
+     again" checkbox that persists)
+   - **Destination-only files** — never placed by sync (per-row delete
+     toggle, default off)
+   - **Validation warnings** — files flagged by the pptx viewer's
+     safety checks
+5. Choose a path through the **traffic-light gate**:
+   - **Green Proceed** when nothing needs attention (clean plan)
+   - **Orange "Proceed with safe items only"** when collisions or
+     warnings exist — applies only the items you armed plus the always-
+     safe ones
+   - **Red Cancel** to back out entirely
+
+A manifest file in each destination (`.foldersync-manifest.json`)
+tracks what was placed there, so sync can distinguish files it put there
+from files you added by hand. The manifest opens in its own view-only
+editor showing tracked entries, recorded decisions, and last-sync
+timestamps.
+
+**Workspace snapshot.** Because vscode.dev forgets which folders you had
+open across a browser refresh, the extension keeps an
+`.admin-sync.jsonc` snapshot of the open-folder set + relevant settings
+in the root of your first workspace folder. On a folderless reload, it
+re-mounts the folders for you (no permission prompts after the first
+grant). The snapshot has its own editor with rename / refresh / clear
+actions.
+
+### 3. Presentation search
+
+Command palette → **Presentation Search: Open**.
+
+A workspace-wide search panel that matches across:
+
+- Filename
+- `dc:creator` (author) metadata
+- First-visible-slide text
+
+Type a query and watch results appear as you type. AND across terms by
+default, with an **Any term (OR)** checkbox. Results are grouped by
+workspace folder, deduplicated by content hash, and a coloured badge
+highlights when the same content lives in multiple places (a useful
+sanity check when you're shipping the same deck to several conference
+rooms). Click a result to open the viewer.
+
+**Multi-select with Update with…** — pick a source row, tick one or
+more target rows, and push the same content into every target in one
+gesture. PDF sources route through the viewer's PDF→PPTX import flow
+automatically.
+
+Sync destinations are excluded from indexing — the search shows you
+*sources* and other workspace folders, not their mirrors.
+
+---
+
+## Quick start
+
+### vscode.dev (no install)
+
+1. Open <https://vscode.dev>.
+2. Install **Presentation Folder Sync** from the Extensions sidebar.
+3. *File → Add Folder to Workspace* and pick a folder containing
+   `.pptx` files.
+4. Click any `.pptx` — the viewer takes over.
+
+### Desktop VS Code
+
+1. Install from the Marketplace (search "Presentation Folder Sync"), or
+2. Download a `.vsix` from the [releases page][releases] and use
+   *Extensions sidebar → ⋯ menu → Install from VSIX*.
+
+[releases]: https://github.com/jonathan-annett/pptx-viewer-ext/releases
+
+---
+
+## Configuring sync
+
+The sync feature reads a `.sync.jsonc` at the root of each source folder.
+Minimal example:
 
 ```jsonc
-// .sync.jsonc at the root of any folder you want treated as a source.
-// This file itself is implicitly excluded from sync.
-//
-// Destinations are identified by URI — copy them from the canonical
-// workspace snapshot at .admin-sync.jsonc (look at the `folders[].uri`
-// field). Keying by URI rather than display name means renaming a folder
-// in the Workspace snapshot editor doesn't break this file.
 {
+  // Destinations are workspace folders, identified by URI.
+  // Copy the URI from .admin-sync.jsonc (the workspace snapshot file)
+  // — using the URI rather than a display name means renaming a folder
+  // in the UI won't break this config.
   "destinations": [
-    // Minimal: just a destination URI. Whole source goes to the
-    // destination's root.
-    { "uri": "file:///handle/abc-usb-backup" },
-
-    // With a subpath — the source maps into a nested location.
-    { "uri": "file:///handle/def-nas-archive", "path": "projects/alpha/2026" },
-
-    // Multiple destinations are independent; each gets the full source
-    // (filtered by the include/exclude rules below).
-    { "uri": "file:///handle/ghi-dropbox-mirror", "path": "work/alpha" }
+    { "uri": "file:///handle/abc-backup-drive" },
+    { "uri": "file:///handle/def-archive", "path": "snapshots/alpha" }
   ],
 
-  // Glob patterns excluded in addition to the built-in ignores
-  // (.git/, .DS_Store, Thumbs.db, ~$*, .sync.jsonc itself,
-  // .foldersync-manifest.json).
+  // Optional: glob patterns to exclude (added to the built-in ignore list)
   "exclude": [
     "node_modules/**",
-    "*.tmp",
     "build/**",
-    ".vscode/**",
-    "**/*.log"
+    "*.tmp"
   ]
 
-  // include is optional. Default is everything not excluded.
+  // Optional: glob patterns to include (default is everything not excluded)
 }
 ```
 
-### Field meanings
+**Always ignored** (you don't need to list these): `.git/`,
+`.DS_Store`, `Thumbs.db`, `~$*` (Office lock files), `.sync.jsonc`
+itself, `.foldersync-manifest.json`, and `*.tmp`.
 
-- `destinations[].uri` — must match a workspace folder URI currently open in
-  vscode.dev. Copy the value from the matching entry in `.admin-sync.jsonc`
-  (`folders[].uri`). Unresolved URIs produce a warning at load and are
-  skipped at sync time.
-- `destinations[].path` — optional subpath under the destination. Normalised
-  (no leading or trailing slashes, no doubled separators).
-- `exclude` / `include` — glob patterns. Built-in ignores are always applied.
+The bundled JSON schema gives you autocomplete and red squiggles in the
+text editor; the custom editor gives you dropdowns of currently-open
+workspace folders so you don't have to copy URIs by hand for the simple
+case.
 
-### What to look for when testing
+---
 
-- Workspace folder URIs in vscode.dev are stable across renames — the
-  display name shown in the explorer is just a label. Destinations key off
-  the URI for that reason; copy the URI from `.admin-sync.jsonc`.
-- Two sources writing to the same destination subpath (e.g. both
-  `.sync.jsonc` files declaring the same `uri` with no `path`) trigger the
-  collision diagnostic.
-- An invalid config gets a `jsonc parse error: ...` message in the Output
-  Channel, the affected source is skipped, and the rest of the topology
-  still loads.
+## Commands
 
-## Building
+All available from the command palette under the **Folder Sync**, **Pptx
+Info**, and **Presentation Search** categories:
 
-```bash
-npm install --ignore-scripts   # ignore-scripts: skips @vscode/vsce-sign's
-                               # native postinstall (no android-arm64 binary)
-npm run compile-web            # esbuild -> dist/extension.js
-npm run package                # vsce -> pptx-viewer-<version>.vsix
-```
+| Command | What it does |
+|---|---|
+| **Presentation Search: Open** | Open the search panel |
+| **Folder Sync: Show Plan** | Open the workspace-wide sync plan |
+| **Folder Sync: Sync This Folder** | Folder-scoped plan (also on Explorer right-click) |
+| **Folder Sync: Show Topology** | Print resolved sources + destinations to the Output panel |
+| **Folder Sync: Dry-Run Plan** | Print the plan to the Output panel as text |
+| **Folder Sync: Open Admin Config** | Open the workspace snapshot editor |
+| **Folder Sync: Show / Clear Workspace Snapshot** | Diagnostic + reset |
 
-## Installing & testing
+---
 
-vscode.dev does **not** support installing extensions from arbitrary URLs or
-uploaded `.vsix` files (the "Install from VSIX" menu only exists on desktop,
-and the "Install Extension from Location..." command is restricted to
-`localhost` by CSP). There are two working paths:
+## What this extension does **not** do (by design)
 
-### A. vscode.dev via local server (recommended for dev)
+- **No slide rendering.** The viewer surfaces metadata, validation, and
+  a thumbnail. To see the slides themselves, open the file in
+  PowerPoint, Keynote, or LibreOffice.
+- **No legacy `.ppt` support.** Pptx only.
+- **No bidirectional sync.** Pushes go one way: source → destination(s).
+  Nothing flows back.
+- **No scheduled or automatic sync.** You convene every run. The plan
+  webview is always between you and any write.
+- **No three-way merge.** When a destination file has drifted out from
+  under the manifest, the plan flags it as a collision; you choose
+  overwrite or skip. There's no merging.
+- **No background watchers writing files.** File watchers exist to keep
+  the plan view fresh, never to fire writes.
 
-```bash
-npm run open-in-browser
-```
+---
 
-This runs `@vscode/test-web`, which serves a copy of VS Code Web with this
-extension preloaded at `http://localhost:3001/`. Open that URL in Chrome on
-the same machine. The extension is active immediately — open a `.pptx` from a
-workspace folder and the Pptx Info editor takes over.
+## How writes work
 
-First run downloads ~34 MB of VS Code Insiders web build into
-`.vscode-test-web/`; subsequent runs reuse the cache.
+- Atomic write pattern: contents go to `<path>.tmp` first, then a rename
+  swaps it into place. An interrupted sync leaves only the original
+  file at the final path; orphan `.tmp` files are swept on the next
+  run.
+- Files are matched by content (SHA-256). Renaming a destination file
+  doesn't confuse the planner — but the manifest is keyed by source
+  path, so files renamed *at the source* surface as a delete + create
+  pair until you sync.
+- In vscode.dev, folder access is granted by the browser's File System
+  Access API. The first time you add a folder it asks; subsequent
+  refreshes restore the grant automatically.
 
-### B. Desktop VS Code via `.vsix`
+---
 
-```
-Extensions sidebar (Ctrl/Cmd+Shift+X) → ... menu → Install from VSIX
-```
+## Where to look when something seems off
 
-Pick the `.vsix` from a release on
-<https://github.com/jonathan-annett/pptx-viewer-ext/releases> or one you
-built locally with `npm run package`.
+- **Output panel → Pptx Info** — activation, per-file parse, sync
+  events, and any errors
+- **DevTools console** (Help → Toggle Developer Tools) — same lines,
+  prefixed `[pptx-viewer]`, plus a build timestamp + short git SHA per
+  activation. Handy when reporting issues.
 
-## What to look for when testing
+---
 
-- Did the editor open instead of "binary file" treatment?
-- Are metadata fields populated? Any "unknown" you didn't expect?
-- Do the three validation flags fire on the right files and stay quiet on
-  clean ones?
-- Anything visually off, confusing, or missing?
-- Errors in DevTools console or in *Output → Pptx Info*?
+## Issues and feedback
 
-## Publishing built files
+Report at <https://github.com/jonathan-annett/pptx-viewer-ext/issues>.
+PRs and discussions welcome.
 
-`npm run publish:web` atomically commits the built extension files
-(`package.json` + `dist/*`) and the latest `.vsix` to a GitHub Pages repo via
-the git data API (no clone required). Configured by the `webPublish` block in
-`package.json`:
+## License
 
-```json
-"webPublish": {
-  "repo":   "owner/repo",
-  "branch": "main",
-  "folder": "vscode-ext-dev/pptx-viewer-ext"
-}
-```
-
-The vsix lands at the parent of `folder`; older `<name>-*.vsix` siblings are
-removed automatically. **Note:** these published files are *not* loadable
-into vscode.dev directly (see above) — the publish exists for sharing the
-`.vsix` and as a download URL for desktop installs.
-
-## Known limitations
-
-- No slide rendering — by design.
-- Legacy `.ppt` (binary) is not supported.
-- Desktop VS Code works via "Install from VSIX"; remote desktops also work.
-- Parsing uses targeted regex/substring scans rather than a full XML parser,
-  trading strictness for size and tolerance of malformed input. Edge cases may
-  resolve to "unknown".
-
-## Termux notes
-
-This project was bootstrapped on Termux/Android. Two non-obvious workarounds
-ship with the repo for that environment:
-
-- **`scripts/fix-cpus.cjs`** — preloaded into `vsce package`. Android's app
-  sandbox makes `os.cpus()` return `[]`, which crashes `@secretlint/node`
-  (used by `vsce` for secrets scanning) when it passes `0` as a p-map
-  concurrency. The preload clamps to `os.availableParallelism()`.
-- **`scripts/fix-platform.cjs`** — preloaded into `vscode-test-web`.
-  `playwright-core` (a transitive dep) throws *"Unsupported platform: android"*
-  at import time. The preload spoofs `process.platform = 'linux'`; combined
-  with `--browserType=none`, no chromium binary is ever resolved.
-
-On a real Linux/macOS dev box neither preload is necessary — the scripts
-no-op when `process.platform !== 'android'`.
-
-## Layout
-
-```
-src/
-  extension.ts     activate, register provider, init sync manager, log channel
-  provider.ts      CustomReadonlyEditorProvider (pptx viewer)
-  pptx.ts          parse pptx bytes -> ParseResult
-  webview.ts       ParseResult -> HTML string
-  log.ts           OutputChannel + console mirror
-  sync/            folder sync feature
-    configParse.ts     pure jsonc parse + schema validation (tsx-testable)
-    config.ts          vscode-wired loader
-    topology.ts        destination resolution + collision detection
-    manager.ts         discovery, hot-reload, topology lifecycle
-    statusBar.ts       status bar item
-    plan.ts            pure classifier (six operation categories)
-    planner.ts         vscode-wired walk + hash + plan assembly
-    planHtml.ts        pure plan webview renderer
-    planView.ts        vscode-wired plan webview panel
-    walker.ts          tree walk respecting includes/excludes
-    glob.ts            glob → regex compiler + built-in ignore list
-    hash.ts            SHA-256 via crypto.subtle
-    manifest-types.ts  pure manifest schema
-    manifest.ts        vscode-wired manifest I/O
-    executor.ts        pure executor (injected SyncFs)
-    runSync.ts         vscode-wired orchestrator
-    configEditorHtml.ts  pure renderer for the .sync.jsonc form editor
-    configEditor.ts      vscode-wired CustomTextEditorProvider
-schemas/
-  sync.schema.json   JSON Schema for .sync.jsonc; powers IntelliSense
-scripts/
-  fix-cpus.cjs       Termux workaround for vsce
-  fix-platform.cjs   Termux workaround for vscode-test-web
-  publish-web.cjs    atomic GitHub Pages deploy
-test/
-  parse.test.ts             pptx parser smoke test
-  sync-jsonc.test.ts        jsonc parse + schema validation
-  sync-glob.test.ts         glob matcher
-  sync-plan.test.ts         operation classifier
-  sync-planview.test.ts     plan webview HTML renderer
-  sync-executor.test.ts     pure executor
-  sync-config-editor.test.ts form editor HTML renderer
-```
+MIT.
