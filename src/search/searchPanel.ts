@@ -13,10 +13,10 @@
 // CSP per substrate convention: default-src 'none'; style-src 'unsafe-inline';
 // img-src data:; script-src 'nonce-<random>';
 //
-// No retainContextWhenHidden: the panel re-renders cleanly from initial
-// state when the user re-reveals it. Search input contents would be lost
-// across tab switches, but for v1 that's an acceptable trade for not
-// holding hundreds of KB of accumulated result DOM in memory.
+// retainContextWhenHidden: true. Clicking a search result opens the file in
+// the same column as the panel, which hides the webview tab; without this
+// flag the webview process tears down and the input + results are lost on
+// return. Memory cost is small (the result DOM caps at MAX_RESULTS rows).
 
 import * as vscode from 'vscode';
 import { log } from '../log';
@@ -53,7 +53,7 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
     { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
     {
       enableScripts: true,
-      retainContextWhenHidden: false,
+      retainContextWhenHidden: true,
     },
   );
   currentPanel = panel;
