@@ -40,6 +40,22 @@ export function basenameOf(uriOrPath: string): string {
 }
 
 /**
+ * Best-effort URI-decode for display. `decodeURIComponent` throws on
+ * malformed sequences (e.g. a literal `%` not followed by two hex digits);
+ * we fall back to the raw input rather than blow up the projection build.
+ * Used to turn `WED%20206%201720.pptx` into `WED 206 1720.pptx` for the
+ * results panel without losing the folded form used for matching.
+ */
+export function decodeUriDisplay(s: string): string {
+  if (!s) return '';
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/**
  * Internal builder: takes raw strings and metadata, returns a folded +
  * tokenised projection. Used by both public entry points below.
  */
@@ -51,15 +67,25 @@ function buildProjection(opts: {
   sizeBytes: number;
   mtime: number;
 }): SearchProjection {
-  const filename = fold(opts.filename);
+  // Display fields preserve the original case but URI-decode the filename
+  // so `%20` etc. render as the spaces the user expects. Match fields stay
+  // folded so search is case + accent insensitive.
+  const displayFilename = decodeUriDisplay(opts.filename);
+  const displayAuthor = opts.author;
+  const filename = fold(displayFilename);
   const author = fold(opts.author);
   const slideText = fold(opts.slideText);
   return {
     sha256: opts.sha256,
     filename,
+    displayFilename,
     author,
+    displayAuthor,
     slideText,
-    filenameTokens: tokenize(opts.filename),
+    // Tokenise from the display form (i.e. post-decode for the filename)
+    // so camelCase / snake_case splits work on the human name, not on the
+    // percent-encoded URI bytes.
+    filenameTokens: tokenize(displayFilename),
     authorTokens: tokenize(opts.author),
     slideTextTokens: tokenize(opts.slideText),
     sizeBytes: opts.sizeBytes,

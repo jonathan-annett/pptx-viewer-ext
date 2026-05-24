@@ -25,7 +25,9 @@ function projection(opts: {
   return {
     sha256: 'a'.repeat(64),
     filename: opts.filename.toLowerCase(),
+    displayFilename: opts.filename,
     author: author.toLowerCase(),
+    displayAuthor: author,
     slideText: slideText.toLowerCase(),
     filenameTokens: tokenize(opts.filename),
     authorTokens: tokenize(author),

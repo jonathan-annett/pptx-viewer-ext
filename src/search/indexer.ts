@@ -45,6 +45,7 @@ import type { SearchProjection } from './index-types';
 import type { SearchIndexStore } from './indexStore';
 import {
   basenameOf,
+  decodeUriDisplay,
   projectFromCached,
   projectFromParseResult,
 } from './projection';
@@ -353,10 +354,15 @@ export function startSearchIndexer(
     if (opts.store) {
       const cached = await opts.store.getBySha(sha);
       if (cached) {
+        // Refresh URI-derived fields from the current URI. Decoding once
+        // here keeps the display form + match form in sync; the cached
+        // author fields are content-derived so they pass through as-is.
+        const displayFilename = decodeUriDisplay(info.fileName);
         const refreshed: SearchProjection = {
           ...cached,
-          filename: fold(info.fileName),
-          filenameTokens: tokenize(info.fileName),
+          filename: fold(displayFilename),
+          displayFilename,
+          filenameTokens: tokenize(displayFilename),
           sizeBytes: info.size,
           mtime: info.mtime,
         };

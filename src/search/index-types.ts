@@ -10,7 +10,12 @@
 // projections in IDB. The indexStore drops entries with a mismatched
 // version on read.
 
-export const SEARCH_PROJECTION_SCHEMA_VERSION = 1;
+// Bumped to 2 when display fields (displayFilename, displayAuthor) were
+// added so the panel could render human-readable strings without losing
+// case (folded forms are still kept for matching). Old v1 entries get
+// dropped by indexStore.getAll() on read and re-projected on the next
+// indexer pass.
+export const SEARCH_PROJECTION_SCHEMA_VERSION = 2;
 
 /**
  * Per-file projection stored in the `pptxSearchIndex` IDB store and held
@@ -29,8 +34,14 @@ export interface SearchProjection {
   sha256: string;
   /** Basename of the file URI, folded. */
   filename: string;
+  /** Human-readable basename for display — URI-decoded, case preserved.
+   *  Derived from the URI at index time. Used by the search panel; the
+   *  folded `filename` field above stays the match target. */
+  displayFilename: string;
   /** dc:creator from docProps/core.xml, folded. Empty string when absent. */
   author: string;
+  /** Case-preserved author string for display. Empty when no author. */
+  displayAuthor: string;
   /** Concatenated <a:t> text from the first non-hidden slide, folded.
    *  Empty string when the deck has no visible text on its first slide
    *  (image-only intro, or no visible slides at all). */
@@ -59,7 +70,11 @@ export interface SearchHit {
    *  value as `SearchProjection.filename`, surfaced here so the UI can
    *  render without consulting the projection separately. */
   filename: string;
+  /** Display-friendly basename (URI-decoded, original case). */
+  displayFilename: string;
   author: string;
+  /** Display-friendly author (original case). */
+  displayAuthor: string;
   score: number;
   matchedFields: SearchField[];
 }

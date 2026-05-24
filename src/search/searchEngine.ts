@@ -216,7 +216,9 @@ export function createSearchEngine(): SearchEngine {
           sha256: projection.sha256,
           uris,
           filename: projection.filename,
+          displayFilename: projection.displayFilename,
           author: projection.author,
+          displayAuthor: projection.displayAuthor,
           score,
           matchedFields: matchedFields.slice() as SearchField[],
         });

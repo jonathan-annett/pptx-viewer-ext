@@ -10,6 +10,7 @@ import {
 } from '../src/search/index-types';
 import {
   basenameOf,
+  decodeUriDisplay,
   projectFromCached,
   projectFromParseResult,
 } from '../src/search/projection';
@@ -59,7 +60,9 @@ function assertProjectionShape(p: SearchProjection): void {
   assert.equal(p.schemaVersion, SEARCH_PROJECTION_SCHEMA_VERSION);
   assert.equal(typeof p.sha256, 'string');
   assert.equal(typeof p.filename, 'string');
+  assert.equal(typeof p.displayFilename, 'string');
   assert.equal(typeof p.author, 'string');
+  assert.equal(typeof p.displayAuthor, 'string');
   assert.equal(typeof p.slideText, 'string');
   assert.ok(Array.isArray(p.filenameTokens));
   assert.ok(Array.isArray(p.authorTokens));
@@ -193,6 +196,71 @@ function test_cached_unknown_author_collapses(): void {
   console.log('  ok: cached "unknown" author collapses too');
 }
 
+// ───── decodeUriDisplay + display fields ────────────────────────────────
+
+function test_decode_uri_display_basic(): void {
+  assert.equal(
+    decodeUriDisplay('WED%20206%201720%20Mr%20Simon%20Santosha%202.pptx'),
+    'WED 206 1720 Mr Simon Santosha 2.pptx',
+  );
+  console.log('  ok: decodeUriDisplay turns %20 into spaces');
+}
+
+function test_decode_uri_display_malformed(): void {
+  // A lone % with no two-hex-digit follow-up makes decodeURIComponent throw.
+  // We want to fall back to the raw input rather than blow up the projection.
+  assert.equal(decodeUriDisplay('100%-finished.pptx'), '100%-finished.pptx');
+  console.log('  ok: decodeUriDisplay survives malformed sequences');
+}
+
+function test_decode_uri_display_empty(): void {
+  assert.equal(decodeUriDisplay(''), '');
+  console.log('  ok: decodeUriDisplay handles empty input');
+}
+
+function test_display_fields_preserve_case_and_decode(): void {
+  const p = projectFromParseResult(
+    fakeParseResult({ author: 'Simon Santosha' }),
+    'WED%20206%20Mr%20Simon%20Santosha.pptx',
+  );
+  // Match fields stay folded …
+  assert.equal(p.filename, 'wed 206 mr simon santosha.pptx');
+  assert.equal(p.author, 'simon santosha');
+  // … while display fields preserve case and decode percent-escapes.
+  assert.equal(p.displayFilename, 'WED 206 Mr Simon Santosha.pptx');
+  assert.equal(p.displayAuthor, 'Simon Santosha');
+  // Tokens should derive from the display form too — punctuation/encoding
+  // shouldn't bleed into the token list.
+  assert.deepEqual(
+    p.filenameTokens,
+    ['wed', '206', 'mr', 'simon', 'santosha', 'pptx'],
+  );
+  console.log('  ok: display fields preserve case + decode URI escapes');
+}
+
+function test_display_fields_from_cached(): void {
+  const p = projectFromCached(
+    fakeCached({ author: 'Alice Author' }),
+    {
+      fileName: 'Q4%20Plan.pptx',
+      size: 1,
+      mtime: 1,
+    },
+  );
+  assert.equal(p.filename, 'q4 plan.pptx');
+  assert.equal(p.displayFilename, 'Q4 Plan.pptx');
+  assert.equal(p.displayAuthor, 'Alice Author');
+  console.log('  ok: display fields populate via cached path too');
+}
+
+function test_display_author_empty_for_unknown(): void {
+  // 'unknown' author is collapsed to '' for matching; the display field
+  // should also be '' so the panel doesn't render "by unknown".
+  const p = projectFromParseResult(fakeParseResult({ author: 'unknown' }));
+  assert.equal(p.displayAuthor, '');
+  console.log('  ok: displayAuthor empty when author is the unknown sentinel');
+}
+
 async function main(): Promise<void> {
   console.log('basenameOf:');
   test_basename_plain_name();
@@ -210,6 +278,13 @@ async function main(): Promise<void> {
   console.log('projectFromCached:');
   test_project_from_cached_uses_fileinfo();
   test_cached_unknown_author_collapses();
+  console.log('decodeUriDisplay + display fields:');
+  test_decode_uri_display_basic();
+  test_decode_uri_display_malformed();
+  test_decode_uri_display_empty();
+  test_display_fields_preserve_case_and_decode();
+  test_display_fields_from_cached();
+  test_display_author_empty_for_unknown();
   console.log('all search-projection tests passed');
 }
 

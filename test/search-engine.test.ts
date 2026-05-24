@@ -18,7 +18,9 @@ function proj(overrides: Partial<SearchProjection> & { sha256: string }): Search
   return {
     sha256: overrides.sha256,
     filename: overrides.filename ?? 'deck.pptx',
+    displayFilename: overrides.displayFilename ?? overrides.filename ?? 'deck.pptx',
     author: overrides.author ?? 'alice',
+    displayAuthor: overrides.displayAuthor ?? overrides.author ?? 'alice',
     slideText: overrides.slideText ?? '',
     filenameTokens: overrides.filenameTokens ?? ['deck', 'pptx'],
     authorTokens: overrides.authorTokens ?? ['alice'],

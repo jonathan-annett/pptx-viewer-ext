@@ -408,16 +408,21 @@ function panelScript(): string {
 
     const filename = document.createElement('div');
     filename.className = 'hit-filename';
-    filename.appendChild(highlight(hit.filename || '(unknown)', query));
+    // Prefer the display-form field (URI-decoded, case preserved); fall
+    // back to the folded match form if an older indexer record doesn't
+    // carry one — schema-mismatch eviction should make that transient.
+    const displayName = hit.displayFilename || hit.filename || '(unknown)';
+    filename.appendChild(highlight(displayName, query));
     row.appendChild(filename);
 
     const meta = document.createElement('div');
     meta.className = 'hit-meta';
-    if (hit.author) {
+    const authorText = hit.displayAuthor || hit.author || '';
+    if (authorText) {
       const author = document.createElement('span');
       author.className = 'hit-author';
       author.appendChild(document.createTextNode('by '));
-      author.appendChild(highlight(hit.author, query));
+      author.appendChild(highlight(authorText, query));
       meta.appendChild(author);
     }
     if (Array.isArray(hit.matchedFields) && hit.matchedFields.length) {
@@ -439,7 +444,12 @@ function panelScript(): string {
       for (const uri of hit.uris) {
         const u = document.createElement('span');
         u.className = 'hit-uri';
-        u.textContent = uri;
+        // Decode percent-escapes for display so paths read naturally.
+        // decodeURIComponent throws on malformed sequences — fall back to
+        // the raw URI rather than break the row.
+        let display = uri;
+        try { display = decodeURIComponent(uri); } catch (_) { /* keep raw */ }
+        u.textContent = display;
         uris.appendChild(u);
       }
       row.appendChild(uris);
