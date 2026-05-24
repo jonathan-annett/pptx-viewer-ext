@@ -105,6 +105,7 @@ function makeSampleCached(sha: string, withThumbnail: boolean): CachedParseResul
     embeddedMedia: [],
     mediaFiles: [],
     thumbnail,
+    firstVisibleSlideText: '',
     flags: {
       linkedMedia: { ok: true, label: 'Linked media', detail: '' },
       showType: { ok: true, label: 'Show type', detail: '' },
@@ -144,6 +145,7 @@ async function run(): Promise<void> {
       embeddedMedia: [],
       mediaFiles: [],
       thumbnail: undefined,
+      firstVisibleSlideText: '',
       flags: {
         linkedMedia: { ok: true, label: 'Linked media', detail: '' },
         showType: { ok: true, label: 'Show type', detail: '' },
@@ -196,6 +198,7 @@ async function run(): Promise<void> {
       lastModifiedBy: '',
       embeddedMedia: [],
       mediaFiles: [],
+      firstVisibleSlideText: '',
       flags: {
         linkedMedia: { ok: true, label: '', detail: '' },
         showType: { ok: true, label: '', detail: '' },
@@ -222,6 +225,7 @@ async function run(): Promise<void> {
       sha256: '', slideCount: 0, hiddenSlideCount: 0, author: '', lastModifiedBy: '',
       embeddedMedia: [],
       mediaFiles: [],
+      firstVisibleSlideText: '',
       flags: {
         linkedMedia: { ok: true, label: '', detail: '' },
         showType: { ok: true, label: '', detail: '' },

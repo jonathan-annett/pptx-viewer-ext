@@ -27,6 +27,7 @@ function parseResult(overrides: Partial<ParseResult> = {}): ParseResult {
     lastModifiedBy: 'Claude',
     embeddedMedia: [],
     mediaFiles: [],
+    firstVisibleSlideText: '',
     flags: {
       linkedMedia: { ok: true, label: 'Linked media', detail: '' },
       showType: { ok: true, label: 'Show type', detail: '' },

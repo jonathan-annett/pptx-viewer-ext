@@ -251,6 +251,10 @@ export function project(r: ParseResult): CachedParseResult {
     // belongs in the cache alongside the rest of the parsed fields. The
     // webview reads it to decide whether to render a fallback thumbnail.
     synthesisHint: r.synthesisHint,
+    // firstVisibleSlideText is content-determined too (same bytes → same
+    // text). Lands in the cache so search-index population on a cache
+    // hit doesn't have to re-unzip + re-scan to recover this field.
+    firstVisibleSlideText: r.firstVisibleSlideText,
     flags: r.flags,
     parseError: r.parseError,
   };
@@ -277,6 +281,7 @@ export function hydrate(c: CachedParseResult, info: FileInfo): ParseResult {
     mediaFiles: c.mediaFiles,
     thumbnail: c.thumbnail,
     synthesisHint: c.synthesisHint,
+    firstVisibleSlideText: c.firstVisibleSlideText,
     flags: c.flags,
     parseError: c.parseError,
     // timings deliberately omitted on a cache hit — see CachedParseResult.

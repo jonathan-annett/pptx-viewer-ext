@@ -141,6 +141,27 @@ export interface ParseResult {
    * through the parse cache via parseCache.project/hydrate.
    */
   synthesisHint?: SynthesisHint;
+  /**
+   * Concatenated text from every `<a:t>` run on the first non-hidden
+   * slide — title placeholder, body, text boxes, table cells, grouped
+   * shapes all included. Excludes speaker notes and master-slide
+   * content (footers, slide numbers) by construction — we only read
+   * `ppt/slides/slideN.xml`, never `ppt/notesSlides/` or
+   * `ppt/slideMasters/`.
+   *
+   * Empty string when:
+   *   - no visible slides exist
+   *   - first visible slide has no `<a:t>` runs (image-only intro)
+   *   - parsePptx failed earlier (parseError set)
+   *
+   * Used by the pptx-search subsystem (`src/search/`) to build the
+   * per-file projection. Content-determined, so it rides through
+   * parseCache.project/hydrate alongside the other parsed fields.
+   *
+   * Whitespace is collapsed and the result is capped at 4 KB to bound
+   * IDB write size on slides that contain unusually large transcripts.
+   */
+  firstVisibleSlideText: string;
   flags: {
     linkedMedia: Flag;
     showType: Flag;
@@ -200,9 +221,17 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
     .sort(naturalSort);
 
   let hiddenSlideCount = 0;
+  let firstVisibleSlideName: string | undefined;
   for (const name of slideNames) {
-    if (isHiddenSlide(entries[name])) hiddenSlideCount++;
+    if (isHiddenSlide(entries[name])) {
+      hiddenSlideCount++;
+    } else if (firstVisibleSlideName === undefined) {
+      firstVisibleSlideName = name;
+    }
   }
+  const firstVisibleSlideText = firstVisibleSlideName
+    ? extractAllSlideText(entries[firstVisibleSlideName])
+    : '';
   const slideScanMs = performance.now() - tSlideStart;
 
   const tMetaStart = performance.now();
@@ -254,6 +283,7 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
     mediaFiles,
     thumbnail,
     synthesisHint,
+    firstVisibleSlideText,
     flags: {
       linkedMedia: linkedMediaFound
         ? { ok: false, label: 'Linked media', detail: 'External video/audio/media relationship present on at least one slide' }
@@ -731,6 +761,52 @@ export function extractFirstSlideTitle(entries: Record<string, Uint8Array>): str
     return joined;
   }
   return undefined;
+}
+
+/**
+ * Pull every `<a:t>` text run out of a single slide's XML and return the
+ * concatenated, whitespace-collapsed result. Powers the
+ * `firstVisibleSlideText` field on ParseResult (used by the pptx-search
+ * subsystem).
+ *
+ * Distinct from `extractFirstSlideTitle`, which only collects the title
+ * placeholder. This one is broader on purpose: search wants body text,
+ * text boxes, table cells, and grouped shapes as well — they all live as
+ * `<a:t>` runs in the slide XML and get included.
+ *
+ * Notes-slides and master-slide content are NOT in slide XML — they live
+ * at `ppt/notesSlides/notesSlideN.xml` and `ppt/slideMasters/*.xml`.
+ * Callers passing the slide-N bytes therefore exclude them by
+ * construction.
+ *
+ * Tolerant of:
+ *   - Missing / empty input → ''
+ *   - Malformed XML — regex over bytes; broken tags just fail to match.
+ *
+ * The output is whitespace-collapsed (any run of whitespace → single
+ * space, leading/trailing stripped) and capped at 4 KB to bound IDB
+ * write size for unusually large transcripts. The cap is well above
+ * realistic slide-text sizes (a dense slide rarely exceeds ~1 KB of
+ * extracted text) but small enough that pathological inputs don't blow
+ * up the projection store.
+ */
+export function extractAllSlideText(slideBytes: Uint8Array | undefined): string {
+  if (!slideBytes) return '';
+  const xml = readText(slideBytes);
+  if (!xml) return '';
+  const runRe = /<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g;
+  const parts: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = runRe.exec(xml))) {
+    const text = decodeXmlEntities(m[1]);
+    if (text.length > 0) parts.push(text);
+  }
+  if (parts.length === 0) return '';
+  let joined = parts.join(' ').replace(/\s+/g, ' ').trim();
+  if (joined.length === 0) return '';
+  const CAP_BYTES = 4096;
+  if (joined.length > CAP_BYTES) joined = joined.slice(0, CAP_BYTES);
+  return joined;
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

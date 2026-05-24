@@ -85,7 +85,13 @@ const THUMBNAILS_STORE = 'thumbnails';
 // wanted, so absence is the safe default. Same for synthesised — old
 // records hydrate without the flag (treated as real, which is correct
 // since pre-M-VE-3 we never wrote synthesised entries).
-const DB_VERSION = 5;
+//
+// Bumped 5 → 6 for pptx-search-v1 M2: additive `firstVisibleSlideText:
+// string` field on the parseResults record. Holds the concatenated
+// `<a:t>` text from the first non-hidden slide for the search projection.
+// Old v5 entries hydrate to '' (no slideText to index for that sha until
+// it rotates out and re-parses) — same additive pattern as mediaFiles.
+const DB_VERSION = 6;
 
 /**
  * IDB payload for the parseResults store. All parse fields are optional so
@@ -362,6 +368,10 @@ function hydrateCached(record: ParseResultRecord, thumbnail: Thumbnail | undefin
     // v4 → v5 added synthesisHint. Optional — old records hydrate without
     // it (no fallback thumbnail until they rotate out and re-parse).
     synthesisHint: record.synthesisHint,
+    // v5 → v6 added firstVisibleSlideText. Defaults to '' for old records
+    // so the search projection's slideText is just empty until that sha
+    // rotates out and re-parses.
+    firstVisibleSlideText: record.firstVisibleSlideText ?? '',
     flags: record.flags!,
     parseError: record.parseError,
   };
