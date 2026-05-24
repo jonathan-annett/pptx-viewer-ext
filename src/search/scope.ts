@@ -108,7 +108,17 @@ export interface HitGroup {
 }
 
 /**
- * Group hits by the scope folder they live under.
+ * Group hits by the scope folder their URIs live under.
+ *
+ * Same-content / multiple-URI handling: the search engine deduplicates by
+ * sha, so a deck that's literally copied into two source folders comes
+ * back as ONE hit with two URIs. The user expects to see that file under
+ * BOTH folder headers, not just whichever URI happened to be first — the
+ * point of grouping is to answer "what's in this folder," and the answer
+ * for a duplicated file is "this file is in both." So we fan the hit out
+ * into per-folder copies, each carrying only the URIs that belong to that
+ * folder. The hit's identity fields (sha, filename, score, matchedFields)
+ * are shared across the copies; only `uris` is sliced.
  *
  * Ordering rules:
  *   - Buckets appear in the same order as `scope.folderUris` — the indexer
@@ -119,11 +129,7 @@ export interface HitGroup {
  *   - Empty buckets are dropped so the panel doesn't render a header with
  *     no rows under it.
  *
- * Multi-URI hits (same content at two paths) are placed in the bucket of
- * the FIRST URI on the hit. That matches the panel's "click opens the
- * first URI" behaviour — the group reflects where the action would land.
- *
- * Hits that don't fall under any scope folder land in a synthetic group
+ * URIs that don't fall under any scope folder land in a synthetic group
  * with `folderUri: ''` and `folderLabel: '(other)'`. This shouldn't happen
  * in normal flow (the indexer only adds in-scope URIs), but the engine's
  * load-from-IDB phase can briefly hold projections whose URIs haven't been
@@ -135,7 +141,7 @@ export function groupHitsByFolder(
   scope: SearchScope,
 ): HitGroup[] {
   // Pre-compute trailing-slash variants once. Same rule as `isUnderScope`:
-  // a hit URI matches a folder if it equals it or starts with `folder + '/'`.
+  // a URI matches a folder if it equals it or starts with `folder + '/'`.
   // We prefer the longest matching folder so that nested workspace folders
   // (rare but possible) bucket correctly.
   const folderPrefixes = scope.folderUris.map((folder) => ({
@@ -157,21 +163,41 @@ export function groupHitsByFolder(
   let other: HitGroup | undefined;
 
   for (const hit of hits) {
-    const probe = hit.uris && hit.uris[0] ? hit.uris[0] : '';
-    let bestFolder = '';
-    let bestLen = -1;
-    for (const { uri, prefix } of folderPrefixes) {
-      const matches = probe === uri || probe.startsWith(prefix);
-      if (matches && uri.length > bestLen) {
-        bestFolder = uri;
-        bestLen = uri.length;
+    // Partition this hit's URIs by which scope folder each belongs to.
+    // Keys are folder URIs; values are URIs from the hit that go there.
+    const byFolder = new Map<string, string[]>();
+    const orphans: string[] = [];
+    for (const uri of hit.uris || []) {
+      let bestFolder = '';
+      let bestLen = -1;
+      for (const { uri: folderUri, prefix } of folderPrefixes) {
+        const matches = uri === folderUri || uri.startsWith(prefix);
+        if (matches && folderUri.length > bestLen) {
+          bestFolder = folderUri;
+          bestLen = folderUri.length;
+        }
+      }
+      if (bestFolder) {
+        let arr = byFolder.get(bestFolder);
+        if (!arr) {
+          arr = [];
+          byFolder.set(bestFolder, arr);
+        }
+        arr.push(uri);
+      } else {
+        orphans.push(uri);
       }
     }
-    if (bestFolder) {
-      buckets.get(bestFolder)!.hits.push(hit);
-    } else {
+
+    // Emit one per-folder copy of the hit per non-empty partition. Each
+    // copy carries only the URIs that live in that folder so the panel
+    // doesn't show "this folder's results contain a path in another folder".
+    for (const [folderUri, uris] of byFolder) {
+      buckets.get(folderUri)!.hits.push({ ...hit, uris });
+    }
+    if (orphans.length > 0) {
       if (!other) other = { folderUri: '', folderLabel: '(other)', hits: [] };
-      other.hits.push(hit);
+      other.hits.push({ ...hit, uris: orphans });
     }
   }
 

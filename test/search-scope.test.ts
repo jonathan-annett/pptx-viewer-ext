@@ -176,9 +176,11 @@ function test_group_no_hits(): void {
   console.log('  ok: empty hits → empty groups');
 }
 
-function test_group_uses_first_uri_for_assignment(): void {
-  // A hit can have multiple URIs (same content at different paths). The
-  // group should follow the FIRST URI, matching the panel's click-target.
+function test_group_fans_out_across_folders(): void {
+  // A deck copied byte-for-byte into two source folders comes back as one
+  // hit (deduped by sha) with two URIs. The user expects to see the file
+  // under BOTH folder headers — so the helper fans the hit out, with each
+  // per-folder copy showing only the URI that lives in that folder.
   const scope = {
     folderUris: ['file:///work/A', 'file:///work/B'],
   };
@@ -189,9 +191,30 @@ function test_group_uses_first_uri_for_assignment(): void {
     }),
   ];
   const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].folderUri, 'file:///work/A');
+  assert.deepEqual(groups[0].hits[0].uris, ['file:///work/A/deck.pptx']);
+  assert.equal(groups[1].folderUri, 'file:///work/B');
+  assert.deepEqual(groups[1].hits[0].uris, ['file:///work/B/deck.pptx']);
+  // Both copies share the same sha — same underlying file, just shown
+  // twice because it lives in two folders.
+  assert.equal(groups[0].hits[0].sha256, groups[1].hits[0].sha256);
+  console.log('  ok: duplicate-content hit fans out into both folder buckets');
+}
+
+function test_group_single_uri_does_not_fan_out(): void {
+  // Most hits have one URI — they should land in exactly one bucket, not
+  // duplicated anywhere.
+  const scope = {
+    folderUris: ['file:///work/A', 'file:///work/B'],
+  };
+  const hits = [
+    makeHit({ sha256: 'a'.repeat(64), uris: ['file:///work/A/x.pptx'] }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
   assert.equal(groups.length, 1);
   assert.equal(groups[0].folderUri, 'file:///work/A');
-  console.log('  ok: multi-URI hit grouped by first URI');
+  console.log('  ok: single-URI hit stays in one bucket');
 }
 
 function test_group_longest_prefix_wins(): void {
@@ -248,7 +271,8 @@ const tests: Array<[string, () => void]> = [
   ['groupHitsByFolder: label decodes URI', test_group_label_decodes_basename],
   ['groupHitsByFolder: empty buckets dropped', test_group_empty_buckets_dropped],
   ['groupHitsByFolder: empty hits → no groups', test_group_no_hits],
-  ['groupHitsByFolder: first URI decides bucket', test_group_uses_first_uri_for_assignment],
+  ['groupHitsByFolder: duplicate content fans out', test_group_fans_out_across_folders],
+  ['groupHitsByFolder: single URI stays in one bucket', test_group_single_uri_does_not_fan_out],
   ['groupHitsByFolder: longest prefix wins', test_group_longest_prefix_wins],
   ['groupHitsByFolder: orphan → (other)', test_group_uri_outside_scope_goes_to_other],
 ];
