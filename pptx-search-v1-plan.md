@@ -6,7 +6,7 @@ Search across `.pptx` files in workspace source folders by filename, author, and
 
 ## Status
 
-**M1–M5 complete and live on the VPS test harness. M-MULTI (multi-select + update flow) implemented locally and pending VPS verification. M6 (polish + sign-off) is the remaining milestone for v1 DoD after M-MULTI lands.**
+**M1–M5, M-MULTI, and M-PDF-OR all complete and live on the VPS test harness. M6 (polish + sign-off) is the remaining milestone for v1 DoD.**
 
 Progress:
 
@@ -25,7 +25,7 @@ Post-M5 follow-ups (between M5 and M6 sign-off):
 
 All commits pushed and live on `vscode.sophtwhere.com`. v1 DoD bullets 1–8 are met; only the substrate-update bullets remain (9 + 10).
 
-**Next session is M6 polish + sign-off, but the user has flagged that they want to layer on additional functionality around how multiple search results are used before signing off — see the [Next-session hook](#next-session-hook--multi-result-actions) section below.**
+**Next session is M6 polish + sign-off. The multi-result actions hook (originally listed below) has shipped as M-MULTI; the PDF-indexing + OR-mode follow-on hook has shipped as M-PDF-OR.**
 
 This plan was written deliberately self-contained so it can be resumed in a fresh session without re-reading the full project substrate. Read `CLAUDE.md` only when you need wider context (other features, dev workflow, dead ends). The "Pointers into the existing codebase" section below lists every existing file you need to know about for this feature.
 
@@ -221,7 +221,7 @@ Post-M5 follow-ups (display-string fix, group-by-folder, fan-out, retain-context
 
 DoD achieved.
 
-### M-MULTI — Multi-select + Update file flow (implemented; awaiting live verification)
+### M-MULTI — Multi-select + Update file flow ✅ DONE (commits `b8154cc` + `f7f8785`)
 
 The v1 panel originally shipped one action per row: click → open the file in the viewer. M-MULTI adds the "remote dropbox" workflow the user flagged in the [Next-session hook](#next-session-hook--multi-result-actions) section: locate the canonical file and the freshly-uploaded copy in the search results, confirm the swap via a side-by-side compare, then update (and optionally delete) in one click.
 
@@ -269,9 +269,59 @@ The viewer's `resolveCustomEditor` re-reads + re-parses the freshly-written file
 - `{type: 'updateModalClose'}` — dismisses the modal (used on cancel).
 - `{type: 'updateResult', outcome: 'updated' | 'updated-removed' | 'identical' | 'error', targetUri?, sourceUri?, message?}` — applies disabled state and dismisses the modal.
 
-**DoD** (pending VPS verification): 20/20 `test:search-panel-html` green; typecheck clean; `dist/extension.js` builds (530.1 KB, +83 KB over pre-M-MULTI). Live verification of the shift-click → modal → write/delete loop owed.
+**DoD achieved**: 22/22 `test:search-panel-html` green at sign-off; typecheck clean; dist bundle ships. Live verification of the shift-click → modal → write/delete loop done on `vscode.sophtwhere.com`. Follow-on commit `f7f8785` added the hash-pairing badge so duplicate-content rows are visually grouped at a glance — same-sha rows share a stable colour-coded badge derived from a small palette.
 
-**Out of scope for M-MULTI**: routing PDFs through this flow (search currently indexes only `.pptx`). Will be revisited once PDF indexing lands.
+**Out of scope for M-MULTI**: routing PDFs through this flow. Picked up immediately after in M-PDF-OR below.
+
+### M-PDF-OR — PDF indexing + OR-mode toggle ✅ DONE (commit `196a991`)
+
+Two related additions shipped together in one cycle, both motivated by dog-fooding M-MULTI on real data:
+
+1. **Index `.pdf` files alongside `.pptx`.** Filename-only — the extension host has no DOM, so PDF.js can't run there for metadata or text extraction. Filename matching is enough for the "find the file by a known fragment" use case the user actually has.
+2. **"Any term (OR)" checkbox** beside the search input. Widens the AND-across-terms default so a single hitting term qualifies a file. Useful for fishing out a known filename fragment when other metadata isn't surfacing the hit.
+
+**Indexer changes** (`src/search/indexer.ts`):
+
+- Walk glob changed `**/*.pptx` → `**/*.{pptx,pdf}`; FileSystemWatcher pattern likewise.
+- New fast path in `processUri`: if the basename ends in `.pdf`, hit `indexStore.getBySha` first (cheap refresh of URI fields on cache hit), else build a `projectFilenameOnly` projection — no parse, no read beyond the hash. The hash path stays shared with the pptx flow via `hashFileAtUri`.
+- Pass-start log line updated to "pptx+pdf" so the OutputChannel reflects the wider scope.
+
+**Projection changes** (`src/search/projection.ts`):
+
+- New `projectFilenameOnly({sha256, fileName, sizeBytes, mtime})` that fills `author=''` and `slideText=''` and falls through to the same `buildProjection` used by pptx — keeps the schema identical (no `kind` field, no schema-version bump). Type-routing for downstream logic happens on the filename extension instead, via the `isPdfBasename` helper shared between `indexer.ts` and `searchPanel.ts`.
+
+**OR-mode plumbing** (`src/search/{index-types,score,searchEngine}.ts`):
+
+- `SearchQuery` gains `op: 'and' | 'or'` (default `'and'`).
+- `parseQuery(raw, op?)` and `engine.search(raw, op?)` thread `op` through; defaults preserve all existing call sites.
+- `scoreProjection` skips the AND short-circuit when `op === 'or'`. Per-term scores still accumulate, so a projection that hits both terms ranks above one that hits only one — the toggle changes what counts as a hit at all, not how hits are ranked relative to each other.
+
+**Panel changes** (`src/search/searchPanelHtml.ts`):
+
+- New `#or-mode` checkbox in the header (`<label class="search-option"><input type="checkbox">Any term (OR)</label>`), styled to sit alongside the search input.
+- Inline script gained `currentOp()` helper + change listener; every outbound `search` message now carries an `op` field. Toggling the checkbox re-runs the active query.
+
+**Update flow extension** (`src/search/searchPanel.ts`, `src/search/updateModalHtml.ts`):
+
+- `handleUpdateFile` now type-routes on the canonical-target filename extension:
+  - PPTX↔PPTX → existing parse+compare modal (`renderSearchUpdateModalHtml`).
+  - PDF↔PDF → new thin compare modal (`renderSearchUpdatePdfModalHtml`) with just filename / size / mtime / sha256 — no parse, no thumbnail. Same 3 button IDs (`#search-update-{cancel,confirm,remove}-btn`) so the existing `handleUpdateConfirm` works unchanged for both file types.
+  - Mixed pairs (one PDF, one PPTX) → refused with a `vscode.window.showWarningMessage` toast pointing the user at the viewer's drag-and-drop import path; the `updateResult` `error` outcome dismisses the modal cleanly.
+- PDF compare path uses `hashFileAtUri` with `needBytes: true` on the source (to hand bytes to the write step) and `needBytes: false` on the target (only the sha needed for identical-check).
+- Cache safety: `parseCache.forget(candidateSha)` on confirm is a no-op for PDFs (never inserted into the pptx parse cache).
+
+**Tests added**:
+
+- `test/search-score.test.ts` — 3 new cases (OR one-term hit, OR multi-term outranks single, OR no-hits → 0).
+- `test/search-engine.test.ts` — 2 new cases (`parseQuery` op default + threading; OR end-to-end keeping the half-match).
+- `test/search-panel-html.test.ts` — 2 new cases (`#or-mode` checkbox + label markup; inline script wires `currentOp` + `op` field into the search message).
+
+All 6 `test:search-*` suites green; `npx tsc --noEmit` clean; `npm run bundle` clean (542.9 KB).
+
+**Out of scope for M-PDF-OR (intentionally deferred)**:
+
+- PDF metadata / text extraction via a hidden helper webview. PDF.js could run in a DOM-having webview iframe (same pattern as the pdfImport webview entry), but adds lifecycle complexity and bundle size. Filename-only is enough for current real-world usage. Revisit if a user signal warrants it.
+- Schema-bumping the projection to carry a `kind: 'pptx'|'pdf'` discriminator. Today the consumer that needs the distinction (update-flow type-router) derives it cheaply from the filename extension; not worth the IDB eviction cost.
 
 ### M6 — Polish + sign-off
 
@@ -338,7 +388,7 @@ If you need wider context (commit conventions, dev workflow, dead ends to avoid)
 
 1. ✅ Command `pptxSearch.openPanel` opens a webview panel.
 2. ✅ Indexing source folders works on cold start (no IDB cache); subsequent opens hydrate from IDB.
-3. ✅ Search is case-insensitive, diacritic-folded, AND across query terms, OR across fields.
+3. ✅ Search is case-insensitive, diacritic-folded, AND across query terms (with optional OR-across-terms toggle), OR across fields.
 4. ✅ Results show filename + author and are clickable to open the pptx in the viewer.
 5. ✅ Watcher keeps the index live as files are added / modified / deleted in source folders.
 6. ✅ Destination folders are excluded from the indexed scope.
@@ -349,25 +399,15 @@ If you need wider context (commit conventions, dev workflow, dead ends to avoid)
 
 ---
 
-## Next-session hook — multi-result actions
+## Next-session hook — multi-result actions ✅ SHIPPED
 
-The v1 panel ships with one action per row: click → open the file in the viewer. That covers the "I'm looking for this one deck" use case.
+This section originally captured an open hook: the user wanted to extend the panel with affordances around using multiple search results together before signing off v1. That work landed across M-MULTI (shift-click multi-select + side-by-side compare modal + update / update-and-remove flow + hash-pairing badge) and M-PDF-OR (filename indexing for PDFs so the multi-select flow covers both file types the user actually works with, plus the OR-mode toggle for fishing out a known filename fragment).
 
-The user has flagged that they want to **extend the panel with an additional aspect of how multiple search results are used together** before signing off v1. Specifics are intentionally not pinned down in this plan — the next session will scope the work with the user.
+The hooks identified in the original write-up landed as follows:
 
-What's already in place that the new work can build on:
+- "Select N decks, then act on them" → shift-click selection model + 2-of-2 primed pair (one in canonical group, one elsewhere) + Update file / Update & remove source actions.
+- "Cross-folder compare" → side-by-side compare modal sharing CSS with the viewer's drop-update modal.
+- "Selection survives navigation" → `retainContextWhenHidden: true` plus disabled-state persistence for the lifetime of the result set.
+- "Selection model per-hit vs per-uri" → resolved as per-uri (the fan-out flow already gives each URI its own row).
 
-- Hits are grouped per scope folder (`HitGroup` from `src/search/scope.ts`); each group already carries `folderUri`, `folderLabel`, and a fanned-out copy of any duplicate-content hit so the same deck appears under every folder it lives in.
-- The webview message protocol has two free directions (`groups` → panel, `{type:'open', uri}` ← panel). Adding new message types (e.g. `bulkAction`, `selectionChanged`) is additive — no protocol break for v1 panel consumers.
-- `searchPanelHtml.ts` is a pure renderer with snapshot tests, so any new affordance (checkboxes per row, per-group "do X to all of these" headers, multi-select keyboard semantics) lands as a renderer change plus webview-script change with a corresponding `test/search-panel-html.test.ts` case.
-- `retainContextWhenHidden: true` means any selection state held in the webview DOM survives navigation to / from an opened file, which matters once "select N decks, then act on them" becomes a flow.
-
-What is **not** decided and should be scoped with the user when the next session starts:
-
-- What action(s) the user wants on multiple results (open all? batch-export? cross-folder compare? pull into a working set? feed into the sync planner as an ad-hoc source?)
-- Whether the selection model is per-hit, per-group, or per-uri (a fanned-out hit has one identity but multiple URIs across folders — the action might want any of those granularities).
-- Whether the new affordance lives in the search panel itself, in a follow-up panel that the search panel hands off to, or as a command-palette entry that operates on the current selection.
-
-Suggested approach for the next session: spend the first turn capturing the intended workflow ("when I have these N results, I want to ____"), pick the smallest end-to-end slice that demonstrates the value, and only then design the selection model + message protocol additions. Don't over-engineer the selection state on speculation — v1 ships with single-result-open and that's not regressing.
-
-Once the multi-result work is in, M6 sign-off (DoD bullets 9 + 10) can close out v1.
+M6 sign-off (DoD bullets 9 + 10) is now the only remaining work to close out v1.
