@@ -24,7 +24,12 @@ import type { SearchHit } from './index-types';
 import type { SearchEngine } from './searchEngine';
 import type { SearchIndexerHandle, IndexerProgress } from './indexer';
 import { renderSearchPanelHtml } from './searchPanelHtml';
-import { groupHitsByFolder } from './scope';
+import { groupHitsByFolder, folderLabelFor } from './scope';
+import {
+  renderSearchUpdateModalHtml,
+  renderSearchUpdateIdenticalModalHtml,
+} from './updateModalHtml';
+import { getParseCacheSingleton, parsePptxCached } from '../sync/parseCache';
 
 export interface OpenSearchPanelDeps {
   engine: SearchEngine;
@@ -85,7 +90,15 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
     });
   });
 
-  panel.webview.onDidReceiveMessage((msg: unknown) => {
+  // Per-panel pending-update slot. Stashed when handleUpdateFile finishes
+  // reading + parsing both files and posts the compare modal; cleared on
+  // updateCancel or after a successful updateConfirm. Holds the source bytes
+  // so the confirm path doesn't have to re-read (the source might be on a
+  // slow file system or might already have changed under us — capture the
+  // exact bytes the user saw in the modal).
+  let pendingUpdate: PendingUpdate | null = null;
+
+  panel.webview.onDidReceiveMessage(async (msg: unknown) => {
     if (!msg || typeof msg !== 'object') return;
     const m = msg as { type?: unknown };
     if (m.type === 'search') {
@@ -113,13 +126,313 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
       });
       return;
     }
+    if (m.type === 'updateFile') {
+      const targetUriStr = typeof (msg as { targetUri?: unknown }).targetUri === 'string'
+        ? ((msg as { targetUri: string }).targetUri)
+        : '';
+      const sourceUriStr = typeof (msg as { sourceUri?: unknown }).sourceUri === 'string'
+        ? ((msg as { sourceUri: string }).sourceUri)
+        : '';
+      pendingUpdate = await handleUpdateFile(panel, deps.indexer, targetUriStr, sourceUriStr);
+      return;
+    }
+    if (m.type === 'updateConfirm') {
+      const mode = (msg as { mode?: unknown }).mode === 'update-remove' ? 'update-remove' : 'update';
+      const slot = pendingUpdate;
+      pendingUpdate = null;
+      if (!slot) {
+        log('pptxSearch: updateConfirm with no pending update — ignoring');
+        return;
+      }
+      await handleUpdateConfirm(panel, slot, mode);
+      return;
+    }
+    if (m.type === 'updateCancel') {
+      if (pendingUpdate) {
+        log(
+          `pptxSearch: updateCancel — discarded pending update ` +
+            `(${pendingUpdate.candidateFileName} → ${pendingUpdate.targetFileName})`,
+        );
+      }
+      pendingUpdate = null;
+      void panel.webview.postMessage({ type: 'updateModalClose' });
+      return;
+    }
   });
 
   panel.onDidDispose(() => {
     progressSub.dispose();
+    pendingUpdate = null;
     if (currentPanel === panel) currentPanel = undefined;
     log('pptxSearch: panel disposed');
   });
+}
+
+// ───── update-file flow ─────────────────────────────────────────────────
+//
+// The search panel surfaces a "primed" pair of selections — exactly one file
+// in groups[0] (canonical) and one in another group (remote/dropbox). On
+// click of the Update-file button the panel posts `updateFile` with both
+// URI strings; this layer:
+//   1. Parses both URIs, validates they're under scope.
+//   2. Reads + parses both files. If the source's sha256 matches the
+//      target's, posts the identical-files modal (Cancel only).
+//   3. Otherwise posts the side-by-side compare modal with three buttons:
+//      Cancel / Update file / Update & remove source.
+//   4. On `updateConfirm`, calls handleUpdateConfirm which mirrors the
+//      `handleIngest` picker/upload path: parse-cache eviction → writeFile
+//      to target → (optional) delete source → open the target in the viewer.
+//
+// We re-use the same parsePptxCached + getParseCacheSingleton().forget()
+// primitives the viewer's ingest path uses, so the update goes through the
+// same cache lifecycle as a Browse-to-Update or phone-upload affirmation.
+
+interface PendingUpdate {
+  targetUri: vscode.Uri;
+  sourceUri: vscode.Uri;
+  candidateBytes: Uint8Array;
+  candidateSha: string;
+  candidateFileName: string;
+  targetFileName: string;
+}
+
+async function handleUpdateFile(
+  panel: vscode.WebviewPanel,
+  indexer: SearchIndexerHandle,
+  targetUriStr: string,
+  sourceUriStr: string,
+): Promise<PendingUpdate | null> {
+  if (!targetUriStr || !sourceUriStr) {
+    log('pptxSearch: updateFile — missing target or source URI');
+    return null;
+  }
+  let targetUri: vscode.Uri;
+  let sourceUri: vscode.Uri;
+  try {
+    targetUri = vscode.Uri.parse(targetUriStr);
+    sourceUri = vscode.Uri.parse(sourceUriStr);
+  } catch (err) {
+    log(
+      `pptxSearch: updateFile — invalid URI — ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+
+  // Resolve folder labels by longest-prefix match against scope. Mirrors the
+  // bucketing inside groupHitsByFolder so the modal headers read the same
+  // way the search-panel groups do.
+  const scope = indexer.getScope();
+  const targetFolderLabel = folderLabelFor(longestScopePrefix(scope.folderUris, targetUriStr) ?? '');
+  const candidateFolderLabel = folderLabelFor(longestScopePrefix(scope.folderUris, sourceUriStr) ?? '');
+
+  const targetFileName = basenameFromUri(targetUri);
+  const candidateFileName = basenameFromUri(sourceUri);
+
+  // Read + parse both files. parsePptxCached uses the URI-hash cache under
+  // the hood so a recently-indexed file hits cache and pays only a hash.
+  let targetBytes: Uint8Array;
+  let candidateBytes: Uint8Array;
+  try {
+    targetBytes = await vscode.workspace.fs.readFile(targetUri);
+    candidateBytes = await vscode.workspace.fs.readFile(sourceUri);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`pptxSearch: updateFile — read failed — ${message}`);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message: `Could not read file: ${message}`,
+    });
+    return null;
+  }
+
+  const cache = getParseCacheSingleton();
+  let targetParse, candidateParse;
+  try {
+    const [targetStat, sourceStat] = await Promise.all([
+      vscode.workspace.fs.stat(targetUri),
+      vscode.workspace.fs.stat(sourceUri),
+    ]);
+    [targetParse, candidateParse] = await Promise.all([
+      parsePptxCached(
+        targetBytes,
+        { fileName: targetFileName, size: targetStat.size, mtime: targetStat.mtime },
+        cache,
+      ),
+      parsePptxCached(
+        candidateBytes,
+        { fileName: candidateFileName, size: sourceStat.size, mtime: sourceStat.mtime },
+        cache,
+      ),
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`pptxSearch: updateFile — parse failed — ${message}`);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message: `Could not parse file: ${message}`,
+    });
+    return null;
+  }
+
+  // Identical content → Cancel-only modal. Don't stash a pending update —
+  // there's nothing to confirm.
+  if (candidateParse.result.sha256 === targetParse.result.sha256) {
+    const html = renderSearchUpdateIdenticalModalHtml({
+      targetFileName,
+      candidateFileName,
+      targetFolderLabel,
+      candidateFolderLabel,
+      sha256: candidateParse.result.sha256,
+    });
+    void panel.webview.postMessage({ type: 'updateModal', html });
+    log(
+      `pptxSearch: updateFile — identical content (sha256=${candidateParse.result.sha256.slice(
+        0,
+        12,
+      )}…), no update offered`,
+    );
+    return null;
+  }
+
+  const html = renderSearchUpdateModalHtml({
+    target: targetParse.result,
+    candidate: candidateParse.result,
+    targetFolderLabel,
+    candidateFolderLabel,
+  });
+  void panel.webview.postMessage({ type: 'updateModal', html });
+  log(
+    `pptxSearch: updateFile — comparing ${candidateFileName} ` +
+      `(sha=${candidateParse.result.sha256.slice(0, 12)}…) → ${targetFileName} ` +
+      `(sha=${targetParse.result.sha256.slice(0, 12)}…)`,
+  );
+
+  return {
+    targetUri,
+    sourceUri,
+    candidateBytes,
+    candidateSha: candidateParse.result.sha256,
+    candidateFileName,
+    targetFileName,
+  };
+}
+
+async function handleUpdateConfirm(
+  panel: vscode.WebviewPanel,
+  slot: PendingUpdate,
+  mode: 'update' | 'update-remove',
+): Promise<void> {
+  const cache = getParseCacheSingleton();
+  try {
+    // Evict the parse-cache entry for the candidate sha before write. Mirrors
+    // the picker/upload path in provider.ts/handleIngest: the about-to-be-
+    // written file's cache entry could be stale (e.g. parser change since it
+    // was last cached); a scoped forget() guarantees the post-write re-read
+    // produces a fresh ParseResult.
+    if (cache) {
+      await cache.forget(slot.candidateSha);
+      log(
+        `pptxSearch: update — evicted parse-cache entry for sha=${slot.candidateSha.slice(
+          0,
+          12,
+        )}…`,
+      );
+    }
+    await vscode.workspace.fs.writeFile(slot.targetUri, slot.candidateBytes);
+    log(
+      `pptxSearch: update — wrote ${slot.candidateBytes.byteLength} bytes to ` +
+        `${slot.targetUri.toString()}`,
+    );
+
+    let removed = false;
+    if (mode === 'update-remove') {
+      try {
+        await vscode.workspace.fs.delete(slot.sourceUri, { useTrash: false });
+        removed = true;
+        log(`pptxSearch: update — removed source ${slot.sourceUri.toString()}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`pptxSearch: update — delete source failed (write already done) — ${message}`);
+        // The target write already succeeded; the operation is partially
+        // complete. Tell the panel the update happened but the source wasn't
+        // removed, and surface the error in a toast so the user can clean up
+        // manually.
+        void vscode.window.showWarningMessage(
+          `Updated ${slot.targetFileName}, but could not delete source: ${message}`,
+        );
+        void panel.webview.postMessage({
+          type: 'updateResult',
+          outcome: 'updated',
+          targetUri: slot.targetUri.toString(),
+          sourceUri: slot.sourceUri.toString(),
+        });
+        await openTargetInViewer(slot.targetUri);
+        return;
+      }
+    }
+
+    // Open the canonical viewer for the freshly-written file. The viewer
+    // re-reads bytes via resolveCustomEditor and renders the new content;
+    // no special message needed.
+    await openTargetInViewer(slot.targetUri);
+
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: removed ? 'updated-removed' : 'updated',
+      targetUri: slot.targetUri.toString(),
+      sourceUri: slot.sourceUri.toString(),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`pptxSearch: update — write failed — ${message}`);
+    void panel.webview.postMessage({
+      type: 'updateResult',
+      outcome: 'error',
+      message,
+    });
+  }
+}
+
+async function openTargetInViewer(targetUri: vscode.Uri): Promise<void> {
+  try {
+    // Open beside the search panel so the user keeps the search results
+    // visible alongside the viewer — they're likely going to process more
+    // files in the same batch.
+    await vscode.commands.executeCommand('vscode.open', targetUri, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preserveFocus: false,
+    });
+  } catch (err) {
+    log(
+      `pptxSearch: update — failed to open viewer for ${targetUri.toString()} — ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+function basenameFromUri(uri: vscode.Uri): string {
+  const tail = uri.path.split('/').pop() ?? '';
+  try {
+    return decodeURIComponent(tail) || tail || uri.toString();
+  } catch {
+    return tail || uri.toString();
+  }
+}
+
+function longestScopePrefix(folderUris: readonly string[], fileUri: string): string | null {
+  let best = '';
+  for (const folder of folderUris) {
+    const prefix = folder.endsWith('/') ? folder : `${folder}/`;
+    if (fileUri === folder || fileUri.startsWith(prefix)) {
+      if (folder.length > best.length) best = folder;
+    }
+  }
+  return best || null;
 }
 
 function handleSearch(

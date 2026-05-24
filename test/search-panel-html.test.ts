@@ -190,6 +190,84 @@ function test_script_drives_panel(): void {
   console.log('  ok: panel script contains the expected wiring + message names');
 }
 
+// ───── multi-select toolbar + modal host ─────────────────────────────────
+
+function test_multi_toolbar_present_hidden(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /id="multi-toolbar"/, 'multi-toolbar container present');
+  assert.match(html, /id="multi-status"/, 'multi-status text element present');
+  assert.match(html, /id="multi-clear-btn"/, 'clear-selection button present');
+  assert.match(html, /id="multi-update-btn"/, 'update-file button present');
+  // The toolbar should ship `hidden` so it's invisible until the inline script
+  // flips selection mode on via the first shift-click.
+  assert.match(html, /id="multi-toolbar"[^>]*hidden/, 'multi-toolbar initially hidden');
+  // The update button should ship disabled until the primed condition holds.
+  assert.match(html, /id="multi-update-btn"[^>]*disabled/, 'update button initially disabled');
+  console.log('  ok: multi-select toolbar present, initially hidden, update disabled');
+}
+
+function test_modal_host_present(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /id="modal-host"/, 'modal-host overlay present');
+  assert.match(html, /aria-hidden="true"/, 'modal-host initially aria-hidden=true');
+  console.log('  ok: modal-host overlay container present and aria-hidden by default');
+}
+
+function test_selection_css_classes_defined(): void {
+  // The CSS must define the three selection-state classes that the inline
+  // script toggles: .selected (yellow), .selected.primed (lime green),
+  // .disabled.updated (dimmed) and .disabled.removed (red-tinged).
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /\.hit\.selected\s*\{/, '.hit.selected rule defined');
+  assert.match(html, /\.hit\.selected\.primed\s*\{/, '.hit.selected.primed rule defined');
+  assert.match(html, /\.hit\.disabled\.updated\s*\{/, '.hit.disabled.updated rule defined');
+  assert.match(html, /\.hit\.disabled\.removed\s*\{/, '.hit.disabled.removed rule defined');
+  console.log('  ok: selection / primed / disabled CSS rules defined');
+}
+
+function test_compare_modal_css_included(): void {
+  // The shared compareModalCss() must be inlined so the side-by-side update
+  // modal renders with the correct layout when the extension posts its HTML.
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /\.modal-host\s*\{/, '.modal-host overlay rules from compareModalCss');
+  assert.match(html, /\.compare-grid\s*\{/, '.compare-grid rules from compareModalCss');
+  assert.match(html, /\.compare-col\s*\{/, '.compare-col rules from compareModalCss');
+  console.log('  ok: compareModalCss inlined for the update modal');
+}
+
+function test_script_wires_multi_select(): void {
+  // Sanity-check that the inline script carries the new wiring: selection
+  // state vars, message types both directions, button handlers.
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /selectionMode/, 'selectionMode state var');
+  assert.match(html, /selectedKeys/, 'selectedKeys set');
+  assert.match(html, /disabledKeys/, 'disabledKeys map');
+  assert.match(html, /evaluatePrimedKeys/, 'primed-state evaluator');
+  assert.match(html, /'updateFile'/, 'outbound updateFile message type');
+  assert.match(html, /'updateConfirm'/, 'outbound updateConfirm message type');
+  assert.match(html, /'updateCancel'/, 'outbound updateCancel message type');
+  assert.match(html, /'updateModal'/, 'inbound updateModal handler');
+  assert.match(html, /'updateResult'/, 'inbound updateResult handler');
+  assert.match(html, /'updated-removed'/, 'updateResult handles updated-removed outcome');
+  assert.match(html, /shiftKey/, 'click handler inspects shiftKey for selection-mode entry');
+  console.log('  ok: panel script wires multi-select + update flow');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -208,6 +286,11 @@ const tests: Array<[string, () => void]> = [
   ['empty state no scope', test_empty_state_no_scope],
   ['nonce passes through unmodified', test_nonce_is_not_html_escaped],
   ['script wiring sanity', test_script_drives_panel],
+  ['multi-toolbar present + hidden + update disabled', test_multi_toolbar_present_hidden],
+  ['modal-host overlay present', test_modal_host_present],
+  ['selection / primed / disabled CSS classes', test_selection_css_classes_defined],
+  ['compareModalCss inlined', test_compare_modal_css_included],
+  ['script wires multi-select + update flow', test_script_wires_multi_select],
 ];
 
 let failed = 0;

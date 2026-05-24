@@ -6,17 +6,26 @@ Search across `.pptx` files in workspace source folders by filename, author, and
 
 ## Status
 
-**M1+M2+M3 complete (local commits, unpushed). Next: M4.**
+**M1–M5 complete and live on the VPS test harness. M-MULTI (multi-select + update flow) implemented locally and pending VPS verification. M6 (polish + sign-off) is the remaining milestone for v1 DoD after M-MULTI lands.**
 
 Progress:
 
-- **M1** — pure projection + tokenizer + scorer. Shipped in commit `673ec79` (local). Files: `src/search/{fold,tokenize,score,projection,index-types}.ts`. Tests: `test/search-{fold,tokenize,score,projection}.test.ts` — all pass via `npm run test:search-*`.
-- **M2** — parser extension for first-visible-slide text. Shipped in the same commit `673ec79`. `extractAllSlideText` added to `src/pptx.ts`; `ParseResult.firstVisibleSlideText: string` is now a required field (defaults to '' for old IDB cache hydration via `parseCacheIdb` v5→v6 bump). Tests: `test/pptx-first-visible-slide-text.test.ts`.
-- **M3** — IDB store + in-memory engine. Shipped in commit `1517e41` (local). Files: `src/search/{indexStore,searchEngine}.ts`. The IDB store wraps a dedicated `pptxSearch.index` DB with a `projections` store (separate from the hash + parse cache DBs — independent lifecycle). The engine holds three coordinated maps (`sha→projection`, `uri→sha`, `sha→Set<uri>`) and exposes `load / addOrUpdate / removeUri / search / stats`. `getAll()` was added to the `IdbStore` interface in `src/sync/idbAdapter.ts` (with fake-store updates in the affected hash + parse cache tests). DoD scenarios — dedup-by-sha, removal cascade, ranking sanity — all covered by `test/search-engine.test.ts` (17 cases, all green).
+- **M1** — pure projection + tokenizer + scorer. Commit `673ec79`. Files: `src/search/{fold,tokenize,score,projection,index-types}.ts`. Tests: `test/search-{fold,tokenize,score,projection}.test.ts`.
+- **M2** — parser extension for first-visible-slide text. Same commit `673ec79`. `extractAllSlideText` added to `src/pptx.ts`; `ParseResult.firstVisibleSlideText: string` is now a required field (defaults to '' for old IDB cache hydration via `parseCacheIdb` v5→v6 bump). Tests: `test/pptx-first-visible-slide-text.test.ts`.
+- **M3** — IDB store + in-memory engine. Commit `1517e41`. Files: `src/search/{indexStore,searchEngine}.ts`. Dedicated `pptxSearch.index` IDB DB (separate from hash + parse cache DBs — independent lifecycle). Engine holds three coordinated maps (`sha→projection`, `uri→sha`, `sha→Set<uri>`) exposing `load / addOrUpdate / removeUri / search / stats / getShaForUri / getAllUris`. Tests: `test/search-engine.test.ts`.
+- **M4** — wired indexer + activation. Commit `c0afc34`. Files: `src/search/{indexer,scope}.ts`. Layered cache walk per URI: `indexStore.getBySha` → `parseCache.lookup` → fresh parse via `parsePptxCached`. `vscode.workspace.findFiles(new RelativePattern(folder, '**/*.pptx'))` per in-scope folder. `FileSystemWatcher('**/*.pptx')` filters via `isUnderScope`. Activation in `extension.ts` opens the store, warm-loads the engine, starts the indexer, and logs `search-index: idb=<state> warm-entries=<N>` / `search-index: scope folders=<N>`. Tests: `test/search-scope.test.ts`.
+- **M5** — webview panel UI. Commit `1a87138` (+ post-M5 follow-ups, see below). Files: `src/search/{searchPanelHtml,searchPanel}.ts`. Pure renderer emits the panel shell + a single nonce-tagged inline script that drives debounced search, result rendering, click-to-open, and reindex. Wired layer owns a singleton `WebviewPanel`, dispatches the four message types, and forwards `IndexerProgress` to the panel as `indexProgress` / `indexComplete`. Commands `pptxSearch.openPanel` + `pptxSearch.probeIndex` register only when the search subsystem init succeeded. Tests: `test/search-panel-html.test.ts`.
 
-Both commits are local-only; push timing is up to the user.
+Post-M5 follow-ups (between M5 and M6 sign-off):
 
-**Next session: implement M4** (wired indexer + activation). See the milestone below. Open question 3 from this plan ("does `SyncManager` expose a destination-folder-URIs getter?") needs answering at the start of M4.
+- **Display-string fix** — commit `b9a928a`. The panel was showing the folded URI-encoded basename (`wed%20206%20mr%20simon%20santosha.pptx`) and the folded author. Added `displayFilename` + `displayAuthor` to `SearchProjection` (and `SearchHit`), bumped `SEARCH_PROJECTION_SCHEMA_VERSION` 1→2 so v1 IDB entries auto-evict and re-project. Tokens now derive from the decoded display name so they split on the human form, not on percent-encoded bytes. Panel also decodes URIs for display with a try/catch fallback.
+- **Group by top-level folder** — commit `66b3482`. Pure `groupHitsByFolder(hits, scope)` in `src/search/scope.ts` buckets hits by longest-matching scope folder URI; buckets come out in scope order (= workspace-folder declaration order). Wired layer groups before postMessage so the panel only sees pre-bucketed data. Inline script renders one `<section class="hit-group">` per group with `:nth-of-type(even)` alternating tinted background (via `--vscode-editorWidget-background`).
+- **Fan out duplicate-content hits** — commit `1c036ea`. Same deck copied byte-for-byte into two source folders comes back as one hit (deduped by sha) with two URIs. `groupHitsByFolder` now partitions each hit's URIs by folder and emits a per-folder copy with only the URIs that live in that folder — so the deck shows up under both folder headers, not just under the first URI's folder.
+- **Retain context when hidden** — commit `6e639eb`. `retainContextWhenHidden: true` on the panel so clicking a result and tabbing back doesn't tear the webview down and lose the input + results.
+
+All commits pushed and live on `vscode.sophtwhere.com`. v1 DoD bullets 1–8 are met; only the substrate-update bullets remain (9 + 10).
+
+**Next session is M6 polish + sign-off, but the user has flagged that they want to layer on additional functionality around how multiple search results are used before signing off — see the [Next-session hook](#next-session-hook--multi-result-actions) section below.**
 
 This plan was written deliberately self-contained so it can be resumed in a fresh session without re-reading the full project substrate. Read `CLAUDE.md` only when you need wider context (other features, dev workflow, dead ends). The "Pointers into the existing codebase" section below lists every existing file you need to know about for this feature.
 
@@ -188,29 +197,81 @@ DoD: `npm run test:parse` still passes; new test cases for first-visible-slide e
 
 DoD achieved.
 
-### M4 — Wired indexer + activation
+### M4 — Wired indexer + activation ✅ DONE (commit `c0afc34`)
 
-- `src/search/indexer.ts` — walk source folders, glob pptx, use hashFileAtUri + getProjectionForSha to build entries, populate engine. Progress events for the panel.
-- Wire into `extension.ts` activation: open IDB store, load existing projections into engine, register FileSystemWatcher.
-- `getProjectionForSha(sha256, uri)` abstraction:
-  ```ts
-  // miss path today: parse bytes, project, write to indexStore
-  // miss path future: read from parseCache (M5.3), project, return
-  ```
-- Source-folder filter: pull from `SyncManager`. Need to confirm the manager exposes a "destination folder URIs" set; if not, derive from `topology` + `manager.onDidChange`. Update on topology change.
+- `src/search/indexer.ts` — walk source folders, glob `**/*.pptx` via `RelativePattern`, layered cache lookup per URI: `indexStore.getBySha` → `parseCache.lookup` → fresh parse via `parsePptxCached`. Emits `IndexerProgress` events the panel forwards to the footer.
+- `src/search/scope.ts` — pure scope computation. `computeSearchScope({ workspaceFolderUris, destinationWorkspaceFolderUris })` returns the folder set to walk. `isUnderScope` + `urisLeavingScope` for the watcher / topology-change path. (Grouping helper `groupHitsByFolder` was layered in post-M5 — see follow-ups above.)
+- Wired into `extension.ts` activation: opens the dedicated IDB store, warm-loads the engine, starts the indexer, registers `FileSystemWatcher('**/*.pptx')` filtered through `isUnderScope`. Activation logs `search-index: idb=<state> warm-entries=<N>` / `search-index: scope folders=<N>`.
+- `getProjectionForSha` derives from `parseCache.lookup` first (M5.3 cache already shipped), falling back to a fresh `parsePptxCached` on miss — the "abstraction layer" is the layered lookup itself.
+- Source-folder filter pulled from `SyncManager.topology`: each source contributes; any folder claimed as a destination *anywhere* is excluded. Updates on `manager.onDidChange`.
 
-DoD: opening the panel triggers a full walk; indexing 500 files completes in reasonable time (target: <5s warm, <30s cold-on-IDB-miss). Watcher updates surface within ~1s of a file change.
+DoD achieved: cold walk completes well under target; watcher updates surface promptly; tests in `test/search-scope.test.ts` (18 cases incl. grouping fan-out).
 
-### M5 — Webview panel UI
+### M5 — Webview panel UI ✅ DONE (commit `1a87138` + post-M5 follow-ups)
 
-- `src/search/searchPanelHtml.ts` — render the panel HTML (CSP with nonce per substrate convention). Input box at the top, results list below, footer showing "N of M presentations indexed".
-- `src/search/searchPanel.ts` — `WebviewPanel` registration. Message protocol:
+- `src/search/searchPanelHtml.ts` — pure renderer. Emits panel shell (CSP `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-<random>';`) + a single nonce-tagged inline script that drives debounced search (150ms), result rendering, click-to-open, and reindex. Footer shows "N of M presentations indexed" plus live indexer progress.
+- `src/search/searchPanel.ts` — singleton `WebviewPanel` (one panel module-scope tracked). `retainContextWhenHidden: true` so navigating to an opened file and tabbing back preserves the input + results. Message protocol:
   - panel → ext: `{type:'search', query}`, `{type:'open', uri}`, `{type:'reindex'}`
-  - ext → panel: `{type:'results', hits}`, `{type:'indexProgress', done, total}`, `{type:'indexComplete'}`
-- Command: `pptxSearch.openPanel` ("Presentation Search: Open").
-- Diagnostic command: `pptxSearch.probeIndex` (logs index size, store size, sample entries to output channel — for M5 sign-off, removed at M6 polish).
+  - ext → panel: `{type:'results', query, groups, truncated, totalMatches}`, `{type:'indexProgress', phase, done, total}`, `{type:'indexComplete', phase, done, total}`
+  - Results are pre-bucketed via `groupHitsByFolder` before postMessage, capped at MAX_RESULTS=200.
+- Commands `pptxSearch.openPanel` ("Presentation Search: Open") + `pptxSearch.probeIndex` (diagnostic) register only when the search subsystem init succeeded.
+- Tests: `test/search-panel-html.test.ts` (15 cases — header, footer, hits, groups, empty state, escape).
 
-DoD: type-as-you-search debounce works, results clickable to open files, index progress visible during cold population, no CSP violations in DevTools.
+Post-M5 follow-ups (display-string fix, group-by-folder, fan-out, retain-context) are listed in the Status section above.
+
+DoD achieved.
+
+### M-MULTI — Multi-select + Update file flow (implemented; awaiting live verification)
+
+The v1 panel originally shipped one action per row: click → open the file in the viewer. M-MULTI adds the "remote dropbox" workflow the user flagged in the [Next-session hook](#next-session-hook--multi-result-actions) section: locate the canonical file and the freshly-uploaded copy in the search results, confirm the swap via a side-by-side compare, then update (and optionally delete) in one click.
+
+**User flow**
+
+1. Shift-click any hit row → enter selection mode. The shift-clicked row is selected (yellow background). A toolbar appears above the results with a "Clear selection" button and a disabled "Update file…" button.
+2. While in selection mode, every click toggles selection (shift no longer matters for the per-row interaction).
+3. When exactly **2** rows are selected, **1 in the first group** (groups[0] — the canonical workspace folder), and **1 in another group** (a remote/dropbox staging folder), both rows turn lime green and the Update-file button enables.
+4. Clicking Update-file pops a side-by-side modal showing both files' metadata, sha256, thumbnail, and slide/author info — same layout as the viewer's drop-update modal (CSS shared via `compareModalCss()`).
+5. Three actions in the modal:
+   - **Cancel** — dismiss; both rows stay lime green; the user can pick a different pair.
+   - **Update file** — overwrite canonical with the incoming bytes; both rows go to dimmed/disabled state.
+   - **Update & remove source** — same write, plus delete the source URI from disk; the source row turns dark-gray-with-red-tinge (line-through), the target row goes to dimmed/disabled.
+6. If the two files have identical sha256 the modal is the "identical" variant — Cancel only, no destructive action offered.
+7. Disabled rows are inert (pointer-events: none, no longer participate in selection). The dimming/red-tinge state persists for the lifetime of the current result set so the user can work through a batch one pair at a time without re-selecting the same files. Typing a new query resets all selection + disabled state.
+
+**Reuses the existing update pipeline**
+
+The wired layer mirrors `handleIngest`'s picker/upload path in `src/provider.ts`:
+
+1. Read both files via `vscode.workspace.fs.readFile`.
+2. Parse both via `parsePptxCached(getParseCacheSingleton())` — same cache-aware parser the viewer uses.
+3. Compare sha256. If identical → identical-modal. Else → compare modal.
+4. On confirm: `cache.forget(candidateSha)` → `vscode.workspace.fs.writeFile(targetUri, bytes)` → (optional) `vscode.workspace.fs.delete(sourceUri, { useTrash: false })` → `vscode.commands.executeCommand('vscode.open', targetUri, { viewColumn: Beside })`.
+
+The viewer's `resolveCustomEditor` re-reads + re-parses the freshly-written file on open; no special "Updated" badge is set (that badge only fires inside an already-open viewer responding to its own ingest message). The user gets the viewer-side render of the new content as the success signal, plus the disabled state on the search panel rows.
+
+**Files**
+
+- `src/search/updateModalHtml.ts` — pure renderer for both modal variants. `renderSearchUpdateModalHtml` and `renderSearchUpdateIdenticalModalHtml`. CSS is shared with the viewer's compare modal via re-import of `compareModalCss()`.
+- `src/search/searchPanelHtml.ts` — extended: CSS additions for `.hit.selected`, `.hit.selected.primed`, `.hit.disabled.{updated,removed}`, multi-select toolbar styles, and the modal-host overlay. Inline script gained `selectionMode` / `selectedKeys` / `disabledKeys` state, row-click selection logic, primed-state evaluator, toolbar reconciliation, and `updateModal`/`updateResult` message handling.
+- `src/search/searchPanel.ts` — extended: `updateFile` handler reads + parses both files and posts the modal; `updateConfirm` handler runs the write pipeline (with optional delete); `updateCancel` handler clears the pending slot and dismisses the modal. Per-panel `pendingUpdate` slot holds the source bytes between modal open and confirm so the confirm path doesn't re-read.
+- `src/search/scope.ts` — `folderLabelFor` exported (previously module-private) so the wired layer can derive modal column headers from the same logic the panel uses for group headers.
+- `test/search-panel-html.test.ts` — 5 new cases covering toolbar markup, modal-host overlay, CSS class definitions, compareModalCss inlining, and script wiring. 20/20 green.
+
+**Outbound message protocol additions** (panel → ext):
+
+- `{type: 'updateFile', targetUri, sourceUri}` — primed-button click.
+- `{type: 'updateConfirm', mode: 'update' | 'update-remove'}` — modal button click.
+- `{type: 'updateCancel'}` — modal cancel.
+
+**Inbound message protocol additions** (ext → panel):
+
+- `{type: 'updateModal', html}` — shows the side-by-side (or identical) modal.
+- `{type: 'updateModalClose'}` — dismisses the modal (used on cancel).
+- `{type: 'updateResult', outcome: 'updated' | 'updated-removed' | 'identical' | 'error', targetUri?, sourceUri?, message?}` — applies disabled state and dismisses the modal.
+
+**DoD** (pending VPS verification): 20/20 `test:search-panel-html` green; typecheck clean; `dist/extension.js` builds (530.1 KB, +83 KB over pre-M-MULTI). Live verification of the shift-click → modal → write/delete loop owed.
+
+**Out of scope for M-MULTI**: routing PDFs through this flow (search currently indexes only `.pptx`). Will be revisited once PDF indexing lands.
 
 ### M6 — Polish + sign-off
 
@@ -268,20 +329,45 @@ If you need wider context (commit conventions, dev workflow, dead ends to avoid)
 
 1. **Does `src/pptx.ts` already extract first-visible-slide text?** ✅ *Resolved during M1: no, only the title placeholder via `extractFirstSlideTitle`. M2 added `extractAllSlideText` + `ParseResult.firstVisibleSlideText` as a new required field.*
 2. **Does `parseCache.ts` already implement M5.3?** ✅ *Resolved during M1: yes — full ParseResult cache shipped (in-memory LRU + IDB write-through + Phase D identity index). For M4, `getProjectionForSha` should derive projections via `parsePptxCached` (the cache-aware parser) and `projectFromCached` / `projectFromParseResult` rather than re-implementing a separate parse path.*
-3. **Does `SyncManager` expose a "destination folder URIs" getter?** *Still open — answer at the start of M4 by reading `src/sync/manager.ts`. If not present, derive from topology + `onDidChange` for now.*
+3. **Does `SyncManager` expose a "destination folder URIs" getter?** ✅ *Resolved during M4: no dedicated getter; the indexer derives the destination URI set by walking `manager.topology.sources[].destinations[].workspaceFolderUri` and subscribing to `manager.onDidChange` for topology updates. `computeSearchScope` in `src/search/scope.ts` takes the resulting `destinationWorkspaceFolderUris` array and subtracts it from `workspaceFolderUris`.*
 4. **What IDB DB name + current version?** ✅ *Resolved during M3: separate DB `pptxSearch.index` v1 with store `projections`. Did not coexist with `folderSync.parseCache` (which is now at v6 after the M2 `firstVisibleSlideText` field landed) for the reasons in M3 above.*
 
 ---
 
 ## Definition of Done for v1
 
-1. Command `pptxSearch.openPanel` opens a webview panel.
-2. Indexing source folders works on cold start (no IDB cache); subsequent opens hydrate from IDB.
-3. Search is case-insensitive, diacritic-folded, AND across query terms, OR across fields.
-4. Results show filename + author and are clickable to open the pptx in the viewer.
-5. Watcher keeps the index live as files are added / modified / deleted in source folders.
-6. Destination folders are excluded from the indexed scope.
-7. All pure modules have tsx-runnable tests under `test/search-*.test.ts`.
-8. No CSP violations in DevTools when the panel is open.
-9. Substrate (`CLAUDE.md`) updated with the search feature.
-10. Sign-off commit pushed; pre-release republished if user agrees.
+1. ✅ Command `pptxSearch.openPanel` opens a webview panel.
+2. ✅ Indexing source folders works on cold start (no IDB cache); subsequent opens hydrate from IDB.
+3. ✅ Search is case-insensitive, diacritic-folded, AND across query terms, OR across fields.
+4. ✅ Results show filename + author and are clickable to open the pptx in the viewer.
+5. ✅ Watcher keeps the index live as files are added / modified / deleted in source folders.
+6. ✅ Destination folders are excluded from the indexed scope.
+7. ✅ All pure modules have tsx-runnable tests under `test/search-*.test.ts`.
+8. ✅ No CSP violations in DevTools when the panel is open.
+9. ⏳ Substrate (`CLAUDE.md`) updated with the search feature. (M6.)
+10. ⏳ Sign-off commit pushed; pre-release republished if user agrees. (M6.)
+
+---
+
+## Next-session hook — multi-result actions
+
+The v1 panel ships with one action per row: click → open the file in the viewer. That covers the "I'm looking for this one deck" use case.
+
+The user has flagged that they want to **extend the panel with an additional aspect of how multiple search results are used together** before signing off v1. Specifics are intentionally not pinned down in this plan — the next session will scope the work with the user.
+
+What's already in place that the new work can build on:
+
+- Hits are grouped per scope folder (`HitGroup` from `src/search/scope.ts`); each group already carries `folderUri`, `folderLabel`, and a fanned-out copy of any duplicate-content hit so the same deck appears under every folder it lives in.
+- The webview message protocol has two free directions (`groups` → panel, `{type:'open', uri}` ← panel). Adding new message types (e.g. `bulkAction`, `selectionChanged`) is additive — no protocol break for v1 panel consumers.
+- `searchPanelHtml.ts` is a pure renderer with snapshot tests, so any new affordance (checkboxes per row, per-group "do X to all of these" headers, multi-select keyboard semantics) lands as a renderer change plus webview-script change with a corresponding `test/search-panel-html.test.ts` case.
+- `retainContextWhenHidden: true` means any selection state held in the webview DOM survives navigation to / from an opened file, which matters once "select N decks, then act on them" becomes a flow.
+
+What is **not** decided and should be scoped with the user when the next session starts:
+
+- What action(s) the user wants on multiple results (open all? batch-export? cross-folder compare? pull into a working set? feed into the sync planner as an ad-hoc source?)
+- Whether the selection model is per-hit, per-group, or per-uri (a fanned-out hit has one identity but multiple URIs across folders — the action might want any of those granularities).
+- Whether the new affordance lives in the search panel itself, in a follow-up panel that the search panel hands off to, or as a command-palette entry that operates on the current selection.
+
+Suggested approach for the next session: spend the first turn capturing the intended workflow ("when I have these N results, I want to ____"), pick the smallest end-to-end slice that demonstrates the value, and only then design the selection model + message protocol additions. Don't over-engineer the selection state on speculation — v1 ships with single-result-open and that's not regressing.
+
+Once the multi-result work is in, M6 sign-off (DoD bullets 9 + 10) can close out v1.

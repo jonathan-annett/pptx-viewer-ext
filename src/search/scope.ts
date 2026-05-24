@@ -214,7 +214,7 @@ export function groupHitsByFolder(
  * with a fall-back to the URI itself when there's no meaningful basename
  * (e.g. a root URI like `vscode-vfs://github`).
  */
-function folderLabelFor(folderUri: string): string {
+export function folderLabelFor(folderUri: string): string {
   const base = basenameOf(folderUri);
   const decoded = decodeUriDisplay(base);
   if (decoded) return decoded;
