@@ -69,8 +69,18 @@ function escapeForJsString(s) {
 // handled (backslash, double-quote, control chars, line/paragraph
 // separators). This is robust regardless of which quote style esbuild emits
 // and avoids the brittleness of trying to escape into a specific context.
+//
+// `g` flag: more than one source module may declare the placeholder constant
+// (currently both src/webview.ts for the pptx viewer and src/pdfViewerHtml.ts
+// for the pdf viewer). Each declaration emits its own quoted literal in the
+// bundle — we have to substitute every one of them, not just the first. A
+// non-global regex with `.replace` leaves the later occurrences as bare
+// placeholders, which then render as no-op string-literal `<script>` tags
+// (the webview boots but `window.__pptxPdfImport` is never assigned, and the
+// viewer's inline script reports "PDF renderer not available in this build").
 const PDF_IMPORT_BUNDLE_QUOTED_RE = new RegExp(
   `(["'])${PDF_IMPORT_BUNDLE_PLACEHOLDER}\\1`,
+  'g',
 );
 
 // ──────────────────────────────────────────────────────────────────────────
