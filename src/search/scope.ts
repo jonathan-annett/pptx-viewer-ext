@@ -12,6 +12,9 @@
 // from vscode.Uri before calling in. That keeps the helper tsx-testable
 // and identical to the SearchProjection / SearchEngine convention.
 
+import type { SearchHit } from './index-types';
+import { basenameOf, decodeUriDisplay } from './projection';
+
 /**
  * Inputs derived from `vscode.workspace.workspaceFolders` + the resolved
  * topology. All URIs are `vscode.Uri.toString()` values.
@@ -82,4 +85,112 @@ export function urisLeavingScope(
     if (!isUnderScope(newScope, uri)) evictions.push(uri);
   }
   return evictions;
+}
+
+/**
+ * Bucketed search results, one bucket per top-level scope folder.
+ * Empty buckets are omitted (no header for "no hits in this folder").
+ *
+ * `folderUri` is the workspace-folder URI string the panel keys on; the
+ * panel can reorder if it ever needs to, though `groupHitsByFolder`
+ * already returns buckets in scope order.
+ *
+ * `folderLabel` is the human-readable form — the basename of the folder
+ * URI, percent-decoded. The wired layer could swap this for an explicit
+ * `vscode.workspace.asRelativePath` if/when we want the workspace-name
+ * instead of the URL basename, but for now the basename matches what the
+ * VS Code Explorer shows in the title bar.
+ */
+export interface HitGroup {
+  folderUri: string;
+  folderLabel: string;
+  hits: SearchHit[];
+}
+
+/**
+ * Group hits by the scope folder they live under.
+ *
+ * Ordering rules:
+ *   - Buckets appear in the same order as `scope.folderUris` — the indexer
+ *     preserves workspace-folder declaration order, so the user sees their
+ *     top folder first.
+ *   - Hits inside each bucket keep the input order (the engine has already
+ *     sorted by score + filename).
+ *   - Empty buckets are dropped so the panel doesn't render a header with
+ *     no rows under it.
+ *
+ * Multi-URI hits (same content at two paths) are placed in the bucket of
+ * the FIRST URI on the hit. That matches the panel's "click opens the
+ * first URI" behaviour — the group reflects where the action would land.
+ *
+ * Hits that don't fall under any scope folder land in a synthetic group
+ * with `folderUri: ''` and `folderLabel: '(other)'`. This shouldn't happen
+ * in normal flow (the indexer only adds in-scope URIs), but the engine's
+ * load-from-IDB phase can briefly hold projections whose URIs haven't been
+ * re-asserted by the indexer yet — keep the bucket as a defensive fallback
+ * rather than silently dropping rows.
+ */
+export function groupHitsByFolder(
+  hits: readonly SearchHit[],
+  scope: SearchScope,
+): HitGroup[] {
+  // Pre-compute trailing-slash variants once. Same rule as `isUnderScope`:
+  // a hit URI matches a folder if it equals it or starts with `folder + '/'`.
+  // We prefer the longest matching folder so that nested workspace folders
+  // (rare but possible) bucket correctly.
+  const folderPrefixes = scope.folderUris.map((folder) => ({
+    uri: folder,
+    prefix: folder.endsWith('/') ? folder : `${folder}/`,
+  }));
+
+  // One bucket per scope folder, in order. Map keeps insertion order so a
+  // single pass over `scope.folderUris` is enough.
+  const buckets = new Map<string, HitGroup>();
+  for (const folder of scope.folderUris) {
+    buckets.set(folder, {
+      folderUri: folder,
+      folderLabel: folderLabelFor(folder),
+      hits: [],
+    });
+  }
+
+  let other: HitGroup | undefined;
+
+  for (const hit of hits) {
+    const probe = hit.uris && hit.uris[0] ? hit.uris[0] : '';
+    let bestFolder = '';
+    let bestLen = -1;
+    for (const { uri, prefix } of folderPrefixes) {
+      const matches = probe === uri || probe.startsWith(prefix);
+      if (matches && uri.length > bestLen) {
+        bestFolder = uri;
+        bestLen = uri.length;
+      }
+    }
+    if (bestFolder) {
+      buckets.get(bestFolder)!.hits.push(hit);
+    } else {
+      if (!other) other = { folderUri: '', folderLabel: '(other)', hits: [] };
+      other.hits.push(hit);
+    }
+  }
+
+  const out: HitGroup[] = [];
+  for (const group of buckets.values()) {
+    if (group.hits.length > 0) out.push(group);
+  }
+  if (other) out.push(other);
+  return out;
+}
+
+/**
+ * Display label for a workspace-folder URI. Decoded basename of the URI,
+ * with a fall-back to the URI itself when there's no meaningful basename
+ * (e.g. a root URI like `vscode-vfs://github`).
+ */
+function folderLabelFor(folderUri: string): string {
+  const base = basenameOf(folderUri);
+  const decoded = decodeUriDisplay(base);
+  if (decoded) return decoded;
+  return decodeUriDisplay(folderUri);
 }

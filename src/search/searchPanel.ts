@@ -24,6 +24,7 @@ import type { SearchHit } from './index-types';
 import type { SearchEngine } from './searchEngine';
 import type { SearchIndexerHandle, IndexerProgress } from './indexer';
 import { renderSearchPanelHtml } from './searchPanelHtml';
+import { groupHitsByFolder } from './scope';
 
 export interface OpenSearchPanelDeps {
   engine: SearchEngine;
@@ -91,7 +92,7 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
       const q = typeof (msg as { query?: unknown }).query === 'string'
         ? ((msg as { query: string }).query)
         : '';
-      handleSearch(panel, deps.engine, q);
+      handleSearch(panel, deps.engine, deps.indexer, q);
       return;
     }
     if (m.type === 'open') {
@@ -124,6 +125,7 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
 function handleSearch(
   panel: vscode.WebviewPanel,
   engine: SearchEngine,
+  indexer: SearchIndexerHandle,
   query: string,
 ): void {
   let hits: SearchHit[] = [];
@@ -143,10 +145,14 @@ function handleSearch(
   // overwhelmingly what users act on.
   const MAX_RESULTS = 200;
   const trimmed = hits.length > MAX_RESULTS ? hits.slice(0, MAX_RESULTS) : hits;
+  // Bucket by scope folder before sending. The pure helper preserves scope
+  // order, which is the workspace-folder declaration order — what the user
+  // sees in the explorer matches what they see here.
+  const groups = groupHitsByFolder(trimmed, indexer.getScope());
   void panel.webview.postMessage({
     type: 'results',
     query,
-    hits: trimmed,
+    groups,
     truncated: hits.length > MAX_RESULTS,
     totalMatches: hits.length,
   });

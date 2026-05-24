@@ -206,6 +206,48 @@ h1 {
   font-style: italic;
 }
 
+/*
+ * Folder groups. Each .hit-group is a section that contains a header (the
+ * folder label) and a .hit-list with the rows in that folder.
+ *
+ * The :nth-of-type alternation gives every other group a subtle tinted
+ * background so the user can see at a glance where one folder ends and
+ * the next begins — same idea as zebra-striped tables but at folder
+ * granularity rather than row granularity. We use VS Code's widget
+ * background token because it sits a small step away from the editor bg
+ * in every theme; falling back to a tiny rgba tint covers the rare case
+ * where the token isn't defined.
+ */
+.hit-group {
+  margin-bottom: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.hit-group:nth-of-type(even) {
+  background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.07));
+}
+
+.hit-group-header {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 2px 6px;
+  margin: 0;
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, transparent));
+  margin-bottom: 6px;
+}
+
+.hit-group-count {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.75;
+  margin-left: 6px;
+}
+
 .hit-list {
   display: flex;
   flex-direction: column;
@@ -355,7 +397,7 @@ function panelScript(): string {
       // latestQuery rather than qInput.value so an in-flight backspace
       // doesn't blank legitimate matches mid-render.
       if (typeof msg.query === 'string' && msg.query !== latestQuery) return;
-      renderResults(msg.hits || [], latestQuery);
+      renderResults(msg.groups || [], latestQuery);
     } else if (msg.type === 'indexProgress') {
       updateFooter(msg);
     } else if (msg.type === 'indexComplete') {
@@ -383,20 +425,44 @@ function panelScript(): string {
     results.setAttribute('aria-busy', 'false');
   }
 
-  function renderResults(hits, query) {
-    if (!hits.length) {
+  function renderResults(groups, query) {
+    // Total hit count across every group — drives the "No matches" empty
+    // state when nothing came back at all.
+    let totalHits = 0;
+    for (const g of groups) totalHits += (g.hits || []).length;
+    if (!totalHits) {
       const wrap = document.createElement('div');
       wrap.className = 'empty-state';
       wrap.textContent = 'No matches.';
       results.replaceChildren(wrap);
       return;
     }
+    const frag = document.createDocumentFragment();
+    for (const group of groups) {
+      if (!group || !group.hits || !group.hits.length) continue;
+      frag.appendChild(renderGroup(group, query));
+    }
+    results.replaceChildren(frag);
+  }
+
+  function renderGroup(group, query) {
+    const section = document.createElement('section');
+    section.className = 'hit-group';
+    const header = document.createElement('h2');
+    header.className = 'hit-group-header';
+    header.textContent = group.folderLabel || group.folderUri || '(unknown)';
+    const count = document.createElement('span');
+    count.className = 'hit-group-count';
+    count.textContent = group.hits.length + ' match' + (group.hits.length === 1 ? '' : 'es');
+    header.appendChild(count);
+    section.appendChild(header);
     const list = document.createElement('div');
     list.className = 'hit-list';
-    for (const hit of hits) {
+    for (const hit of group.hits) {
       list.appendChild(renderHit(hit, query));
     }
-    results.replaceChildren(list);
+    section.appendChild(list);
+    return section;
   }
 
   function renderHit(hit, query) {

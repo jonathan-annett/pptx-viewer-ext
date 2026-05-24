@@ -2,11 +2,26 @@
 // Run with: npm run test:search-scope
 
 import { strict as assert } from 'node:assert';
+import type { SearchHit } from '../src/search/index-types';
 import {
   computeSearchScope,
+  groupHitsByFolder,
   isUnderScope,
   urisLeavingScope,
 } from '../src/search/scope';
+
+function makeHit(overrides: Partial<SearchHit> & { sha256: string; uris: string[] }): SearchHit {
+  return {
+    sha256: overrides.sha256,
+    uris: overrides.uris,
+    filename: overrides.filename ?? 'deck.pptx',
+    displayFilename: overrides.displayFilename ?? overrides.filename ?? 'deck.pptx',
+    author: overrides.author ?? '',
+    displayAuthor: overrides.displayAuthor ?? overrides.author ?? '',
+    score: overrides.score ?? 1,
+    matchedFields: overrides.matchedFields ?? ['filename'],
+  };
+}
 
 // ───── computeSearchScope ────────────────────────────────────────────────
 
@@ -112,6 +127,110 @@ function test_evictions_empty_when_unchanged(): void {
   console.log('  ok: no evictions when scope still covers all URIs');
 }
 
+// ───── groupHitsByFolder ─────────────────────────────────────────────────
+
+function test_group_preserves_scope_order(): void {
+  // Hits supplied B-folder-first, but scope order is A then B.
+  // Groups must come out in scope order regardless of hit order.
+  const scope = {
+    folderUris: ['file:///work/A', 'file:///work/B'],
+  };
+  const hits = [
+    makeHit({ sha256: 'b'.repeat(64), uris: ['file:///work/B/x.pptx'] }),
+    makeHit({ sha256: 'a'.repeat(64), uris: ['file:///work/A/y.pptx'] }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].folderUri, 'file:///work/A');
+  assert.equal(groups[0].hits.length, 1);
+  assert.equal(groups[0].hits[0].sha256, 'a'.repeat(64));
+  assert.equal(groups[1].folderUri, 'file:///work/B');
+  console.log('  ok: groups returned in scope folder order, not hit order');
+}
+
+function test_group_label_decodes_basename(): void {
+  const scope = { folderUris: ['file:///Speakers%20Prep'] };
+  const hits = [makeHit({ sha256: 'a'.repeat(64), uris: ['file:///Speakers%20Prep/x.pptx'] })];
+  const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups[0].folderLabel, 'Speakers Prep');
+  console.log('  ok: folder label is decoded basename of the URI');
+}
+
+function test_group_empty_buckets_dropped(): void {
+  // A and C in scope, but every hit is in C. A produces no header.
+  const scope = {
+    folderUris: ['file:///work/A', 'file:///work/C'],
+  };
+  const hits = [
+    makeHit({ sha256: 'c'.repeat(64), uris: ['file:///work/C/x.pptx'] }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].folderUri, 'file:///work/C');
+  console.log('  ok: empty buckets dropped from output');
+}
+
+function test_group_no_hits(): void {
+  const groups = groupHitsByFolder([], { folderUris: ['file:///work/A'] });
+  assert.deepEqual(groups, []);
+  console.log('  ok: empty hits → empty groups');
+}
+
+function test_group_uses_first_uri_for_assignment(): void {
+  // A hit can have multiple URIs (same content at different paths). The
+  // group should follow the FIRST URI, matching the panel's click-target.
+  const scope = {
+    folderUris: ['file:///work/A', 'file:///work/B'],
+  };
+  const hits = [
+    makeHit({
+      sha256: 'a'.repeat(64),
+      uris: ['file:///work/A/deck.pptx', 'file:///work/B/deck.pptx'],
+    }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].folderUri, 'file:///work/A');
+  console.log('  ok: multi-URI hit grouped by first URI');
+}
+
+function test_group_longest_prefix_wins(): void {
+  // Nested scope folders (rare). The longer prefix should win so files
+  // inside the nested folder bucket there, not in the outer one.
+  const scope = {
+    folderUris: ['file:///work', 'file:///work/inner'],
+  };
+  const hits = [
+    makeHit({ sha256: 'n'.repeat(64), uris: ['file:///work/inner/x.pptx'] }),
+    makeHit({ sha256: 'o'.repeat(64), uris: ['file:///work/outer.pptx'] }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
+  // Two non-empty groups, in scope order.
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].folderUri, 'file:///work');
+  assert.equal(groups[0].hits[0].sha256, 'o'.repeat(64));
+  assert.equal(groups[1].folderUri, 'file:///work/inner');
+  assert.equal(groups[1].hits[0].sha256, 'n'.repeat(64));
+  console.log('  ok: longest matching prefix wins for nested scope folders');
+}
+
+function test_group_uri_outside_scope_goes_to_other(): void {
+  // Defensive: a hit whose URI doesn't match any scope folder lands in
+  // a synthetic "(other)" group at the end so we never silently drop rows.
+  const scope = { folderUris: ['file:///work/A'] };
+  const hits = [
+    makeHit({ sha256: 'a'.repeat(64), uris: ['file:///work/A/x.pptx'] }),
+    makeHit({ sha256: 'o'.repeat(64), uris: ['file:///elsewhere/y.pptx'] }),
+  ];
+  const groups = groupHitsByFolder(hits, scope);
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].folderUri, 'file:///work/A');
+  assert.equal(groups[1].folderUri, '');
+  assert.equal(groups[1].folderLabel, '(other)');
+  assert.equal(groups[1].hits[0].sha256, 'o'.repeat(64));
+  console.log('  ok: unmatched URI goes to synthetic (other) group');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -125,6 +244,13 @@ const tests: Array<[string, () => void]> = [
   ['isUnderScope: empty scope', test_under_scope_empty],
   ['urisLeavingScope: dest promotion evicts', test_evictions_after_dest_promotion],
   ['urisLeavingScope: empty when unchanged', test_evictions_empty_when_unchanged],
+  ['groupHitsByFolder: scope order preserved', test_group_preserves_scope_order],
+  ['groupHitsByFolder: label decodes URI', test_group_label_decodes_basename],
+  ['groupHitsByFolder: empty buckets dropped', test_group_empty_buckets_dropped],
+  ['groupHitsByFolder: empty hits → no groups', test_group_no_hits],
+  ['groupHitsByFolder: first URI decides bucket', test_group_uses_first_uri_for_assignment],
+  ['groupHitsByFolder: longest prefix wins', test_group_longest_prefix_wins],
+  ['groupHitsByFolder: orphan → (other)', test_group_uri_outside_scope_goes_to_other],
 ];
 
 let failed = 0;
