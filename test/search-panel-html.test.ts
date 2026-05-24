@@ -268,6 +268,32 @@ function test_script_wires_multi_select(): void {
   console.log('  ok: panel script wires multi-select + update flow');
 }
 
+function test_hash_badge_css_defined(): void {
+  // The CSS must define the .hash-badge rule used by the inline script to
+  // colour-pair identical-content rows.
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /\.hash-badge\s*\{/, '.hash-badge rule defined');
+  console.log('  ok: hash-pairing badge CSS rule defined');
+}
+
+function test_script_wires_hash_palette(): void {
+  // Sanity-check that the inline script carries the palette + sha-counting
+  // wiring. The palette identifier is HASH_PALETTE; the per-render maps are
+  // shaCounts and shaColors. The badge element uses the .hash-badge class.
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /HASH_PALETTE/, 'palette constant present');
+  assert.match(html, /shaCounts/, 'sha-count map computed');
+  assert.match(html, /shaColors/, 'sha-colour map computed');
+  assert.match(html, /'hash-badge'/, 'renderHit emits a .hash-badge element');
+  console.log('  ok: panel script wires the hash-pairing badge');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -291,6 +317,8 @@ const tests: Array<[string, () => void]> = [
   ['selection / primed / disabled CSS classes', test_selection_css_classes_defined],
   ['compareModalCss inlined', test_compare_modal_css_included],
   ['script wires multi-select + update flow', test_script_wires_multi_select],
+  ['hash-badge CSS rule defined', test_hash_badge_css_defined],
+  ['script wires hash-pairing palette + badge', test_script_wires_hash_palette],
 ];
 
 let failed = 0;

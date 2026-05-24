@@ -436,6 +436,37 @@ h1 {
 .hit-filename {
   font-weight: 600;
   margin-bottom: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+/*
+ * Hash-pairing badge — surfaces sha collisions across the current result set
+ * visually so the user can spot which rows are byte-identical at a glance
+ * (the same content can exist in N folders; groupHitsByFolder fans it into N
+ * rows). Only rendered for shas with count ≥ 2 — singletons get no badge so
+ * the panel doesn't fill with noise.
+ *
+ * Background colour is set inline on the span (CSP allows 'unsafe-inline'
+ * for style), assigned in first-appearance order from a small palette. Black
+ * foreground is chosen for contrast against the pastel palette — same
+ * reasoning as the .selected colours above.
+ */
+.hash-badge {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.75em;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: #1a1a1a;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  /* Pulled up a hair so it visually centres against the heavier filename
+     glyphs above the baseline rather than dropping below them. */
+  position: relative;
+  top: -1px;
 }
 
 .hit-meta {
@@ -548,6 +579,24 @@ function panelScript(): string {
   const disabledKeys = new Map(); // uri → 'updated' | 'removed'
   let currentGroups = [];
   let lastRenderedQuery = '';
+
+  // Palette for the hash-pairing badge. Pastel hues that work over both light
+  // and dark themes; yellow + lime are deliberately omitted to avoid visual
+  // collision with the .selected (yellow) and .selected.primed (lime) row
+  // states. If a result set has more distinct duplicated shas than there are
+  // palette slots, colours cycle — pairing within a colour-group is still
+  // useful even if a single colour now means "one of several pairs".
+  const HASH_PALETTE = [
+    '#ef9a9a', // red 200
+    '#f48fb1', // pink 200
+    '#ce93d8', // purple 200
+    '#9fa8da', // indigo 200
+    '#90caf9', // blue 200
+    '#80deea', // cyan 200
+    '#80cbc4', // teal 200
+    '#ffcc80', // orange 200
+    '#bcaaa4', // brown 200
+  ];
 
   function rowKey(hit) {
     return (hit && Array.isArray(hit.uris) && hit.uris[0]) || '';
@@ -690,6 +739,33 @@ function panelScript(): string {
       updateMultiToolbar();
       return;
     }
+
+    // Hash-pairing colours. First pass tallies sha occurrences across the
+    // rendered set; second pass assigns a palette colour to each sha seen
+    // ≥ 2 times, in first-appearance order so the colour ordering is stable
+    // for a given query. Singletons stay out of shaColors — renderHit skips
+    // the badge entirely for them.
+    const shaCounts = new Map();
+    for (const g of currentGroups) {
+      for (const h of (g.hits || [])) {
+        const s = (h && h.sha256) || '';
+        if (!s) continue;
+        shaCounts.set(s, (shaCounts.get(s) || 0) + 1);
+      }
+    }
+    const shaColors = new Map();
+    let paletteIdx = 0;
+    for (const g of currentGroups) {
+      for (const h of (g.hits || [])) {
+        const s = (h && h.sha256) || '';
+        if (!s) continue;
+        if ((shaCounts.get(s) || 0) < 2) continue;
+        if (shaColors.has(s)) continue;
+        shaColors.set(s, HASH_PALETTE[paletteIdx % HASH_PALETTE.length]);
+        paletteIdx++;
+      }
+    }
+
     const frag = document.createDocumentFragment();
     let groupIndex = 0;
     for (const group of currentGroups) {
@@ -697,7 +773,7 @@ function panelScript(): string {
         groupIndex++;
         continue;
       }
-      frag.appendChild(renderGroup(group, query, groupIndex));
+      frag.appendChild(renderGroup(group, query, groupIndex, shaColors, shaCounts));
       groupIndex++;
     }
     results.replaceChildren(frag);
@@ -707,7 +783,7 @@ function panelScript(): string {
     updateMultiToolbar();
   }
 
-  function renderGroup(group, query, groupIndex) {
+  function renderGroup(group, query, groupIndex, shaColors, shaCounts) {
     const section = document.createElement('section');
     section.className = 'hit-group';
     const header = document.createElement('h2');
@@ -721,13 +797,13 @@ function panelScript(): string {
     const list = document.createElement('div');
     list.className = 'hit-list';
     for (const hit of group.hits) {
-      list.appendChild(renderHit(hit, query, groupIndex));
+      list.appendChild(renderHit(hit, query, groupIndex, shaColors, shaCounts));
     }
     section.appendChild(list);
     return section;
   }
 
-  function renderHit(hit, query, groupIndex) {
+  function renderHit(hit, query, groupIndex, shaColors, shaCounts) {
     const row = document.createElement('div');
     row.className = 'hit';
     row.setAttribute('role', 'button');
@@ -746,7 +822,29 @@ function panelScript(): string {
     // back to the folded match form if an older indexer record doesn't
     // carry one — schema-mismatch eviction should make that transient.
     const displayName = hit.displayFilename || hit.filename || '(unknown)';
-    filename.appendChild(highlight(displayName, query));
+    // Wrap the filename text in its own span so flex layout treats it as a
+    // single inline item, with the hash badge floating beside it. Without
+    // this wrapper, the highlight() fragment's individual text nodes and
+    // <mark> elements each become flex items and gap is applied between
+    // every one of them.
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'hit-filename-text';
+    nameSpan.appendChild(highlight(displayName, query));
+    filename.appendChild(nameSpan);
+    // Hash-pairing badge: only when this sha appears 2+ times in the current
+    // result set. Tooltip shows the full sha + the count so the user can
+    // verify why the colour was assigned.
+    const sha = (hit && hit.sha256) || '';
+    if (sha && shaColors && shaColors.has(sha)) {
+      const badge = document.createElement('span');
+      badge.className = 'hash-badge';
+      badge.style.background = shaColors.get(sha);
+      badge.textContent = sha.slice(0, 8);
+      const n = (shaCounts && shaCounts.get(sha)) || 0;
+      badge.title =
+        'sha256 ' + sha + ' — appears in ' + n + ' result' + (n === 1 ? '' : 's');
+      filename.appendChild(badge);
+    }
     row.appendChild(filename);
 
     const meta = document.createElement('div');
