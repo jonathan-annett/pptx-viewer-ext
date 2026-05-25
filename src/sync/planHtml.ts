@@ -26,6 +26,12 @@ export interface PlanRowView {
   destHashShort?: string;
   manifestHashShort?: string;
   /**
+   * True when the file matches a hash in the workspace placeholder set
+   * (empty-file default + user-added entries from `.admin-sync.jsonc`).
+   * Renderer shows an [P] chip after the path; totals include a count.
+   */
+  isPlaceholder?: boolean;
+  /**
    * Validator warnings attached to the source file. Rendered inline as a
    * sub-list beneath the path row when present. The Validation warnings
    * section uses the same renderRow path — it's a derived "all items with
@@ -125,6 +131,13 @@ export interface PlanTotals {
   overridableWarnings: number;
   /** Source/destination pairs that couldn't be planned (unresolved, etc). */
   skipped: number;
+  /**
+   * Items flagged as placeholders by the classifier (sha matches the active
+   * placeholder set). Counted across every category — a placeholder can be a
+   * create, an update, a destination-only, etc. The footer surfaces the
+   * "N of M files are placeholders" line when this is non-zero.
+   */
+  placeholders: number;
 }
 
 export interface PlanViewModel {
@@ -169,6 +182,7 @@ export function toViewModel(
     blockingWarnings: 0,
     overridableWarnings: 0,
     skipped: 0,
+    placeholders: 0,
   };
 
   let destCount = 0;
@@ -211,6 +225,19 @@ export function toViewModel(
     for (const w of s.warnings) {
       if (hasBlockingWarning(w)) totals.blockingWarnings++;
       else if (hasOverridableWarningOnly(w)) totals.overridableWarnings++;
+    }
+    // Count placeholders across every primary category. summarisePlan's
+    // `warnings` is a derived view of items already in other categories, so
+    // including it would double-count.
+    for (const list of [
+      s.create,
+      s.updateTracked,
+      s.updateCollision,
+      s.skip,
+      s.deleteTracked,
+      s.destinationOnly,
+    ]) {
+      for (const it of list) if (it.isPlaceholder) totals.placeholders++;
     }
 
     // Collision rows offer an "Overwrite" decision; destination-only rows
@@ -311,6 +338,7 @@ function toRow(item: PlanItem): PlanRowView {
     ...(item.warnings && item.warnings.length > 0
       ? { warnings: item.warnings.map(toWarningView) }
       : {}),
+    ...(item.isPlaceholder ? { isPlaceholder: true } : {}),
   };
 }
 
@@ -359,7 +387,7 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
     ${renderPlanPairs(vm)}
 
     <footer class="plan-foot" role="group" aria-label="Plan actions">
-      ${renderFooter(blocking, hasWork)}
+      ${renderPlaceholderFooterLine(t)}${renderFooter(blocking, hasWork)}
     </footer>
   </main>
   <script nonce="${nonce}">${decisionWiringScript()}</script>
@@ -412,6 +440,11 @@ function renderTotals(t: PlanTotals): string {
     // when zero, so a clean plan keeps the strip uncluttered.
     ['blocked', t.blockingWarnings, 'block'],
     ['needs override', t.overridableWarnings, 'warn'],
+    // Placeholders: blue chip when any file in the plan matches the active
+    // placeholder set (empty-file default + user-added shas from
+    // .admin-sync.jsonc). Cross-cuts every other category — a placeholder
+    // can be a create, an update, a destination-only, etc.
+    ['placeholders', t.placeholders, 'placeholder'],
     ['skip', t.skip, 'mute'],
     ['skipped pairs', t.skipped, 'warn'],
   ];
@@ -509,6 +542,14 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
     warnings.length > 0 && !opts.expandWarnings
       ? ` <span class="warn-badge" title="${escapeHtml(warningTooltip(warnings))}">⚠ ${warnings.length}</span>`
       : '';
+  // Placeholder chip — blue, small, informational. Rendered after the
+  // warning badge so attention-worthy markers sit consistently after the
+  // path/size/hash header. The chip itself uses the `.chip.chip-placeholder`
+  // styling from the totals strip so the page-wide visual language stays
+  // consistent.
+  const placeholderChip = row.isPlaceholder
+    ? ` <span class="chip chip-placeholder row-chip" title="placeholder">P</span>`
+    : '';
 
   const messages =
     warnings.length > 0 && opts.expandWarnings
@@ -545,10 +586,10 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
         </label>`
     : '';
 
-  return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}${decision ? ' row-decide' : ''}">
+  return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}${decision ? ' row-decide' : ''}${row.isPlaceholder ? ' row-placeholder' : ''}">
         <div class="row-main">
           <span class="path">${escapeHtml(row.relPath)}</span>
-          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}${decisionHtml}
+          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}${placeholderChip}${decisionHtml}
         </div>${messages}
       </li>`;
 }
@@ -564,6 +605,25 @@ function renderEmpty(): string {
   return `<section class="pair">
   <div class="banner info">No source/destination pairs to plan. Author a <code>.sync.jsonc</code> file in a source folder and add the named destination to the workspace.</div>
 </section>`;
+}
+
+/**
+ * Pure: render the "N of M files are placeholders" footer line, or empty
+ * string when no placeholders are present. Exposed so embedded callers can
+ * surface the same metric in their own footer area.
+ *
+ * M is the count of files across primary categories — every file the user is
+ * seeing in the plan. We deliberately exclude `warnings` from the divisor
+ * because that's a derived view of items already counted in the primary
+ * categories.
+ */
+export function renderPlaceholderFooterLine(t: PlanTotals): string {
+  if (t.placeholders === 0) return '';
+  const totalFiles =
+    t.create + t.updateTracked + t.updateCollision + t.skip + t.deleteTracked + t.destinationOnly;
+  const isOne = t.placeholders === 1;
+  const verb = isOne ? 'is a placeholder' : 'are placeholders';
+  return `<p class="placeholder-foot-line">${t.placeholders} of ${totalFiles} files ${verb} (missing content).</p>`;
 }
 
 function renderFooter(blocking: number, hasWork: boolean): string {
@@ -843,6 +903,20 @@ function planContentCss(): string {
     .chip-info  { background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 14%, transparent); border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 40%, transparent); }
     .chip-warn  { background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 14%, transparent); border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 50%, transparent); }
     .chip-mute  { background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent); color: var(--vscode-descriptionForeground); }
+    /* Placeholder chip — blue family, distinct from .chip-info so the totals
+       strip can host both without colour collision. Used on a row to mark
+       individual placeholder files and in the totals strip for the count. */
+    .chip-placeholder {
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 18%, transparent);
+      color: var(--vscode-charts-blue, #3794ff);
+      border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 40%, transparent);
+    }
+    .row-chip { font-size: 0.78em; padding: 1px 6px; }
+    .placeholder-foot-line {
+      margin: 0 0 8px;
+      font-size: 0.9em;
+      color: var(--vscode-charts-blue, #3794ff);
+    }
 
     /* Each (source × destination) pair is a card. The left border gives it a
        visual anchor without needing a heavier background. */

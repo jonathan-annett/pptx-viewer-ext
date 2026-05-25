@@ -749,6 +749,126 @@ test('renderPlanHtml: hostile relPath in decision attributes is HTML-escaped', (
   assert.ok(html.includes('&quot;&gt;&lt;script&gt;x&lt;/script&gt;.txt'), 'expected escaped relPath missing');
 });
 
+// ───── placeholders (M-placeholders) ────────────────────────────────────
+
+test('toViewModel: placeholder count sums isPlaceholder items across primary categories', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub1.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' }),
+        item('destination-only', 'orphan.pptx', { destSize: 0, destHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.totals.placeholders, 2);
+});
+
+test('toViewModel: row carries isPlaceholder through to the view', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.pairs[0].sections.create[0].isPlaceholder, true);
+});
+
+test('renderPlanHtml: placeholder row emits the [P] chip', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /chip chip-placeholder row-chip/);
+  assert.match(html, /title="placeholder">P</);
+});
+
+test('renderPlanHtml: totals strip shows the placeholders chip when count > 0', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /chip chip-placeholder">placeholders: 1/);
+});
+
+test('renderPlanHtml: totals strip omits the placeholders chip when count is 0', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.ok(!/chip-placeholder/.test(html.replace(/<style>[\s\S]*?<\/style>/, '')),
+    'chip-placeholder should not appear in the body when count is zero');
+});
+
+test('renderPlanHtml: footer shows the placeholder count line when count > 0', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /1 of 2 files is a placeholder/);
+});
+
+test('renderPlanHtml: footer line uses plural for multiple placeholders', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub1.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'stub2.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /2 of 3 files are placeholders/);
+});
+
+test('renderPlanHtml: footer line omitted when no placeholders', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  // The .placeholder-foot-line class is defined in the stylesheet regardless;
+  // exclude the <style> block so we're only checking the body output.
+  const body = html.replace(/<style>[\s\S]*?<\/style>/, '');
+  assert.ok(!/placeholder-foot-line/.test(body),
+    'placeholder-foot-line should not appear in the body when count is zero');
+  assert.ok(!/files (are placeholders|is a placeholder)/.test(body));
+});
+
 // ───── humanSize sanity ──────────────────────────────────────────────────
 
 test('humanSize formats B / KB / MB', () => {
