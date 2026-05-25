@@ -23,5 +23,6 @@ pptx-search-v1-report.md
 pptx-upload-via-dropbox-plan.md
 pptx-viewer-agent-plan.md
 *.vsix
+.pat.env
 **/*.map
 **/*.ts
