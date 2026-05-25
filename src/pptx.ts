@@ -184,7 +184,27 @@ export interface FileInfo {
 
 const UNKNOWN = 'unknown';
 
+/**
+ * Well-known SHA-256 of an empty byte sequence. Inlined here so the zero-byte
+ * short-circuit can skip the actual hash compute. Kept in sync with
+ * `EMPTY_FILE_SHA256` in `src/sync/snapshot.ts` (the placeholder registry's
+ * implicit default). The value is mathematically fixed — never edit either.
+ */
+const EMPTY_FILE_SHA256_LITERAL =
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
 export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<ParseResult> {
+  // Zero-byte short-circuit. Such files are always placeholders (the empty
+  // sha is the registry's implicit default) and the rest of the parse pipe
+  // can only produce a misleading "Could not unzip" error from the failed
+  // unzipSync attempt. Skipping it shaves the crypto.subtle hash compute,
+  // the throwing unzip, and the cascade of zero-valued field reads. The
+  // viewer's banner-precedence logic (isPlaceholder beats parseError beats
+  // normal) then renders the info banner cleanly without leaning on the
+  // "placeholder beats parseError" fallback.
+  if (bytes.length === 0) {
+    return emptyFileParseResult(info);
+  }
   // Phase timings collected via performance.now() — see ParseTimings above
   // for what each phase covers. Pure measurement: no parse behaviour changes,
   // and the host decides whether to surface them.
@@ -323,6 +343,51 @@ export async function parsePptx(bytes: Uint8Array, info: FileInfo): Promise<Pars
       mediaMs,
       showPropsMs,
       totalMs: performance.now() - t0,
+    },
+  };
+}
+
+/**
+ * Synthesise a ParseResult for a zero-byte file. Such files never carry
+ * pptx structure but they are real artifacts in the workspace (Explorer's
+ * "New PowerPoint Presentation" right-click creates them, and operators
+ * use them as agenda placeholders). The placeholder registry's implicit
+ * default sha catches every zero-byte file, so the viewer renders the
+ * info banner and the sync engine treats it like any other deck.
+ *
+ * All flags default to OK (there is nothing to validate); parseError is
+ * intentionally undefined so the banner-precedence logic doesn't fall
+ * through to the corrupt path; timings are zero (we did no work).
+ */
+function emptyFileParseResult(info: FileInfo): ParseResult {
+  return {
+    fileName: info.fileName,
+    size: info.size,
+    sizeHuman: humanSize(info.size),
+    mtime: info.mtime,
+    mtimeHuman: formatTime(info.mtime),
+    sha256: EMPTY_FILE_SHA256_LITERAL,
+    slideCount: 0,
+    hiddenSlideCount: 0,
+    author: UNKNOWN,
+    lastModifiedBy: UNKNOWN,
+    embeddedMedia: [],
+    mediaFiles: [],
+    firstVisibleSlideText: '',
+    flags: {
+      linkedMedia: { ok: true, label: 'Linked media', detail: 'Empty file' },
+      showType: { ok: true, label: 'Show type', detail: 'Empty file' },
+      showMediaControls: { ok: true, label: 'Show media controls', detail: 'Empty file' },
+    },
+    timings: {
+      hashMs: 0,
+      unzipMs: 0,
+      xmlDecodeMs: 0,
+      slideScanMs: 0,
+      metadataMs: 0,
+      mediaMs: 0,
+      showPropsMs: 0,
+      totalMs: 0,
     },
   };
 }

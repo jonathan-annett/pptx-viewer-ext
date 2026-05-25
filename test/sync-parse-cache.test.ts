@@ -290,6 +290,30 @@ async function run(): Promise<void> {
     ok('parsePptxCached: miss caches, second call hits with overridden display fields');
   }
 
+  // ---------- parsePptxCached: zero-byte short-circuits without consulting the cache ----------
+  {
+    const cache = new InMemoryParseCache();
+    const outcome = await parsePptxCached(
+      new Uint8Array(0),
+      { fileName: 'empty.pptx', size: 0, mtime: 1234 },
+      cache,
+    );
+    // No IDB / Map round-trip on the zero-byte path; cacheHit is reported as
+    // true to reflect "no work was done in the wrapper".
+    assert.equal(outcome.cacheHit, true, 'zero-byte path reports cacheHit=true');
+    assert.equal(
+      outcome.result.sha256,
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      'sha256 is the well-known empty digest',
+    );
+    assert.equal(outcome.result.parseError, undefined, 'no parseError on zero-byte');
+    // The cache was never written to or queried.
+    assert.equal(cache.stats().entries, 0, 'cache.record was not called');
+    assert.equal(cache.stats().hits, 0, 'cache.lookup was not called');
+    assert.equal(cache.stats().misses, 0, 'cache.lookup was not called');
+    ok('parsePptxCached: zero-byte short-circuits without touching the cache');
+  }
+
   // ---------- singleton getter/setter ----------
   {
     assert.equal(getParseCacheSingleton(), undefined, 'singleton starts unset');

@@ -339,6 +339,33 @@ async function testGarbage() {
   console.log('  ok: garbage bytes fail soft');
 }
 
+// ---- Test 7b: Zero-byte file short-circuits to a clean placeholder result
+// (no misleading "Could not unzip" parseError; sha256 is the well-known
+// empty digest the placeholder registry treats as the default). ----
+async function testZeroByte() {
+  const r = await parsePptx(new Uint8Array(0), info);
+  assert.equal(
+    r.sha256,
+    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    'sha256 equals the well-known empty digest',
+  );
+  assert.equal(r.parseError, undefined, 'no misleading unzip error on a zero-byte file');
+  assert.equal(r.slideCount, 0);
+  assert.equal(r.hiddenSlideCount, 0);
+  assert.deepEqual(r.embeddedMedia, []);
+  assert.deepEqual(r.mediaFiles, []);
+  assert.equal(r.thumbnail, undefined);
+  assert.equal(r.flags.linkedMedia.ok, true);
+  assert.equal(r.flags.showType.ok, true);
+  assert.equal(r.flags.showMediaControls.ok, true);
+  // Display fields still come from the supplied info — filename, size,
+  // mtime, sizeHuman, mtimeHuman.
+  assert.equal(r.fileName, info.fileName);
+  assert.equal(r.size, info.size);
+  assert.equal(r.mtime, info.mtime);
+  console.log('  ok: zero-byte short-circuit');
+}
+
 // ---- Test 8: Thumbnail jpeg is extracted as data URL; emf is skipped ----
 async function testThumbnail() {
   const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
@@ -454,6 +481,7 @@ async function testRealSamples() {
   await testMediaFilesSkipsExternal();
   await testInternalMediaIsFine();
   await testGarbage();
+  await testZeroByte();
   await testThumbnail();
   await testRealSamples();
   console.log('all tests passed');

@@ -213,6 +213,15 @@ export async function parsePptxCached(
   cache?: ParseResultCache,
 ): Promise<CachedParseOutcome> {
   const t0 = performance.now();
+  // Zero-byte short-circuit. parsePptx handles this in O(1) without any
+  // hash compute; we route around the IDB lookup entirely so the placeholder
+  // viewer-open path doesn't wait on a backing store at all. cacheHit is
+  // reported as true because no work was done in the wrapper — the result
+  // is constant-folded from `info`.
+  if (bytes.length === 0) {
+    const result = await parsePptx(bytes, info);
+    return { result, cacheHit: true, totalMs: performance.now() - t0 };
+  }
   if (!cache) {
     const result = await parsePptx(bytes, info);
     return { result, cacheHit: false, totalMs: performance.now() - t0 };
