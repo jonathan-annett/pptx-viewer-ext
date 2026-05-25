@@ -1,5 +1,7 @@
 # Placeholder files — v1 plan
 
+**Shipped 2026-05-26.** Final commit: `d8bf688` (M6 + viewer sync-target skip), preceded by `001c329` (zero-byte short-circuit), `d0435e7` (M6), `742da7b` (row layout refactor), `826ce32` (M5), `82ec419` (M1–M4). Substrate updated in CLAUDE.md; handoff report at `placeholder-files-v1-report.md`.
+
 ## Progress log
 
 - **2026-05-26 — M1 complete.** Snapshot schema extended (`placeholders: string[]`); `EMPTY_FILE_SHA256`, `effectivePlaceholderSet`, `computeEffectiveSetFromText` exported from `src/sync/snapshot.ts`; `parseSnapshot` lowercases on read + defaults to `[]`; `marshalSnapshot` always emits the field; `snapshotsEqual` uses set-membership compare. 8 new tests in `test/sync-snapshot.test.ts`.

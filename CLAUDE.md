@@ -173,6 +173,7 @@ Things tried and found wrong. Don't propose them again without new evidence:
 - **pdfjs-dist v5 dropped `disableWorker` as a getDocument option.** The new `PDFWorker` constructor only honours `name`/`port`/`verbosity`. Passing `{ data, disableWorker: true }` to `getDocument` is silently ignored; `PDFWorker.#initialize` falls through to reading `GlobalWorkerOptions.workerSrc`, which throws `No "GlobalWorkerOptions.workerSrc" specified` if not set. Setting `workerSrc = ''` doesn't help — empty string is falsy and the getter rejects it the same way. The working fake-worker path in v5 is to side-effect-import `pdfjs-dist/build/pdf.worker.min.mjs`: its top-level code assigns `globalThis.pdfjsWorker = { WorkerMessageHandler }`, which `PDFWorker.#initialize` checks *before* consulting `workerSrc`. Cost: the worker module gets bundled (~1.2 MB minified into the IIFE) but no URL ever needs to be fetched from the webview sandbox. See `src/pdfImportWebviewEntry.ts`. If pdfjs-dist is ever downgraded to v4, the side-effect import becomes a no-op and `disableWorker: true` works again — leave the shim in place.
 - **esbuild's text-rewrite placeholders need to be the entire quoted literal, not a bare token.** The `pdfImportBundlePlugin` in `esbuild.config.js` inlines `dist/pdfImport.webview.js` into `dist/extension.js`. The first attempt replaced a bare placeholder string with the raw bundle source — instantly broken because the IIFE contains its own `"…"` and `'…'` characters, which broke the host string. The fix: match the *quoted* literal in either single or double quotes (`/(['"])__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__\1/`) and substitute `JSON.stringify(bundleSrc)` — that handles every embedded quote and escape correctly regardless of which quote style esbuild emitted around the placeholder. Same principle applies to any future inline-string-replacement plugin: rewrite the literal *including its delimiters*, and let `JSON.stringify` do the escaping.
 - **`main.vscode-cdn.net` CORS errors in the browser console are not from this extension.** VS Code Web itself fetches `extensions/marketplace.json` and `extensions/chat.json` from Microsoft's CDN to populate the "Featured" extensions tab and Copilot Chat surfaces. The CDN returns 200 without `Access-Control-Allow-Origin`, the browser blocks reading, the affected UI tabs stay empty. The requests go browser → CDN directly, bypassing Caddy and our Koa server, so we can't intercept them with a middleware. Cosmetic; ignore unless something downstream actually needs that data.
+- **The `EMPTY_FILE_SHA256` constant is intentionally duplicated between `src/sync/snapshot.ts` and `src/pptx.ts`.** Both want the literal `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` — the snapshot module uses it for the placeholder registry's implicit default; the parse path uses it inside the zero-byte short-circuit to skip the actual `crypto.subtle.digest` call. Importing `snapshot.ts` from `pptx.ts` would be a backward dependency (pptx is foundational; sync builds on it). The value is mathematically immutable — empty bytes hash to exactly this string forever — so the duplication carries zero maintenance risk. The constants are marked with cross-reference comments in both modules.
 
 ---
 
@@ -218,6 +219,22 @@ Things tried and found wrong. Don't propose them again without new evidence:
 
 - **Layered-cache abstraction pattern (substrate note for future work).** Search's projection layer was originally designed to abstract over "M5.3 ships / doesn't ship" via a `getProjectionForSha(sha, uri)` function. By the time M4 wired up, M5.3 (full ParseResult cache) had already shipped, so the indexer threaded the layered lookup directly (`indexStore` → `parseCache` → fresh parse). The general pattern remains useful: when a new derived-data store wants to sit alongside an existing content cache, prefer a layered lookup over a coordinated rewrite. The IDB adapter (`src/sync/idbAdapter.ts`) is shared infrastructure but each subsystem owns its own DB name + schema version so the lifecycles (eviction, upgrades, full clears) stay independent — search uses `pptxSearch.index`, sync uses `folderSync.hashCache` + `folderSync.parseCache`.
 
+- **Placeholder files v1 shipped.** A workspace-level "this file is a stub, not real content yet" registry that threads through plan UI + viewer banner. Operators dropping zero-byte `.pptx` stubs (Windows Explorer's "New PowerPoint Presentation") or custom blank-template decks need to know which destination files are still placeholders when content lands.
+
+  `.admin-sync.jsonc` gains a `placeholders: string[]` field (lowercase sha256 hex; the empty-file sha is the implicit default and never written to disk — the locked default row in the admin editor is a UI property only). The admin editor's new Placeholders card lists the default plus user entries with an `[x]` remove button and an "Add placeholder…" file picker that hashes the chosen sample via `hashFileAtUri(vscodeFs(), …)`. Snapshot recapture preserves the array — `captureCurrent()` takes an optional `existingPlaceholders` param and the topology writer + Refresh button read it off disk via `readPlaceholdersFromDisk()` before recapturing.
+
+  Single workspace-wide registry (`src/sync/placeholderRegistry.ts`) caches the effective set; FileSystemWatcher on `.admin-sync.jsonc` + `onDidChangeWorkspaceFolders` keep it current. Public API: `getActivePlaceholderSet()` (async, always correct) and `getActivePlaceholderSetSync()` (cold-tolerant for render-time paths). The pure helper `computeEffectiveSetFromText` lives in `snapshot.ts` so it stays tsx-testable.
+
+  Classifier annotates `PlanItem.isPlaceholder?` by category-appropriate identity hash (`sourceHash ?? destHash ?? manifestHash`) — `create`/`update-*`/`skip` use the source hash, `destination-only` uses the dest hash, `delete-tracked` uses the manifest hash. `BuildPlanOptions.placeholders` threads the set through every call site: `planView.openPlanPanel`, `adminEditor`/`configEditor`/`provider` embedded plans, and the `folderSync.dryRunPlan` command.
+
+  Plan rendering: per-row `[P]` chip in `.row-lead` (paired with the warning badge and decision controls), `placeholders: N` chip in the totals strip, and a footer line `"N of M files {is a placeholder | are placeholders} (missing content)."` in the standalone plan webview only. Embedded callers inherit the chips via `planContentStyles()`. The same M5.5 row refactor split `renderRow` markup into `.row-lead` (path + chips/decisions, grows + wraps) and `.row-meta` (size + hashes, intrinsic-width, anchors right) so size/hash columns stay aligned across rows regardless of how many lead-side affordances appear.
+
+  Viewer banner precedence: `isPlaceholder=true` → blue info banner "This is a placeholder file — content not yet uploaded." + validation flags suppressed (regardless of `parseError`); `isPlaceholder=false` + `parseError` → existing red corrupt banner; `isPlaceholder=false` + no error → unchanged. `provider.renderWithSyncTarget` also skips the per-file scoped sync-target build for placeholders entirely (the workspace plan view's `[P]` chip is the right place to see sync state for a stub; the viewer for a placeholder is a fast operator confirmation glance).
+
+  Perf optimisation along the way: `parsePptx` now short-circuits for `bytes.length === 0` — synthesises a result with the well-known empty digest, no `parseError`, no hash compute, no `unzipSync` attempt. `parsePptxCached` short-circuits before the IDB lookup too. Net effect: zero-byte placeholders open without any backing-store round-trip.
+
+  Plan + sign-off history at `placeholder-files-v1-plan.md`; handoff context at `placeholder-files-v1-report.md`.
+
 ---
 
 ## Open project decisions
@@ -233,6 +250,11 @@ Project plans live at the repo root and are the per-iteration instruction set th
 Current plan:
 
 - `folder-sync-v1-plan.md` — **active target.** Adds folder sync to the extension alongside the existing pptx viewer. The next major piece of work.
+
+Recently signed off (handoff reports at repo root):
+
+- `placeholder-files-v1-plan.md` + `placeholder-files-v1-report.md` — workspace-level placeholder registry (`.admin-sync.jsonc#placeholders`), plan-view `[P]` chip + footer count, viewer info banner. Shipped 2026-05-26.
+- `pptx-search-v1-plan.md` + `pptx-search-v1-report.md` — workspace-wide search panel.
 
 ---
 
