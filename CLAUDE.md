@@ -14,7 +14,7 @@ The long-term goal is a **one-way folder sync tool** for vscode.dev users: read 
 
 The first feature shipped — and still part of v1 — is a **pptx viewer**. When a user opens a `.pptx` file with the extension installed, a custom read-only editor shows file metadata, content hash, three validation flags (linked external media, kiosk/window show mode, media-controls-enabled), and a thumbnail when one is embedded. The viewer's parsing layer is also the input to the sync engine's pptx validator, so the two features share code.
 
-The choice to start with the pptx viewer was deliberate: a small, well-bounded feature to validate the dev workflow (phone-resident agent + VPS test harness + GitHub as sync bus) before tackling the larger sync surface. The workflow is now proven; focus is shifting to the sync feature.
+The choice to start with the pptx viewer was deliberate: a small, well-bounded feature to validate the dev workflow (remote agent + VPS test harness + GitHub as sync bus) before tackling the larger sync surface. The workflow is now proven; focus is shifting to the sync feature.
 
 ---
 
@@ -65,12 +65,14 @@ Runtime dependencies are kept minimal: `fflate` for zip handling, `jsonc-parser`
 
 ## Dev workflow
 
-The phone-resident agent does its work in Termux on Android, pushing to GitHub. The VPS pulls and rebuilds. The agent does not run vscode.dev locally — testing happens on the live VPS test harness.
+The agent does its work locally on the user's MacBook (project at `/Users/jonathanannett/projects/pptx-viewer-ext`), pushing to GitHub. The VPS pulls and rebuilds. The agent can also build and run tests locally, but the agent does not run vscode.dev locally — the live runtime target stays the VPS test harness, which serves vscode.sophtwhere.com from the same source tree.
+
+Historical note: the agent previously lived in Termux on Android and the push-pull-VPS loop was the only build path. As of 2026-05-25 the project moved to macOS; the VPS test harness stays in place as the closest-to-production runtime. The Termux compat shims (`scripts/fix-cpus.cjs`, `scripts/fix-platform.cjs`) are now inert but retained — see Cross-environment pattern.
 
 ### The 90% path
 
 ```
-phone agent edits src/*.ts  →  commit  →  push to origin/main
+agent edits src/*.ts on macOS  →  commit  →  push to origin/main
                                        ↓
 agent (or user) runs `git pull` on the VPS in the repo dir
                                        ↓
@@ -85,11 +87,13 @@ new code runs
 
 That's the loop. Most cycles need nothing more.
 
+Local fast path (optional, MacBook-only). For typecheck/smoke-test before pushing: `npm run bundle` produces `dist/extension.js` locally in a few hundred ms, and any `npm run test:*` script runs under Node via tsx. Neither exercises the vscode.dev runtime, so the VPS pull-rebuild-reload loop is still the way to verify behaviour on the live target — but a green local build catches type errors and test regressions before they cost a push round-trip.
+
 The user runs vscode.sophtwhere.com as an installed PWA on macOS. **Cmd-R reliably reloads the PWA window** and picks up the freshly-built `dist/extension.js` — same behaviour as a hard reload in a Chrome tab, no DevTools or service-worker dance required. If a future change starts misbehaving on PWA refresh (stale bundle, persistent state), the activation log line `[pptx-viewer] build: <iso> sha=<short>` in the Output Channel / DevTools console is the diagnostic: SHA on screen ≠ SHA on the VPS means the PWA cached a stale bundle and something needs hardening.
 
 ### Agent VPS access
 
-The phone agent has SSH access to the VPS as `jonathan@vscode.sophtwhere.com`. The checkout lives at `~/pptx-viewer-ext`. The pm2 process layout: `pptx-watch` (esbuild `--watch`) and `pptx-dev-server` (Koa test-web server).
+The agent has SSH access to the VPS as `jonathan@vscode.sophtwhere.com` from the MacBook. The checkout on the VPS lives at `~/pptx-viewer-ext`. The pm2 process layout: `pptx-watch` (esbuild `--watch`) and `pptx-dev-server` (Koa test-web server).
 
 What the agent can do unprompted:
 
@@ -121,18 +125,18 @@ If a push appears not to have taken effect, the first thing to check is `pm2 log
 
 ### Cross-environment pattern
 
-The project runs in two environments: **Termux on Android** (where the phone agent does local work, e.g. running tests) and **the Linux VPS** (where the live server runs). The preload-script pattern handles environment differences without per-host branching:
+The project currently runs in two environments: **macOS** (where the agent does local work — edits, builds, tests) and **the Linux VPS** (where the live test harness serves vscode.sophtwhere.com). It previously also ran in **Termux on Android**, which is why three preload-script shims exist. The pattern handles environment differences without per-host branching:
 
-- `scripts/fix-cpus.cjs`, `scripts/fix-platform.cjs` — Termux compatibility shims; no-op on Linux.
-- `scripts/fix-koa-proxy.cjs` — Reverse-proxy support for the test-web instance behind Caddy; no-op when not behind a proxy (Termux falls through because `X-Forwarded-Proto` is absent).
+- `scripts/fix-cpus.cjs`, `scripts/fix-platform.cjs` — Termux compatibility shims; no-op on macOS and Linux. Inert in the current setup but retained so the project can be pulled back into Termux without re-inventing the workarounds.
+- `scripts/fix-koa-proxy.cjs` — Reverse-proxy support for the test-web instance behind Caddy on the VPS; no-op when not behind a proxy (macOS and Termux both fall through because `X-Forwarded-Proto` is absent).
 
-Same `package.json` runs in both environments; runtime conditions select the behaviour. When adding tooling that needs environment-specific handling, follow this pattern rather than branching by hostname.
+Same `package.json` runs across all three environments; runtime conditions select the behaviour. When adding tooling that needs environment-specific handling, follow this pattern rather than branching by hostname.
 
 ### Things to keep in mind when committing
 
 - `dist/` is gitignored. Don't commit local builds; the VPS rebuilds from `src/`.
 - `.vscode-test-web/` is gitignored.
-- Don't remove the preload scripts. All three are still needed across environments.
+- Don't remove the preload scripts. `fix-koa-proxy.cjs` is actively load-bearing on the VPS; the Termux shims (`fix-cpus.cjs`, `fix-platform.cjs`) are inert on macOS but retained against a future return to Termux.
 - The `open-in-browser` script preloads both `fix-platform.cjs` and `fix-koa-proxy.cjs`. If you rewrite the script, preserve both `--require` flags.
 
 ### Commit style
