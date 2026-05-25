@@ -77,7 +77,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
 <body>
   <header class="page-header">
     <h1>Workspace snapshot</h1>
-    <p class="subtle">This file is managed automatically. It records the folders and settings of the current workspace so the next browser refresh can restore them silently. <strong>Do not hand-edit</strong> — changes are clobbered on the next topology event. Use the controls below, or <em>Reopen as text</em> for a raw view.</p>
+    <p class="subtle">This file is managed automatically. It records the folders and settings of the current workspace so they can be restored silently after a vscode.dev refresh (where workspace state is otherwise lost). On desktop VS Code the file is still captured — workspace state persists natively there, but keeping the snapshot current means you can switch a workspace between desktop and vscode.dev without losing it. <strong>Do not hand-edit</strong> — changes are clobbered on the next topology event. Use the controls below, or <em>Reopen as text</em> for a raw view.</p>
   </header>
 
   <div id="parse-error" class="banner warn" hidden></div>
@@ -122,7 +122,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
 
   <section class="actions">
     <button id="refresh" class="btn btn-primary" type="button" title="Recapture the current workspace and overwrite this file">Refresh from current workspace</button>
-    <button id="clear" class="btn btn-danger" type="button" title="Delete this file and clear the pointer — next refresh will land in a folderless tab">Clear snapshot</button>
+    <button id="clear" class="btn btn-danger" type="button" title="Delete this file and clear the pointer — on vscode.dev the next refresh will land in a folderless tab; on desktop this just discards the recorded snapshot">Clear snapshot</button>
     <button id="open-text" class="btn btn-secondary" type="button">Reopen as text</button>
   </section>
 

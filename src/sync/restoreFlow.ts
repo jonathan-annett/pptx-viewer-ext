@@ -11,6 +11,7 @@
 
 import * as vscode from 'vscode';
 import { log } from '../log';
+import { isWebHost } from '../host';
 import {
   captureCurrent,
   emptySnapshot,
@@ -43,6 +44,23 @@ export async function maybeRestore(
   context: vscode.ExtensionContext,
   store: SnapshotStore,
 ): Promise<void> {
+  // Desktop VS Code persists workspace folders natively across restarts, so
+  // re-mounting from the snapshot would either be redundant (folders are
+  // already there) or actively surprising (re-adding folders the user
+  // removed last session). The capture side — startSnapshotWriter — keeps
+  // running on desktop so the .admin-sync.jsonc file stays current; that
+  // way a user can switch a workspace from desktop to vscode.dev (where the
+  // restore IS needed) and find their snapshot intact. Defensively clear
+  // any leftover pending-settings flag from a previous web session in case
+  // this workspace gets moved between hosts.
+  if (!isWebHost()) {
+    if (context.globalState.get<boolean>(PENDING_SETTINGS_KEY)) {
+      await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
+      log('snapshot: desktop host — cleared stale pending-settings flag');
+    }
+    log('snapshot: desktop host — restore skipped (workspace persistence is native here)');
+    return;
+  }
   const pointer = store.getPointer();
   if (!pointer) {
     log('snapshot: no pointer, no restore');
@@ -415,9 +433,14 @@ export async function clearSnapshotCommand(
     void vscode.window.showInformationMessage('No workspace snapshot to clear.');
     return;
   }
+  const message = isWebHost()
+    ? 'Clear workspace snapshot? The .admin-sync.jsonc file will be deleted, ' +
+      'and the next browser refresh will land in a folderless tab.'
+    : 'Clear workspace snapshot? The .admin-sync.jsonc file will be deleted. ' +
+      'Your currently open folders are unaffected — desktop VS Code persists ' +
+      'them natively. The snapshot will be re-captured on the next topology change.';
   const choice = await vscode.window.showWarningMessage(
-    'Clear workspace snapshot? The .admin-sync.jsonc file will be deleted, ' +
-      'and the next browser refresh will land in a folderless tab.',
+    message,
     { modal: true },
     'Clear',
   );

@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { PptxEditorProvider } from './provider';
 import { PdfEditorProvider } from './pdfViewer';
 import { initLog, log } from './log';
+import { isWebHost } from './host';
 import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
@@ -86,8 +87,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // sync.jsonc (custom), plain text, and notebooks; diffs / terminals /
   // webviews are not restorable. Fire-and-forget — failures (file
   // moved/deleted, view-type gone) surface only in the log.
+  //
+  // Desktop VS Code persists open editor tabs natively across restarts, so
+  // replaying our captured tab there would race the native restore and
+  // potentially re-open a file the user closed last session. The tracker
+  // (startActiveTabTracker, started further below) still runs on desktop
+  // so the captured tab stays current — that way a user moving a
+  // workspace from desktop into vscode.dev still has a fresh marker to
+  // replay from.
   migrateLegacyActiveTabKey(context);
-  void restoreLastActiveTab(context);
+  if (isWebHost()) {
+    void restoreLastActiveTab(context);
+  } else {
+    log('restore: desktop host — last-active-tab replay skipped (native tab persistence)');
+  }
 
   // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
   // if missing — destinations are read-only by default; the source folder
