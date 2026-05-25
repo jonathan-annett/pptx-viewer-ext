@@ -241,11 +241,27 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       // the existing parse+hash work already on this path.
       const placeholders = await getActivePlaceholderSet();
       const isPlaceholder = placeholders.has(result.sha256);
-      const opts: RenderOptions = { syncTargetLoading: true };
+      const opts: RenderOptions = {};
+      // Skip the sync-target build entirely for placeholders. The viewer's
+      // job for a stub deck is to confirm "yes, still a stub" — the workspace
+      // plan view (with its [P] chip on the matching row) is the right place
+      // to see sync state for placeholder files, and the per-file build
+      // would otherwise spin up a 24-file walk + dest hashing for what's
+      // ultimately a sub-second confirmation glance. Leaving syncTargetLoading
+      // unset means the section never renders, no "Computing…" flash.
+      if (!isPlaceholder) opts.syncTargetLoading = true;
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
       if (isPlaceholder) opts.isPlaceholder = true;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
       currentResult = result;
+
+      if (isPlaceholder) {
+        // Bump the build token so any in-flight build from a previous
+        // (non-placeholder) render of this panel gets discarded when it
+        // resolves, and skip kicking off a fresh one.
+        ++syncTargetBuildToken;
+        return;
+      }
 
       // 2. Background build — when it lands, post a sync-target-html
       //    message; the webview swaps it into the placeholder section
