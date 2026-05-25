@@ -235,8 +235,15 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       lastPerFileBlocking = 0;
       lastPerFileHasWork = false;
       lastPerFileDecisions = new Map();
+      // Placeholder lookup — async but always safe (the registry returns the
+      // empty-default set when the workspace is folderless or the registry
+      // hasn't loaded yet). One extra await pre-render is cost-free given
+      // the existing parse+hash work already on this path.
+      const placeholders = await getActivePlaceholderSet();
+      const isPlaceholder = placeholders.has(result.sha256);
       const opts: RenderOptions = { syncTargetLoading: true };
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
+      if (isPlaceholder) opts.isPlaceholder = true;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
       currentResult = result;
 

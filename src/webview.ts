@@ -58,6 +58,15 @@ export interface RenderOptions {
    *  successful Update / drop-confirm to surface "Updated" without needing
    *  the new script to receive a postMessage that may race the re-render. */
   initialStatus?: string;
+  /**
+   * True when this file's sha256 matches the workspace placeholder set
+   * (empty-file default + user-added shas in `.admin-sync.jsonc`). Replaces
+   * the corrupt-file warn banner with an info banner reading "This is a
+   * placeholder file — content not yet uploaded." and suppresses the three
+   * validation flags (which are meaningless for placeholder content).
+   * Resolved by the wired provider via the placeholder registry.
+   */
+  isPlaceholder?: boolean;
 }
 
 export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = {}): string {
@@ -73,14 +82,27 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     ['Embedded media', formatMedia(r.embeddedMedia)],
   ];
 
-  const errorBanner = r.parseError
+  // Banner precedence — placeholder wins over corrupt, and replaces the
+  // validation section regardless of parseError:
+  //   isPlaceholder=true              → info banner; no corrupt banner; no
+  //                                     validation flags (meaningless for a
+  //                                     stub deck whose bytes the operator
+  //                                     deliberately ignores).
+  //   isPlaceholder=false + parseError → existing red corrupt banner; no
+  //                                      validation flags (we couldn't parse).
+  //   isPlaceholder=false + no error   → normal viewer.
+  const errorBanner = opts.isPlaceholder
+    ? `<div class="banner info">This is a placeholder file — content not yet uploaded.</div>`
+    : r.parseError
     ? `<div class="banner warn">${escapeHtml(r.parseError)}</div>`
     : '';
 
   // Validation section is dropped when parsing failed — the three OK/WARN
   // flags rely on having parsed the deck, so reading "OK Linked media" off
-  // a file we couldn't unzip would just be misleading.
-  const validationSection = r.parseError
+  // a file we couldn't unzip would just be misleading. Also dropped for
+  // placeholders — the flags would describe the stub template's properties,
+  // not anything the user cares about.
+  const validationSection = opts.isPlaceholder || r.parseError
     ? ''
     : `<section>
       <h2>Validation</h2>

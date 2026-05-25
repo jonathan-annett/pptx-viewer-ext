@@ -96,6 +96,58 @@ test('renderHtml: parseError surfaces as a warn banner', () => {
   assert.ok(html.includes('Could not unzip'), 'error text present');
 });
 
+// ───── placeholder banner (M6) ──────────────────────────────────────────
+
+test('renderHtml: isPlaceholder=true emits the info banner', () => {
+  const html = renderHtml(parseResult(), NONCE, { isPlaceholder: true });
+  assert.ok(html.includes('banner info'), 'info banner class present');
+  assert.ok(/This is a placeholder file/.test(html), 'placeholder copy present');
+});
+
+test('renderHtml: isPlaceholder=true suppresses the validation section even when parseable', () => {
+  const html = renderHtml(parseResult(), NONCE, { isPlaceholder: true });
+  assert.ok(!/>Validation</.test(html), 'no Validation heading');
+  assert.ok(!html.includes('class="flag pass"'), 'no pass flag li');
+  assert.ok(!html.includes('class="flag warn"'), 'no warn flag li');
+});
+
+test('renderHtml: isPlaceholder=true + parseError suppresses the corrupt banner (placeholder wins)', () => {
+  const html = renderHtml(
+    parseResult({ parseError: 'ZIP corrupt' }),
+    NONCE,
+    { isPlaceholder: true },
+  );
+  assert.ok(html.includes('banner info'), 'info banner shown');
+  assert.ok(!html.includes('banner warn'), 'warn banner suppressed');
+  assert.ok(!html.includes('ZIP corrupt'), 'corrupt message text not shown');
+});
+
+test('renderHtml: isPlaceholder=false + parseError keeps the existing corrupt banner (no regression)', () => {
+  const html = renderHtml(
+    parseResult({ parseError: 'ZIP corrupt' }),
+    NONCE,
+    { isPlaceholder: false },
+  );
+  assert.ok(html.includes('banner warn'), 'warn banner present');
+  assert.ok(html.includes('ZIP corrupt'), 'corrupt message text present');
+  assert.ok(!html.includes('banner info'), 'no info banner');
+});
+
+test('renderHtml: isPlaceholder omitted preserves the existing corrupt + normal-viewer paths', () => {
+  // No isPlaceholder flag at all should behave exactly like the original
+  // calls (which is what every test above this section already asserts).
+  // This test is the explicit regression guard for "didn't accidentally
+  // change the default render path".
+  const cleanHtml = renderHtml(parseResult(), NONCE);
+  assert.ok(/>Validation</.test(cleanHtml), 'validation shown on clean parse');
+  assert.ok(!cleanHtml.includes('banner info'), 'no info banner on clean parse');
+  assert.ok(!cleanHtml.includes('banner warn'), 'no warn banner on clean parse');
+
+  const corruptHtml = renderHtml(parseResult({ parseError: 'oops' }), NONCE);
+  assert.ok(corruptHtml.includes('banner warn'), 'warn banner on parseError');
+  assert.ok(!corruptHtml.includes('banner info'), 'no info banner on parseError');
+});
+
 // ───── sync target section ──────────────────────────────────────────────
 
 test('renderHtml: sync target section absent when syncTargetHtml omitted', () => {
