@@ -17,6 +17,7 @@ import {
   seedRememberedDecisions,
   type RowDecision,
 } from './decisions';
+import { getActivePlaceholderSet } from './placeholderRegistry';
 import { log } from '../log';
 
 /**
@@ -55,9 +56,10 @@ export async function openPlanPanel(
   );
   let plans: PlanForDestination[] = [];
   try {
+    const placeholders = await getActivePlaceholderSet();
     plans = opts?.scope
-      ? await buildScopedDryRunPlan(topology, opts.scope)
-      : await buildDryRunPlan(topology);
+      ? await buildScopedDryRunPlan(topology, { ...opts.scope, placeholders })
+      : await buildDryRunPlan(topology, { placeholders });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync: openPlan failed to build plan — ${message}`);

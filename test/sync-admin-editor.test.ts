@@ -9,7 +9,9 @@ import { strict as assert } from 'node:assert';
 import {
   renderAdminEditorHtml,
   type AdminEditorViewModel,
+  type PlaceholderRow,
 } from '../src/sync/adminEditorHtml';
+import { EMPTY_FILE_SHA256 } from '../src/sync/snapshot';
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
@@ -20,6 +22,9 @@ function baseVm(overrides: Partial<AdminEditorViewModel> = {}): AdminEditorViewM
   return {
     folders: [],
     settings: [],
+    placeholders: [
+      { sha256: EMPTY_FILE_SHA256, locked: true, label: '(default — zero-byte file)' },
+    ],
     capturedAt: '',
     pointerInfo: null,
     parseError: null,
@@ -132,6 +137,48 @@ test('header explains the file is managed automatically', () => {
   const html = renderAdminEditorHtml(baseVm(), 'n');
   assert.match(html, /managed automatically/i);
   assert.match(html, /Do not hand-edit/i);
+});
+
+// ───── placeholders card ──────────────────────────────────────────────────
+
+test('renders the Placeholders card section + add button', () => {
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  assert.match(html, /id="placeholders-card"/);
+  assert.match(html, /id="placeholder-list"/);
+  assert.match(html, /id="add-placeholder"/);
+  assert.match(html, /Add placeholder/);
+});
+
+test('init payload carries the locked default row even when no user entries exist', () => {
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  // The locked default row is constructed in the wired buildViewModel; the
+  // pure renderer accepts whatever's in the VM. baseVm() seeds the locked
+  // row, mirroring what the wired side will do.
+  assert.match(html, new RegExp(`"sha256":"${EMPTY_FILE_SHA256}","locked":true`));
+});
+
+test('init payload includes user placeholder entries unlocked, after the default', () => {
+  const placeholders: PlaceholderRow[] = [
+    { sha256: EMPTY_FILE_SHA256, locked: true, label: '(default — zero-byte file)' },
+    { sha256: 'aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899', locked: false },
+  ];
+  const html = renderAdminEditorHtml(baseVm({ placeholders }), 'n');
+  assert.match(
+    html,
+    /"sha256":"aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899","locked":false/,
+  );
+});
+
+test('placeholder hashes are JSON-encoded plainly (hex only, no escape needed)', () => {
+  // Sanity check: hashes are lowercase hex so escapeHtml / JSON escape has
+  // nothing to do. Catches a future regression where a hash field accidentally
+  // becomes user-supplied text and would need explicit escaping.
+  const placeholders: PlaceholderRow[] = [
+    { sha256: EMPTY_FILE_SHA256, locked: true, label: '(default — zero-byte file)' },
+    { sha256: 'deadbeef'.repeat(8), locked: false },
+  ];
+  const html = renderAdminEditorHtml(baseVm({ placeholders }), 'n');
+  assert.match(html, /"sha256":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"/);
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

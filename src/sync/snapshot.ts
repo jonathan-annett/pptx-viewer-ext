@@ -36,8 +36,45 @@ export interface Snapshot {
   folders: SnapshotFolder[];
   /** Workspace-target settings, keyed by dotted setting name. */
   settings: SnapshotSettings;
+  /** User-managed sha256 hex strings (lowercase) treated as placeholder files. The empty-file sha is implicit and not stored here. */
+  placeholders: string[];
   /** ISO timestamp at capture. Diagnostic; not used for content equality. */
   capturedAt: string;
+}
+
+/**
+ * Well-known sha256 of an empty byte sequence. Always treated as a placeholder
+ * (Windows Explorer's "New PowerPoint Presentation" produces a zero-byte file
+ * and operators rely on that workflow). Lives only in the consumer set
+ * produced by `effectivePlaceholderSet`; never written to the on-disk array,
+ * so the "cannot remove the default" UX is a property of the UI rather than
+ * special-case writer logic.
+ */
+export const EMPTY_FILE_SHA256 =
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/**
+ * The set of sha256 hashes a consumer (viewer, planner) should treat as
+ * placeholders. Always contains EMPTY_FILE_SHA256; user entries are added
+ * lowercased for case-insensitive membership checks.
+ */
+export function effectivePlaceholderSet(snapshot: Snapshot | null): Set<string> {
+  const set = new Set<string>([EMPTY_FILE_SHA256]);
+  if (snapshot) {
+    for (const h of snapshot.placeholders) set.add(h.toLowerCase());
+  }
+  return set;
+}
+
+/**
+ * Pure helper: text → effective placeholder set. Lives here (rather than in
+ * placeholderRegistry.ts) so it can be tested under plain Node — the registry
+ * itself touches vscode.workspace. The registry wraps this for its disk read
+ * path; consumers should go through the registry, not this helper directly.
+ */
+export function computeEffectiveSetFromText(text: string): Set<string> {
+  const { snapshot } = parseSnapshot(text);
+  return effectivePlaceholderSet(snapshot);
 }
 
 /** GlobalState pointer record. Stored under `folderSync.snapshotPointer`. */
@@ -91,6 +128,7 @@ export function marshalSnapshot(snapshot: Snapshot): string {
     {
       folders: snapshot.folders,
       settings: snapshot.settings,
+      placeholders: snapshot.placeholders,
       capturedAt: snapshot.capturedAt,
     },
     null,
@@ -128,17 +166,23 @@ export function parseSnapshot(text: string): ParseSnapshotResult {
 
   const folders = readFolders(tree, errors);
   const settings = readSettings(tree, errors);
+  const placeholders = readPlaceholders(tree, errors);
   const capturedAt = readString(tree, 'capturedAt') ?? '';
 
   return {
-    snapshot: { folders, settings, capturedAt },
+    snapshot: { folders, settings, placeholders, capturedAt },
     errors,
   };
 }
 
 /** Empty snapshot with capturedAt set to the unix epoch. */
 export function emptySnapshot(): Snapshot {
-  return { folders: [], settings: {}, capturedAt: '1970-01-01T00:00:00.000Z' };
+  return {
+    folders: [],
+    settings: {},
+    placeholders: [],
+    capturedAt: '1970-01-01T00:00:00.000Z',
+  };
 }
 
 /**
@@ -162,6 +206,11 @@ export function snapshotsEqual(a: Snapshot, b: Snapshot): boolean {
     if (stableStringify(a.settings[aKeys[i]]) !== stableStringify(b.settings[bKeys[i]])) {
       return false;
     }
+  }
+  if (a.placeholders.length !== b.placeholders.length) return false;
+  const aPlaceholders = new Set(a.placeholders.map((s) => s.toLowerCase()));
+  for (const h of b.placeholders) {
+    if (!aPlaceholders.has(h.toLowerCase())) return false;
   }
   return true;
 }
@@ -188,6 +237,26 @@ function readFolders(root: Node, errors: string[]): SnapshotFolder[] {
       continue;
     }
     out.push({ uri, name: typeof name === 'string' ? name : uri });
+  }
+  return out;
+}
+
+function readPlaceholders(root: Node, errors: string[]): string[] {
+  const node = findChild(root, 'placeholders');
+  if (!node) return [];
+  if (node.type !== 'array') {
+    errors.push('placeholders is not an array');
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of node.children ?? []) {
+    if (item.type !== 'string') {
+      errors.push('placeholders entry is not a string');
+      continue;
+    }
+    const raw = item.value as string;
+    if (raw.length === 0) continue;
+    out.push(raw.toLowerCase());
   }
   return out;
 }

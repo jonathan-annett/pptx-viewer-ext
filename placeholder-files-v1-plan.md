@@ -1,5 +1,13 @@
 # Placeholder files — v1 plan
 
+## Progress log
+
+- **2026-05-26 — M1 complete.** Snapshot schema extended (`placeholders: string[]`); `EMPTY_FILE_SHA256`, `effectivePlaceholderSet`, `computeEffectiveSetFromText` exported from `src/sync/snapshot.ts`; `parseSnapshot` lowercases on read + defaults to `[]`; `marshalSnapshot` always emits the field; `snapshotsEqual` uses set-membership compare. 8 new tests in `test/sync-snapshot.test.ts`.
+- **2026-05-26 — M2.1 complete.** `captureCurrent()` accepts `existingPlaceholders`; new `readPlaceholdersFromDisk()` helper in `snapshotStore.ts`; topology writer (`startSnapshotWriter`) and `captureAndWriteSnapshot()` in `restoreFlow.ts` now read on-disk placeholders before recapture, preserving the array across folder renames / Refresh.
+- **2026-05-26 — M2.2 complete.** `PlaceholderRow` type + Placeholders card (locked default + user rows, themed `[x]` button, "Add placeholder…" button) in `adminEditorHtml.ts`. `adminEditor.ts` builds the rows from the parsed snapshot, hashes picked samples via `hashFileAtUri(vscodeFs(), …)`, mutates the on-disk array through `store.writeSnapshot` (open-document path so the editor panel stays alive). 4 new renderer tests.
+- **2026-05-26 — M3 complete.** New `src/sync/placeholderRegistry.ts` (FileSystemWatcher on `.admin-sync.jsonc`, async/sync cache accessors, `onDidChangePlaceholderSet` event, workspace-folder topology subscription). Pure helper `computeEffectiveSetFromText` colocated in `snapshot.ts` so it stays tsx-testable. Wired into `extension.ts` activation. 5 tests in `test/sync-placeholder-registry.test.ts`.
+- **2026-05-26 — M4 complete.** `PlanItem.isPlaceholder?` added; `classifyFiles` accepts an optional `placeholders: Set<string>` and annotates each item by category-appropriate identity hash (`sourceHash ?? destHash ?? manifestHash`). New `BuildPlanOptions` on `buildDryRunPlan` / `buildScopedDryRunPlan` threads the set through. Call sites updated: `planView.openPlanPanel`, `adminEditor` embedded plan, `configEditor` embedded plan, `provider.renderScopedPlan` + `renderScopedPlanForDestination`, and the `folderSync.dryRunPlan` command — each fetches via `getActivePlaceholderSet()` immediately before building. 6 new tests in `test/sync-plan.test.ts` + 1 in `test/sync-scoped-plan.test.ts`.
+
 ## Context
 
 Event planning often produces `.pptx` files long before the actual content lands. Operators create stubs so hyperlinks, agenda slots, and folder structure can be defined up-front; the presenter delivers the real deck later. Two shapes show up in practice:

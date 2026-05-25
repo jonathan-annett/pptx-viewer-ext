@@ -27,6 +27,10 @@ import {
   showSnapshotCommand,
   startSnapshotWriter,
 } from './sync/restoreFlow';
+import {
+  activatePlaceholderRegistry,
+  getActivePlaceholderSet,
+} from './sync/placeholderRegistry';
 import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
@@ -163,6 +167,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     startSnapshotWriter(snapshotStore, (listener) => manager.onDidChange(listener)),
   );
+
+  // Placeholder registry — workspace-wide cache of "is this sha a placeholder?".
+  // Reads .admin-sync.jsonc's `placeholders: string[]` (plus the implicit
+  // empty-file default), invalidates on file change or workspace topology
+  // change. Consumers: planner classifier, viewer banner, scoped plans.
+  context.subscriptions.push(activatePlaceholderRegistry(context));
   createStatusBarItem(context, manager);
   // M6 — context key drives the Explorer context-menu visibility for
   // "Sync This Folder". We grey the menu entry out (via a `when` clause in
@@ -198,7 +208,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('folderSync.dryRunPlan', async () => {
       log('sync: dryRunPlan invoked');
       try {
-        const plans = await buildDryRunPlan(manager.getTopology());
+        const placeholders = await getActivePlaceholderSet();
+        const plans = await buildDryRunPlan(manager.getTopology(), { placeholders });
         for (const line of formatDryRunPlan(plans).split('\n')) log(line);
       } catch (err) {
         log(`sync: dryRunPlan failed — ${err instanceof Error ? err.message : String(err)}`);

@@ -433,6 +433,83 @@ test('update-tracked: ignores manifest.decisions (only collisions consult it)', 
   assert.equal(it?.remembered, undefined);
 });
 
+// ───── M-placeholders: per-item isPlaceholder flag ───────────────────────
+
+test('create item flagged when sourceHash is in the placeholder set', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [file('stub.pptx', 'sha-zero')],
+    [],
+    emptyManifest(),
+    new Set<string>(['sha-zero']),
+  );
+  assert.equal(find(items, 'stub.pptx')?.isPlaceholder, true);
+});
+
+test('update-tracked item flagged via its sourceHash', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [file('stub.pptx', 'sha-zero')],
+    [file('stub.pptx', 'sha-old')],
+    manifestOf([{ relPath: 'stub.pptx', entry: entry('sha-old', 'stub.pptx') }]),
+    new Set<string>(['sha-zero']),
+  );
+  const it = find(items, 'stub.pptx');
+  assert.equal(it?.kind, 'update-tracked');
+  assert.equal(it?.isPlaceholder, true);
+});
+
+test('destination-only item flagged via its destHash', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [],
+    [file('orphan.pptx', 'sha-zero')],
+    emptyManifest(),
+    new Set<string>(['sha-zero']),
+  );
+  const it = find(items, 'orphan.pptx');
+  assert.equal(it?.kind, 'destination-only');
+  assert.equal(it?.isPlaceholder, true);
+});
+
+test('delete-tracked item flagged via its manifestHash', () => {
+  // Source removed the file; manifest still knows it. The identity-hash for
+  // this category is manifestHash, since there's no current source/dest read.
+  const items = classifyFiles(
+    SOURCE,
+    [],
+    [],
+    manifestOf([{ relPath: 'stub.pptx', entry: entry('sha-zero', 'stub.pptx') }]),
+    new Set<string>(['sha-zero']),
+  );
+  const it = find(items, 'stub.pptx');
+  assert.equal(it?.kind, 'delete-tracked');
+  assert.equal(it?.isPlaceholder, true);
+});
+
+test('item with no matching hash is not flagged', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [file('a.txt', 'unrelated')],
+    [],
+    emptyManifest(),
+    new Set<string>(['sha-zero']),
+  );
+  assert.equal(find(items, 'a.txt')?.isPlaceholder, undefined);
+});
+
+test('empty placeholder set leaves all items unflagged', () => {
+  const items = classifyFiles(
+    SOURCE,
+    [file('a.txt', 'sha-zero'), file('b.txt', 'h2')],
+    [],
+    emptyManifest(),
+  );
+  for (const it of items) {
+    assert.equal(it.isPlaceholder, undefined, `${it.relPath} should not be flagged`);
+  }
+});
+
 // ───── run ────────────────────────────────────────────────────────────────
 
 let failed = 0;

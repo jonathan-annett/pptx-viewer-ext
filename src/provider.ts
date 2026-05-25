@@ -29,6 +29,7 @@ import {
   type PreviewWorkspaceFolder,
 } from './sync/previewContext';
 import { buildScopedDryRunPlan, type PlanForDestination } from './sync/planner';
+import { getActivePlaceholderSet } from './sync/placeholderRegistry';
 import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
@@ -1221,10 +1222,12 @@ async function renderScopedPlan(
   attribution: { kind: 'source'; workspaceFolderName: string; relPath: string },
 ): Promise<SyncTargetResult> {
   try {
+    const placeholders = await getActivePlaceholderSet();
     const plans = await buildScopedDryRunPlan(manager.getTopology(), {
       sourceConfigUri: vscode.Uri.parse(sourceConfigUri),
       pathFilter: documentUri,
       pathFilterIsFile: true,
+      placeholders,
     });
     // M5.1: per-row decision checkboxes are wired through to the viewer's
     // postMessage channel — same as the admin/config editors. Collisions get
@@ -1269,10 +1272,12 @@ async function renderScopedPlanForDestination(
     const pathFilter = source.sourceFolderUri.with({
       path: joinPath(source.sourceFolderUri.path, ctx.sourceRelPath),
     });
+    const placeholders = await getActivePlaceholderSet();
     const plans = await buildScopedDryRunPlan(topology, {
       sourceConfigUri: source.configUri,
       pathFilter,
       pathFilterIsFile: true,
+      placeholders,
     });
     // M5.1: same interactive treatment as the source-side scoped plan.
     const vm = toViewModel(

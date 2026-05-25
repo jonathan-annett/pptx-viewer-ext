@@ -27,6 +27,7 @@ import {
 } from './planHtml';
 import type { PlanForDestination } from './planner';
 import { buildScopedDryRunPlan } from './planner';
+import { getActivePlaceholderSet } from './placeholderRegistry';
 import { runSync, formatRunSummary } from './runSync';
 import {
   countAccepted,
@@ -94,8 +95,10 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
       const myToken = ++planRunToken;
       void panel.webview.postMessage({ type: 'planStatus', status: 'scanning' });
       try {
+        const placeholders = await getActivePlaceholderSet();
         const plans = await buildScopedDryRunPlan(this.manager.getTopology(), {
           sourceConfigUri: document.uri,
+          placeholders,
         });
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;

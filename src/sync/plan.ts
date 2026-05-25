@@ -98,6 +98,20 @@ export interface PlanItem {
    * remembered rows into the executor without requiring a fresh user toggle.
    */
   remembered?: { accepted: boolean };
+  /**
+   * True when the file's identity-hash matches a sha in the workspace
+   * placeholder set (the empty-file default + user-added entries from
+   * `.admin-sync.jsonc`). Plan view shows a [P] chip on these rows; the file
+   * still flows through sync like any other artifact.
+   *
+   * The identity hash used per category:
+   *   create, update-*, skip → sourceHash
+   *   destination-only       → destHash
+   *   delete-tracked         → manifestHash
+   * Items with no recorded hash (shouldn't happen in practice) are never
+   * flagged.
+   */
+  isPlaceholder?: boolean;
 }
 
 /**
@@ -112,6 +126,7 @@ export function classifyFiles(
   sourceFiles: readonly FileInfo[],
   destFiles: readonly FileInfo[],
   manifest: Manifest,
+  placeholders: Set<string> = new Set<string>(),
 ): PlanItem[] {
   const items: PlanItem[] = [];
   const sourceMap = new Map(sourceFiles.map((f) => [f.relPath, f]));
@@ -228,6 +243,20 @@ export function classifyFiles(
       destHash: destFile.sha256,
       ...remembered,
     });
+  }
+
+  // 4. Annotate placeholder status by the identity hash for each item's
+  //    category. The ?? chain produces the right precedence naturally —
+  //    `sourceHash` for create/update/skip, `destHash` for destination-only,
+  //    `manifestHash` for delete-tracked. Skipping the work when the set is
+  //    empty keeps the no-placeholder case (most plans) free of overhead.
+  if (placeholders.size > 0) {
+    for (const item of items) {
+      const identityHash = item.sourceHash ?? item.destHash ?? item.manifestHash;
+      if (identityHash && placeholders.has(identityHash)) {
+        item.isPlaceholder = true;
+      }
+    }
   }
 
   return items;

@@ -39,9 +39,27 @@ export interface AdminEditorPointerInfo {
   lastWriteAt: string;
 }
 
+/**
+ * One row in the Placeholders card. The locked default row (empty-file sha)
+ * is rendered without an `[x]`; user-added rows are removable. The locked
+ * default is a UI property only — it isn't stored in the on-disk array,
+ * which means a malicious or scripted remove of EMPTY_FILE_SHA256 just no-ops
+ * naturally (the filter doesn't find it).
+ */
+export interface PlaceholderRow {
+  /** Lowercase hex sha256. */
+  sha256: string;
+  /** True for the empty-file default; no [x] is rendered. */
+  locked: boolean;
+  /** Suffix label for the row, e.g. "(default — zero-byte file)". */
+  label?: string;
+}
+
 export interface AdminEditorViewModel {
   folders: AdminEditorFolder[];
   settings: AdminEditorSettingSummary[];
+  /** Placeholders card rows (locked default first, then user entries). */
+  placeholders: PlaceholderRow[];
   /** ISO timestamp from the snapshot body. Empty when unavailable. */
   capturedAt: string;
   /** GlobalState pointer info, or null when there is no pointer. */
@@ -61,6 +79,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
   const initialPayload = JSON.stringify({
     folders: vm.folders,
     settings: vm.settings,
+    placeholders: vm.placeholders,
     capturedAt: vm.capturedAt,
     pointerInfo: vm.pointerInfo,
     parseError: vm.parseError,
@@ -102,6 +121,15 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
     <p class="hint">Workspace-scope settings captured at snapshot time. v1 captures a known-key allowlist (<code>files.readonlyInclude</code>, <code>files.readonlyExclude</code>); other keys are restored if present but flagged as unknown for follow-up.</p>
     <ul id="setting-list" class="setting-list"></ul>
     <p id="setting-empty" class="hint" hidden><em>No settings captured.</em></p>
+  </section>
+
+  <section class="card" id="placeholders-card">
+    <h2 id="placeholders-heading">Placeholders</h2>
+    <p class="hint">Files matching these sha256 hashes are treated as placeholders in plans and the viewer. The zero-byte default lets Windows Explorer "New PowerPoint Presentation" stubs flow through sync as placeholders. Add a sample to register a custom blank-template deck — its sha256 is captured and any file with that hash is then treated the same way.</p>
+    <ul id="placeholder-list" class="placeholder-list"></ul>
+    <div class="placeholder-actions">
+      <button id="add-placeholder" class="btn btn-secondary btn-sm" type="button" title="Pick a sample .pptx — its sha256 is added to the placeholders list">Add placeholder…</button>
+    </div>
   </section>
 
   <section class="card plan-card">
@@ -284,6 +312,50 @@ input[type="text"] {
 }
 .actions { display: flex; gap: 8px; margin: 16px 0 8px; flex-wrap: wrap; }
 .editing { background: var(--vscode-editor-selectionBackground, rgba(127,127,127,0.15)); }
+.placeholder-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px;
+}
+.placeholder-list li {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.15));
+}
+.placeholder-list li:last-child { border-bottom: none; }
+.placeholder-row.locked { opacity: 0.7; }
+.placeholder-sha {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+  word-break: break-all;
+}
+.placeholder-label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+.placeholder-list .remove-btn {
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-button-border, rgba(127,127,127,0.4));
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 0.85em;
+  cursor: pointer;
+  font-family: var(--vscode-font-family);
+}
+.placeholder-list .remove-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.15));
+}
+.placeholder-empty {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  font-style: italic;
+  margin: 4px 0 8px;
+}
+.placeholder-actions { display: flex; gap: 8px; margin-top: 6px; }
 `;
 
 // Styles that complement planContentStyles() inside the embedded plan card.
@@ -389,6 +461,8 @@ const CLIENT_JS = `
   const folderEmptyEl = document.getElementById('folder-empty');
   const settingListEl = document.getElementById('setting-list');
   const settingEmptyEl = document.getElementById('setting-empty');
+  const placeholderListEl = document.getElementById('placeholder-list');
+  const placeholdersHeadingEl = document.getElementById('placeholders-heading');
 
   function renderAll() {
     if (state.parseError) {
@@ -415,6 +489,18 @@ const CLIENT_JS = `
     } else {
       settingEmptyEl.hidden = true;
       state.settings.forEach((s) => settingListEl.appendChild(renderSettingRow(s)));
+    }
+
+    placeholderListEl.innerHTML = '';
+    const placeholders = state.placeholders || [];
+    placeholdersHeadingEl.textContent = 'Placeholders (' + placeholders.length + ')';
+    if (placeholders.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'placeholder-empty';
+      empty.textContent = 'No placeholders.';
+      placeholderListEl.appendChild(empty);
+    } else {
+      placeholders.forEach((p) => placeholderListEl.appendChild(renderPlaceholderRow(p)));
     }
   }
 
@@ -488,6 +574,39 @@ const CLIENT_JS = `
     return li;
   }
 
+  function renderPlaceholderRow(row) {
+    const li = document.createElement('li');
+    li.className = 'placeholder-row' + (row.locked ? ' locked' : '');
+
+    const shaEl = document.createElement('span');
+    shaEl.className = 'placeholder-sha';
+    shaEl.textContent = row.sha256.slice(0, 12) + '…';
+    shaEl.title = row.sha256;
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'placeholder-label';
+    labelEl.textContent = row.label || '';
+
+    const actionEl = document.createElement('div');
+    if (!row.locked) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'remove-btn';
+      btn.textContent = '×';
+      btn.title = 'Remove placeholder';
+      btn.setAttribute('aria-label', 'Remove placeholder ' + row.sha256);
+      btn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'removePlaceholder', sha256: row.sha256 });
+      });
+      actionEl.appendChild(btn);
+    }
+
+    li.appendChild(shaEl);
+    li.appendChild(labelEl);
+    li.appendChild(actionEl);
+    return li;
+  }
+
   function renderSettingRow(s) {
     const li = document.createElement('li');
     const keyEl = document.createElement('span');
@@ -519,6 +638,9 @@ const CLIENT_JS = `
     renderAll();
   }
 
+  document.getElementById('add-placeholder').addEventListener('click', () => {
+    vscode.postMessage({ type: 'addPlaceholderFromSample' });
+  });
   document.getElementById('refresh').addEventListener('click', () => {
     vscode.postMessage({ type: 'refreshSnapshot' });
   });

@@ -153,8 +153,14 @@ export function snapshotUri(folderUri: vscode.Uri): vscode.Uri {
  *
  * Settings capture is currently restricted to KNOWN_WORKSPACE_KEYS. See
  * the comment on that constant in ./snapshot.ts for why.
+ *
+ * `existingPlaceholders` is copied verbatim into the returned snapshot.
+ * Placeholders are not derived from vscode state — they live only on disk
+ * and need to round-trip through recapture (topology writer, Refresh
+ * button) without being wiped. The callers in restoreFlow.ts read the
+ * current array off disk via `readPlaceholdersFromDisk` and pass it here.
  */
-export function captureCurrent(): Snapshot | undefined {
+export function captureCurrent(existingPlaceholders: string[] = []): Snapshot | undefined {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return undefined;
 
@@ -175,8 +181,34 @@ export function captureCurrent(): Snapshot | undefined {
   return {
     folders: snapFolders,
     settings,
+    placeholders: [...existingPlaceholders],
     capturedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Read the `placeholders` array off the on-disk `.admin-sync.jsonc`. Returns
+ * an empty array if the file doesn't exist or fails to parse. Used by the
+ * recapture callers so that rebuilding a snapshot from vscode state doesn't
+ * silently drop the user's placeholder entries (vscode doesn't model them
+ * at all — they live only on disk).
+ */
+export async function readPlaceholdersFromDisk(folderUri: vscode.Uri): Promise<string[]> {
+  const target = snapshotUri(folderUri);
+  let bytes: Uint8Array;
+  try {
+    bytes = await vscode.workspace.fs.readFile(target);
+  } catch {
+    return [];
+  }
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return [];
+  }
+  const { snapshot } = parseSnapshot(text);
+  return [...snapshot.placeholders];
 }
 
 function errMsg(err: unknown): string {

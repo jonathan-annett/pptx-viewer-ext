@@ -6,7 +6,9 @@
 
 import { strict as assert } from 'node:assert';
 import {
+  effectivePlaceholderSet,
   emptySnapshot,
+  EMPTY_FILE_SHA256,
   marshalSnapshot,
   parseSnapshot,
   snapshotsEqual,
@@ -30,6 +32,7 @@ test('marshal then parse round-trips the canonical snapshot', () => {
       'files.readonlyInclude': { '**/*.pptx': true },
       'files.readonlyExclude': { '**/Plenary 1/**': true },
     },
+    placeholders: ['abc123', 'def456'],
     capturedAt: '2026-05-19T03:13:45.955Z',
   };
   const text = marshalSnapshot(snapshot);
@@ -70,9 +73,30 @@ test('parse defaults missing fields rather than throwing', () => {
   const { snapshot, errors } = parseSnapshot('{}');
   assert.deepEqual(snapshot.folders, []);
   assert.deepEqual(snapshot.settings, {});
+  assert.deepEqual(snapshot.placeholders, []);
   assert.equal(snapshot.capturedAt, '');
   // The empty object is a structurally-valid snapshot — no errors expected.
   assert.deepEqual(errors, []);
+});
+
+test('parse preserves a populated placeholders array', () => {
+  const text = `{ "placeholders": ["aaaaaa", "bbbbbb"] }`;
+  const { snapshot, errors } = parseSnapshot(text);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(snapshot.placeholders, ['aaaaaa', 'bbbbbb']);
+});
+
+test('parse lowercases mixed-case placeholder hashes', () => {
+  const text = `{ "placeholders": ["AaBbCc", "DEADBEEF"] }`;
+  const { snapshot } = parseSnapshot(text);
+  assert.deepEqual(snapshot.placeholders, ['aabbcc', 'deadbeef']);
+});
+
+test('parse defaults placeholders to [] when the field is absent (legacy file)', () => {
+  const text = `{ "folders": [{ "uri": "file:///x", "name": "x" }], "settings": {} }`;
+  const { snapshot, errors } = parseSnapshot(text);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(snapshot.placeholders, []);
 });
 
 test('parse reports an error when the root is not an object', () => {
@@ -125,6 +149,7 @@ test('snapshotsEqual ignores capturedAt', () => {
   const a: Snapshot = {
     folders: [{ uri: 'file:///x', name: 'x' }],
     settings: {},
+    placeholders: [],
     capturedAt: '2026-01-01T00:00:00.000Z',
   };
   const b: Snapshot = { ...a, capturedAt: '2026-12-31T23:59:59.000Z' };
@@ -135,6 +160,7 @@ test('snapshotsEqual detects folder uri/name changes', () => {
   const a: Snapshot = {
     folders: [{ uri: 'file:///x', name: 'X' }],
     settings: {},
+    placeholders: [],
     capturedAt: 'now',
   };
   const renamed: Snapshot = { ...a, folders: [{ uri: 'file:///x', name: 'Renamed' }] };
@@ -150,6 +176,7 @@ test('snapshotsEqual is order-sensitive on folders (workspaceFolders[0] is posit
       { uri: 'file:///y', name: 'Y' },
     ],
     settings: {},
+    placeholders: [],
     capturedAt: 'now',
   };
   const reordered: Snapshot = { ...a, folders: [a.folders[1], a.folders[0]] };
@@ -160,6 +187,7 @@ test('snapshotsEqual detects settings key add/remove/change', () => {
   const a: Snapshot = {
     folders: [],
     settings: { 'files.readonlyInclude': ['**/*.pptx'] },
+    placeholders: [],
     capturedAt: 'now',
   };
   const added: Snapshot = {
@@ -178,10 +206,57 @@ test('snapshotsEqual treats settings key-order as irrelevant', () => {
   const a: Snapshot = {
     folders: [],
     settings: { a: 1, b: 2 },
+    placeholders: [],
     capturedAt: 'now',
   };
   const reordered: Snapshot = { ...a, settings: { b: 2, a: 1 } };
   assert.ok(snapshotsEqual(a, reordered));
+});
+
+// ───── placeholders ───────────────────────────────────────────────────────
+
+test('snapshotsEqual returns true when placeholders differ in order only', () => {
+  const a: Snapshot = {
+    folders: [],
+    settings: {},
+    placeholders: ['aaa', 'bbb', 'ccc'],
+    capturedAt: 'now',
+  };
+  const reordered: Snapshot = { ...a, placeholders: ['ccc', 'aaa', 'bbb'] };
+  assert.ok(snapshotsEqual(a, reordered));
+});
+
+test('snapshotsEqual returns false when placeholders differ in membership', () => {
+  const a: Snapshot = {
+    folders: [],
+    settings: {},
+    placeholders: ['aaa', 'bbb'],
+    capturedAt: 'now',
+  };
+  const added: Snapshot = { ...a, placeholders: ['aaa', 'bbb', 'ccc'] };
+  const replaced: Snapshot = { ...a, placeholders: ['aaa', 'zzz'] };
+  assert.ok(!snapshotsEqual(a, added));
+  assert.ok(!snapshotsEqual(a, replaced));
+});
+
+test('effectivePlaceholderSet always includes EMPTY_FILE_SHA256', () => {
+  const set = effectivePlaceholderSet(null);
+  assert.equal(set.size, 1);
+  assert.ok(set.has(EMPTY_FILE_SHA256));
+});
+
+test('effectivePlaceholderSet adds user entries lowercased on top of the default', () => {
+  const snapshot: Snapshot = {
+    folders: [],
+    settings: {},
+    placeholders: ['DEADBEEF', 'cafebabe'],
+    capturedAt: 'now',
+  };
+  const set = effectivePlaceholderSet(snapshot);
+  assert.ok(set.has(EMPTY_FILE_SHA256));
+  assert.ok(set.has('deadbeef'));
+  assert.ok(set.has('cafebabe'));
+  assert.equal(set.size, 3);
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

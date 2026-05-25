@@ -85,13 +85,27 @@ export interface PlanParseCacheStats {
  */
 export async function buildDryRunPlan(
   topology: ResolvedTopology,
+  opts: BuildPlanOptions = {},
 ): Promise<PlanForDestination[]> {
+  const placeholders = opts.placeholders ?? new Set<string>();
   const results: PlanForDestination[] = [];
   for (const source of topology.sources) {
-    const planned = await planForSource(source, { kind: 'none' });
+    const planned = await planForSource(source, { kind: 'none' }, placeholders);
     results.push(...planned);
   }
   return results;
+}
+
+/**
+ * Workspace-level options shared by the workspace-wide and scoped builders.
+ *
+ * `placeholders` is the effective set from the placeholder registry (default
+ * empty-file sha + user entries from `.admin-sync.jsonc`). When omitted the
+ * classifier annotates nothing — convenient for tests and callers that don't
+ * care about the flag.
+ */
+export interface BuildPlanOptions {
+  placeholders?: Set<string>;
 }
 
 /**
@@ -111,6 +125,8 @@ export interface ScopedPlanOptions {
   sourceConfigUri: vscode.Uri;
   pathFilter?: vscode.Uri;
   pathFilterIsFile?: boolean;
+  /** See {@link BuildPlanOptions.placeholders}. */
+  placeholders?: Set<string>;
 }
 
 /**
@@ -146,7 +162,7 @@ export async function buildScopedDryRunPlan(
     scope = scopeFromRelPath(rel, isFile);
   }
 
-  return planForSource(source, scope);
+  return planForSource(source, scope, opts.placeholders ?? new Set<string>());
 }
 
 /**
@@ -157,6 +173,7 @@ export async function buildScopedDryRunPlan(
 async function planForSource(
   source: ResolvedSource,
   scope: Scope,
+  placeholders: Set<string>,
 ): Promise<PlanForDestination[]> {
   // The yaml's include/exclude only ever apply to the source tree —
   // the destination walk uses built-ins plus the same user excludes so
@@ -273,6 +290,7 @@ async function planForSource(
       scopedSourceFiles,
       scopedDestFiles,
       scopedManifest,
+      placeholders,
     );
     const summary = summarisePlan(items);
     // Diagnostics: merge the source-walk stats (paid once for this pair) with

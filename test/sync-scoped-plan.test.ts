@@ -257,6 +257,33 @@ test('scoped classification: file scope on a missing dest yields a single create
   assert.equal(items[0].kind, 'create');
 });
 
+test('scope filtering preserves the placeholder flag', () => {
+  // Placeholders are workspace-level — scoping in or out of a directory must
+  // not change which files inside scope get flagged.
+  const sourceFiles: FileInfo[] = [
+    file('src/utils/stub.pptx', 'sha-zero'),
+    file('src/utils/real.pptx', 'h-real'),
+    file('src/other/c.ts', 'h-other-c'),
+  ];
+  const scope: Scope = { kind: 'directory', relPrefix: 'src/utils' };
+  const items = classifyFiles(
+    SOURCE,
+    filterFilesToScope(sourceFiles, scope),
+    [],
+    emptyManifest(),
+    new Set<string>(['sha-zero']),
+  );
+  const stub = items.find((i) => i.relPath === 'src/utils/stub.pptx');
+  const real = items.find((i) => i.relPath === 'src/utils/real.pptx');
+  assert.equal(stub?.isPlaceholder, true, 'stub flagged inside scope');
+  assert.equal(real?.isPlaceholder, undefined, 'real not flagged');
+  assert.equal(
+    items.find((i) => i.relPath === 'src/other/c.ts'),
+    undefined,
+    'out-of-scope file dropped by filterFilesToScope',
+  );
+});
+
 // ───── run ────────────────────────────────────────────────────────────────
 
 let failed = 0;

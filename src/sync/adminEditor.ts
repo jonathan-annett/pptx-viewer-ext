@@ -24,10 +24,19 @@ import {
   renderAdminEditorHtml,
   type AdminEditorSettingSummary,
   type AdminEditorViewModel,
+  type PlaceholderRow,
 } from './adminEditorHtml';
-import { parseSnapshot, KNOWN_WORKSPACE_KEYS, type Snapshot } from './snapshot';
+import {
+  EMPTY_FILE_SHA256,
+  KNOWN_WORKSPACE_KEYS,
+  parseSnapshot,
+  type Snapshot,
+} from './snapshot';
 import { SnapshotStore } from './snapshotStore';
+import { hashFileAtUri } from './hash';
+import { vscodeFs } from './vscodeFs';
 import { captureAndWriteSnapshot } from './restoreFlow';
+import { getActivePlaceholderSet } from './placeholderRegistry';
 import {
   renderPlanChips,
   renderPlanPairs,
@@ -102,7 +111,8 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
       const myToken = ++planRunToken;
       void panel.webview.postMessage({ type: 'planStatus', status: 'scanning' });
       try {
-        const plans = await buildDryRunPlan(this.manager.getTopology());
+        const placeholders = await getActivePlaceholderSet();
+        const plans = await buildDryRunPlan(this.manager.getTopology(), { placeholders });
         if (disposed || myToken !== planRunToken) return; // stale
         lastPlans = plans;
         // Per the comment on `decisions` above: plan IDs may have shifted, so
@@ -185,6 +195,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
         }
         if (msg.type === 'renameFolder') {
           await this.renameFolder(msg.index, msg.name);
+        } else if (msg.type === 'addPlaceholderFromSample') {
+          await this.addPlaceholderFromSample(document);
+        } else if (msg.type === 'removePlaceholder') {
+          await this.removePlaceholder(document, msg.sha256);
         } else if (msg.type === 'refreshSnapshot') {
           await this.refreshSnapshot(panel, document);
           // Also kick off a plan rebuild — the snapshot capture itself doesn't
@@ -285,6 +299,101 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     const vm = buildViewModel(document, this.store);
     void panel.webview.postMessage({ type: 'docChanged', payload: vm });
   }
+
+  /**
+   * Pick a sample file via showOpenDialog, hash it, and append its sha256 to
+   * the placeholders array (deduped, lowercase). The empty-file sha is
+   * already implicit so we surface a hint and bail when the picked file is
+   * zero bytes.
+   */
+  private async addPlaceholderFromSample(document: vscode.TextDocument): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      openLabel: 'Pick placeholder sample',
+      filters: { 'PowerPoint': ['pptx', 'ppt'], 'All files': ['*'] },
+    });
+    if (!picked || picked.length === 0) return;
+    const uri = picked[0];
+    log(`admin-editor: hashing placeholder sample ${uri.toString()}`);
+
+    let sha256: string;
+    try {
+      const result = await hashFileAtUri(vscodeFs(), uri, undefined, { needBytes: false });
+      sha256 = result.sha256;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`admin-editor: hash failed — ${message}`);
+      void vscode.window.showErrorMessage(`Could not hash sample: ${message}`);
+      return;
+    }
+
+    if (sha256 === EMPTY_FILE_SHA256) {
+      void vscode.window.showInformationMessage(
+        'Zero-byte files are placeholders by default; no entry needed.',
+      );
+      return;
+    }
+
+    await this.mutatePlaceholders(document, (current) => {
+      const next = new Set(current.map((s) => s.toLowerCase()));
+      next.add(sha256.toLowerCase());
+      return [...next];
+    }, `added ${sha256.slice(0, 12)}…`);
+  }
+
+  /**
+   * Remove a sha from the placeholders array. The locked default sha is not
+   * in the on-disk array, so an attempt to remove it just doesn't find a
+   * match (no-op) — the lock is a UI property only.
+   */
+  private async removePlaceholder(
+    document: vscode.TextDocument,
+    sha256: string,
+  ): Promise<void> {
+    const target = sha256.toLowerCase();
+    await this.mutatePlaceholders(document, (current) => {
+      return current.filter((s) => s.toLowerCase() !== target);
+    }, `removed ${target.slice(0, 12)}…`);
+  }
+
+  /**
+   * Read the current document text, run a mutation on the placeholders
+   * array, marshal a fresh snapshot, and write through the store. Routes
+   * through writeSnapshot's open-document path (applyEdit + save) so this
+   * editor panel stays alive across the rewrite.
+   */
+  private async mutatePlaceholders(
+    document: vscode.TextDocument,
+    mutate: (current: string[]) => string[],
+    logSummary: string,
+  ): Promise<void> {
+    const text = document.getText();
+    const { snapshot, errors } = parseSnapshot(text);
+    for (const e of errors) log(`admin-editor: parse warning during placeholder mutation — ${e}`);
+    const next: Snapshot = {
+      ...snapshot,
+      placeholders: mutate(snapshot.placeholders),
+      capturedAt: new Date().toISOString(),
+    };
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      void vscode.window.showWarningMessage('No workspace folders open — cannot write snapshot.');
+      return;
+    }
+    const targetFolderUri = folders[0].uri;
+    try {
+      const finalUri = await this.store.writeSnapshot(targetFolderUri, next);
+      await this.store.setPointer({
+        uri: finalUri.toString(),
+        lastWriteAt: next.capturedAt,
+      });
+      log(`admin-editor: placeholders ${logSummary} (now ${next.placeholders.length} entr${next.placeholders.length === 1 ? 'y' : 'ies'})`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`admin-editor: placeholder write FAILED — ${message}`);
+      void vscode.window.showErrorMessage(`Could not write snapshot: ${message}`);
+    }
+  }
 }
 
 // ───── helpers ─────────────────────────────────────────────────────────
@@ -296,6 +405,8 @@ type WebviewMessage =
   | { type: 'openAsText' }
   | { type: 'refreshPlan' }
   | { type: 'runSync' }
+  | { type: 'addPlaceholderFromSample' }
+  | { type: 'removePlaceholder'; sha256: string }
   | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
 function buildViewModel(document: vscode.TextDocument, store: SnapshotStore): AdminEditorViewModel {
@@ -305,10 +416,27 @@ function buildViewModel(document: vscode.TextDocument, store: SnapshotStore): Ad
   return {
     folders: snapshot.folders.map((f) => ({ uri: f.uri, name: f.name })),
     settings: summariseSettings(snapshot),
+    placeholders: buildPlaceholderRows(snapshot),
     capturedAt: snapshot.capturedAt,
     pointerInfo: pointer ? { uri: pointer.uri, lastWriteAt: pointer.lastWriteAt } : null,
     parseError: errors.length > 0 ? errors.join('; ') : null,
   };
+}
+
+/**
+ * Locked default first, then user entries. The locked row is a UI property
+ * only — the empty-file sha is not stored in `snapshot.placeholders`, which
+ * means a stray remove of EMPTY_FILE_SHA256 naturally no-ops (the filter
+ * doesn't find it on disk).
+ */
+function buildPlaceholderRows(snapshot: Snapshot): PlaceholderRow[] {
+  const rows: PlaceholderRow[] = [
+    { sha256: EMPTY_FILE_SHA256, locked: true, label: '(default — zero-byte file)' },
+  ];
+  for (const sha of snapshot.placeholders) {
+    rows.push({ sha256: sha.toLowerCase(), locked: false });
+  }
+  return rows;
 }
 
 function summariseSettings(snapshot: Snapshot): AdminEditorSettingSummary[] {

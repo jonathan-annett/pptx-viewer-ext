@@ -15,6 +15,7 @@ import { isWebHost } from '../host';
 import {
   captureCurrent,
   emptySnapshot,
+  readPlaceholdersFromDisk,
   SnapshotStore,
   snapshotsEqual,
   snapshotUri,
@@ -293,12 +294,20 @@ export async function ensureWorkspaceLockSettings(): Promise<void> {
  * capture, throws on write failure.
  */
 export async function captureAndWriteSnapshot(store: SnapshotStore): Promise<Snapshot | undefined> {
-  const captured = captureCurrent();
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) {
+    log('snapshot: captureAndWriteSnapshot — no workspace folders, nothing to capture');
+    return undefined;
+  }
+  const targetUri = folders[0].uri;
+  // Preserve any user-added placeholder hashes; they're not derivable from
+  // vscode state and would otherwise be wiped on every Refresh.
+  const existingPlaceholders = await readPlaceholdersFromDisk(targetUri);
+  const captured = captureCurrent(existingPlaceholders);
   if (!captured) {
     log('snapshot: captureAndWriteSnapshot — no workspace folders, nothing to capture');
     return undefined;
   }
-  const targetUri = vscode.workspace.workspaceFolders![0].uri;
   const finalUri = await store.writeSnapshot(targetUri, captured);
   await store.setPointer({
     uri: finalUri.toString(),
@@ -342,7 +351,16 @@ export function startSnapshotWriter(
   };
 
   const tryWrite = async (): Promise<void> => {
-    const captured = captureCurrent();
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      log('snapshot: no workspace folders — skipping write');
+      return;
+    }
+    const target = folders[0].uri;
+    // Preserve any user-added placeholder hashes across recapture; they live
+    // only on disk and are not derivable from vscode state.
+    const existingPlaceholders = await readPlaceholdersFromDisk(target);
+    const captured = captureCurrent(existingPlaceholders);
     if (!captured) {
       log('snapshot: no workspace folders — skipping write');
       return;
@@ -351,7 +369,6 @@ export function startSnapshotWriter(
     if (lastWritten === undefined) {
       // First fire post-activation. Read on-disk so we can skip a no-op
       // rewrite if nothing actually changed.
-      const target = vscode.workspace.workspaceFolders![0].uri;
       const onDiskUri = snapshotUri(target);
       const onDisk = await store.readSnapshot(onDiskUri).catch(() => undefined);
       if (onDisk && snapshotsEqual(onDisk, captured)) {
@@ -369,7 +386,6 @@ export function startSnapshotWriter(
       return;
     }
 
-    const target = vscode.workspace.workspaceFolders![0].uri;
     try {
       const finalUri = await store.writeSnapshot(target, captured);
       await store.setPointer({
