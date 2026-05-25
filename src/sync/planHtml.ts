@@ -531,7 +531,7 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
   if (row.sourceHashShort) hashes.push(`src=${row.sourceHashShort}`);
   if (row.destHashShort) hashes.push(`dst=${row.destHashShort}`);
   if (row.manifestHashShort) hashes.push(`man=${row.manifestHashShort}`);
-  const hashesStr = hashes.length > 0 ? ` <span class="hashes">${escapeHtml(hashes.join(' '))}</span>` : '';
+  const hashesStr = hashes.length > 0 ? `<span class="hashes">${escapeHtml(hashes.join(' '))}</span>` : '';
 
   const warnings = row.warnings ?? [];
   // Primary sections (expandWarnings=false): tiny badge so the user knows
@@ -540,15 +540,13 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
   // themselves convey the count.
   const badge =
     warnings.length > 0 && !opts.expandWarnings
-      ? ` <span class="warn-badge" title="${escapeHtml(warningTooltip(warnings))}">⚠ ${warnings.length}</span>`
+      ? `<span class="warn-badge" title="${escapeHtml(warningTooltip(warnings))}">⚠ ${warnings.length}</span>`
       : '';
-  // Placeholder chip — blue, small, informational. Rendered after the
-  // warning badge so attention-worthy markers sit consistently after the
-  // path/size/hash header. The chip itself uses the `.chip.chip-placeholder`
-  // styling from the totals strip so the page-wide visual language stays
-  // consistent.
+  // Placeholder chip — blue, small, informational. The chip uses the same
+  // `.chip.chip-placeholder` styling as the totals strip so the visual
+  // vocabulary is consistent page-wide.
   const placeholderChip = row.isPlaceholder
-    ? ` <span class="chip chip-placeholder row-chip" title="placeholder">P</span>`
+    ? `<span class="chip chip-placeholder row-chip" title="placeholder">P</span>`
     : '';
 
   const messages =
@@ -561,18 +559,14 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
           .join('')}</ul>`
       : '';
 
-  // Decision checkbox lands in the right-most grid cell, after hashes/badge.
-  // The `data-decision-*` attributes carry everything the webview script
-  // needs without parsing the id back into parts. Unchecked by default for
-  // fresh rows; pre-checked when the manifest carries a remembered decision.
-  //
-  // The companion "Remember" checkbox only does work when the primary is
-  // checked — the footer script enables/disables it on each toggle. It exists
-  // as a sibling so a single click anywhere on the label flips just the box
-  // the user pointed at.
+  // Per-row decision controls (Overwrite / Delete / Sync anyway, plus the
+  // companion Don't-ask-again). The `data-decision-*` attributes carry
+  // everything the webview script needs without parsing the id back into
+  // parts. Unchecked by default; pre-checked when the manifest carries a
+  // remembered decision.
   const decision = row.decision;
   const decisionHtml = decision
-    ? ` <label class="decision decision-${escapeHtml(decision.kind)}">
+    ? `<label class="decision decision-${escapeHtml(decision.kind)}">
           <input type="checkbox" class="decision-input"
             data-decision-id="${escapeHtml(decision.id)}"
             data-decision-kind="${escapeHtml(decision.kind)}"
@@ -586,11 +580,20 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
         </label>`
     : '';
 
+  // Layout: <row-lead: path + badges/chips/decision> | <row-meta: size + hashes>.
+  // The lead grows to absorb slack and wraps gracefully when chips overflow
+  // the visible width; the meta group is intrinsic-width and anchors to the
+  // right edge so size/hash columns line up visually across rows regardless
+  // of which row-specific affordances appear. Pre-chip-era this was a
+  // single-line `path → size → hashes → trailing badges` flex; the lead/meta
+  // split keeps the size+hash column stable now that placeholders, warning
+  // badges, and decision controls have started accumulating between them.
+  const leadExtras = [badge, placeholderChip, decisionHtml].filter((x) => x !== '').join(' ');
+  const lead = `<div class="row-lead"><span class="path">${escapeHtml(row.relPath)}</span>${leadExtras ? ` ${leadExtras}` : ''}</div>`;
+  const meta = `<div class="row-meta"><span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}</div>`;
+
   return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}${decision ? ' row-decide' : ''}${row.isPlaceholder ? ' row-placeholder' : ''}">
-        <div class="row-main">
-          <span class="path">${escapeHtml(row.relPath)}</span>
-          <span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}${badge}${placeholderChip}${decisionHtml}
-        </div>${messages}
+        <div class="row-main">${lead}${meta}</div>${messages}
       </li>`;
 }
 
@@ -1003,17 +1006,36 @@ function planContentCss(): string {
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 0.92em;
     }
-    /* Flex (not grid) so the row scales gracefully to any number of trailing
-       cells — size, hashes, warning badge, decision checkbox — without us
-       maintaining a column count as the row vocabulary grows. The path
-       takes the slack via flex: 1, everything else is intrinsic-width and
-       sits flush to the right. */
+    /* Two-zone row layout:
+         .row-lead — path + chips/badges/decision controls. Grows to absorb
+                     slack; wraps gracefully when chips overflow.
+         .row-meta — size + hashes. Intrinsic-width, anchors to the right
+                     edge so size/hash columns line up visually across rows
+                     regardless of which lead-side chips a row has.
+       Pre-chip-era this was a single flex line path > size > hashes >
+       badges; with placeholder chips, warning badges, and decision
+       controls all accumulating between path and size, splitting the row
+       keeps the right column readable. */
     ul.rows .row-main {
       display: flex;
       align-items: baseline;
       gap: 12px;
     }
-    ul.rows .row-main .path { flex: 1 1 auto; min-width: 0; }
+    ul.rows .row-lead {
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px;
+    }
+    ul.rows .row-meta {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+    ul.rows .row-lead .path { flex: 1 1 auto; min-width: 0; }
     ul.rows .path { word-break: break-all; }
     ul.rows .size { color: var(--vscode-descriptionForeground); }
     ul.rows .hashes {

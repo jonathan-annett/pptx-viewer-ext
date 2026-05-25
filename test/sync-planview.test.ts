@@ -852,6 +852,42 @@ test('renderPlanHtml: footer line uses plural for multiple placeholders', () => 
   assert.match(html, /2 of 3 files are placeholders/);
 });
 
+test('renderPlanHtml: row layout groups path+chips/decisions in .row-lead and size+hashes in .row-meta', () => {
+  // Layout regression guard. Size + hashes must follow chips/decision in the
+  // DOM so they sit in a stable right-aligned column regardless of how many
+  // chips/affordances appear on a given row. If a future refactor puts size
+  // back next to the path, the rendered HTML stops matching the lead-then-meta
+  // ordering this asserts.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'stub.pptx', {
+          sourceSize: 100,
+          sourceHash: 'h-new',
+          destHash: 'h-old',
+          isPlaceholder: true,
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  // Both groups present.
+  assert.match(html, /<div class="row-lead">/);
+  assert.match(html, /<div class="row-meta">/);
+  // Path comes inside row-lead, before the chip + decision label.
+  const leadBlock = html.match(/<div class="row-lead">[\s\S]*?<\/div>/)?.[0] ?? '';
+  assert.match(leadBlock, /class="path"/);
+  assert.match(leadBlock, /chip-placeholder/);
+  assert.match(leadBlock, /decision-overwrite/);
+  // Size sits inside row-meta, after the chip — i.e., not in the lead block.
+  assert.ok(!/class="size"/.test(leadBlock), 'size must not appear in row-lead');
+  const metaBlock = html.match(/<div class="row-meta">[\s\S]*?<\/div>/)?.[0] ?? '';
+  assert.match(metaBlock, /class="size"/);
+  assert.match(metaBlock, /class="hashes"/);
+});
+
 test('renderPlanHtml: footer line omitted when no placeholders', () => {
   const plans = [
     fakePlan({
