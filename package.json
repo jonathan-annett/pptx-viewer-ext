@@ -112,6 +112,11 @@
         "category": "Folder Sync"
       },
       {
+        "command": "folderSync.probeDestinationOnly",
+        "title": "Folder Sync: Probe Destination-Only Mode (M1 diagnostic)",
+        "category": "Folder Sync"
+      },
+      {
         "command": "folderSync.showSnapshot",
         "title": "Folder Sync: Show Workspace Snapshot",
         "category": "Folder Sync"
@@ -182,6 +187,7 @@
     "test:sync-parse-cache": "node --import tsx test/sync-parse-cache.test.ts",
     "test:sync-misfile": "node --import tsx test/sync-misfile.test.ts",
     "test:sync-orphan-sweep": "node --import tsx test/sync-orphan-sweep.test.ts",
+    "test:sync-destination-only": "node --import tsx test/sync-destination-only.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
     "test:pdf-import": "node --import tsx test/pdf-import.test.ts",

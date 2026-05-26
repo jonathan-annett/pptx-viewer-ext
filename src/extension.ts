@@ -14,6 +14,10 @@ import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { ManifestEditorProvider } from './sync/manifestEditor';
 import { registerProbe } from './sync/probe';
+import {
+  activateDestinationOnlyContextKey,
+  registerDestinationOnlyProbe,
+} from './sync/destinationOnlyWired';
 import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
@@ -190,6 +194,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   writeHasAnySource(manager.getTopology());
   context.subscriptions.push(manager.onDidChange(writeHasAnySource));
+
+  // Destination-only mode detection — context key
+  // `folderSync.destinationOnlyWorkspace` flips true when the workspace has
+  // zero sources and at least one workspace folder carries a manifest at
+  // its root. M2+ gates source-side UI on its negation; M1 is just the
+  // detector + a probe palette command for verification.
+  activateDestinationOnlyContextKey(context, manager);
+
   context.subscriptions.push(SyncConfigEditorProvider.register(manager));
   log('activate: .sync.jsonc custom editor registered');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
@@ -226,6 +238,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     ),
     registerProbe(context),
+    registerDestinationOnlyProbe(),
     registerUploadProbe(),
     vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
       log('snapshot: showSnapshot invoked');
