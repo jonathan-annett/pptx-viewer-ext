@@ -24,6 +24,8 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import { isDestinationOnlyTopology } from './destinationOnly';
 import type { SyncManager } from './manager';
+import { readManifest } from './manifest';
+import type { ManifestSummary } from './statusBarOperator';
 
 const MANIFEST_FILENAME = '.foldersync-manifest.json';
 const MANIFEST_GLOB = '**/.foldersync-manifest.json';
@@ -32,9 +34,43 @@ const CONTEXT_KEY = 'folderSync.destinationOnlyWorkspace';
 interface State {
   manifestPresence: Map<string, boolean>;
   manager: SyncManager;
+  /** Last value passed to subscribers — used to seed late subscribers. */
+  lastState: DestinationOnlyState;
 }
 
 let current: State | undefined;
+
+/**
+ * State broadcast to subscribers (currently just the status bar). Contains
+ * both the boolean (mirrors the context key) and the canonical manifest
+ * summary so consumers don't have to re-read the manifest themselves.
+ *
+ * `canonicalManifest` is the manifest at the root of `workspaceFolders[0]`
+ * — undefined when destination-only is false, or when destination-only is
+ * true but the canonical folder doesn't carry a manifest (the destination
+ * lives at a non-canonical folder, or no sync has written one yet).
+ */
+export interface DestinationOnlyState {
+  isDestinationOnly: boolean;
+  canonicalManifest?: ManifestSummary;
+}
+
+const stateEmitter = new vscode.EventEmitter<DestinationOnlyState>();
+
+/**
+ * Fires every time the destination-only state recomputes (manifest
+ * created/deleted, workspace folders changed, sync topology changed, or
+ * the canonical manifest's contents changed). Subscribers receive a
+ * fresh state object each time.
+ *
+ * Late subscribers can call `getDestinationOnlyState()` to read the
+ * current state synchronously without waiting for the next event.
+ */
+export const onDidChangeDestinationOnlyState = stateEmitter.event;
+
+export function getDestinationOnlyState(): DestinationOnlyState {
+  return current?.lastState ?? { isDestinationOnly: false };
+}
 
 function manifestUriForFolder(folderUri: vscode.Uri): vscode.Uri {
   return vscode.Uri.joinPath(folderUri, MANIFEST_FILENAME);
@@ -60,7 +96,7 @@ async function scanAll(): Promise<void> {
   current.manifestPresence = next;
 }
 
-function recompute(): void {
+async function recompute(): Promise<void> {
   if (!current) return;
   const folders = vscode.workspace.workspaceFolders ?? [];
   const result = isDestinationOnlyTopology(
@@ -69,12 +105,48 @@ function recompute(): void {
     current.manifestPresence,
   );
   void vscode.commands.executeCommand('setContext', CONTEXT_KEY, result);
+
+  // Read the canonical manifest when operator mode is active AND the
+  // canonical folder (workspaceFolders[0]) carries a root manifest. Skipping
+  // the read in the other branches keeps the wired layer side-effect-free
+  // when nothing about the operator surface needs it.
+  let canonicalManifest: ManifestSummary | undefined;
+  if (result && folders.length > 0) {
+    const canonicalFolder = folders[0];
+    const present = current.manifestPresence.get(canonicalFolder.uri.toString()) === true;
+    if (present) {
+      canonicalManifest = await readCanonicalManifestSummary(canonicalFolder.uri);
+    }
+  }
+
+  const state: DestinationOnlyState = { isDestinationOnly: result, canonicalManifest };
+  current.lastState = state;
+  stateEmitter.fire(state);
+
   log(
     `destination-only: setContext ${CONTEXT_KEY}=${result} ` +
       `(sources=${current.manager.getTopology().sources.length}, ` +
       `folders=${folders.length}, ` +
-      `manifestsPresent=${countTrue(current.manifestPresence)})`,
+      `manifestsPresent=${countTrue(current.manifestPresence)}, ` +
+      `canonicalManifest=${canonicalManifest ? `lastSync=${canonicalManifest.lastSync ?? 'null'}` : 'none'})`,
   );
+}
+
+async function readCanonicalManifestSummary(
+  folderUri: vscode.Uri,
+): Promise<ManifestSummary | undefined> {
+  // readManifest already folds missing/corrupt/bad-utf8 into ok+empty, and
+  // surfaces only version-mismatch as the non-ok branch. For M2 we treat
+  // version-mismatch as "no usable summary" — the status bar drops back to
+  // the no-manifest-yet copy. M5 specifies an operator-appropriate copy
+  // for version-mismatch and will branch on that case explicitly.
+  const result = await readManifest(folderUri);
+  if (result.kind !== 'ok') return undefined;
+  return {
+    manifestUri: manifestUriForFolder(folderUri),
+    folderUri,
+    lastSync: result.manifest.lastSync,
+  };
 }
 
 function countTrue(map: ReadonlyMap<string, boolean>): number {
@@ -89,9 +161,26 @@ function handleManifestEvent(uri: vscode.Uri, kind: 'create' | 'delete'): void {
   for (const folder of folders) {
     if (manifestUriForFolder(folder.uri).toString() === uri.toString()) {
       current.manifestPresence.set(folder.uri.toString(), kind === 'create');
-      recompute();
+      void recompute();
       return;
     }
+  }
+}
+
+/**
+ * Manifest content changed (edit, not create/delete). Presence doesn't
+ * flip, but the canonical manifest's `lastSync` may have just rolled
+ * forward, so the status bar's relative-time copy needs to update.
+ * Filtered to the canonical folder's root manifest — edits to manifests
+ * elsewhere don't drive the status bar.
+ */
+function handleManifestChange(uri: vscode.Uri): void {
+  if (!current) return;
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) return;
+  const canonicalUri = manifestUriForFolder(folders[0].uri).toString();
+  if (uri.toString() === canonicalUri) {
+    void recompute();
   }
 }
 
@@ -109,26 +198,32 @@ export function activateDestinationOnlyContextKey(
   context: vscode.ExtensionContext,
   manager: SyncManager,
 ): vscode.Disposable {
-  current = { manifestPresence: new Map(), manager };
+  current = {
+    manifestPresence: new Map(),
+    manager,
+    lastState: { isDestinationOnly: false },
+  };
 
   const watcher = vscode.workspace.createFileSystemWatcher(MANIFEST_GLOB);
   watcher.onDidCreate((u) => handleManifestEvent(u, 'create'));
   watcher.onDidDelete((u) => handleManifestEvent(u, 'delete'));
-  // onDidChange not subscribed — presence is binary (file exists?), and
-  // edits to a manifest don't change that.
+  // onDidChange drives the operator status bar's relative-time refresh —
+  // an edit to the canonical manifest may have just rolled lastSync forward.
+  // Presence stays unchanged; recompute re-reads + re-fires the state event.
+  watcher.onDidChange((u) => handleManifestChange(u));
 
   const foldersSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
-    void scanAll().then(recompute);
+    void scanAll().then(() => recompute());
   });
 
   const managerSub = manager.onDidChange(() => {
-    recompute();
+    void recompute();
   });
 
   // Initial scan + recompute. The managerSub above already fired one
   // recompute with the empty presence map; this second pass picks up
   // whatever manifests are sitting at workspace folder roots.
-  void scanAll().then(recompute);
+  void scanAll().then(() => recompute());
 
   const disposable: vscode.Disposable = {
     dispose(): void {

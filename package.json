@@ -156,8 +156,38 @@
       "explorer/context": [
         {
           "command": "folderSync.syncThisFolder",
-          "when": "explorerResourceIsFolder && folderSync.hasAnySource",
+          "when": "explorerResourceIsFolder && folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace",
           "group": "7_modification@10"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "folderSync.openPlan",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.syncThisFolder",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.openAdminConfig",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.showTopology",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.dryRunPlan",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.showSnapshot",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.clearSnapshot",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
         }
       ]
     }
@@ -188,6 +218,7 @@
     "test:sync-misfile": "node --import tsx test/sync-misfile.test.ts",
     "test:sync-orphan-sweep": "node --import tsx test/sync-orphan-sweep.test.ts",
     "test:sync-destination-only": "node --import tsx test/sync-destination-only.test.ts",
+    "test:sync-status-bar-operator": "node --import tsx test/sync-status-bar-operator.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
     "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
