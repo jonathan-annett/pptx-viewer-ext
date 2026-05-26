@@ -9,6 +9,7 @@
 // escape hatch. See `folder-sync-v1-plan.md` §M6.E for the design rationale.
 
 import type { Manifest, ManifestReadResult } from './manifest-types';
+import type { DriftRecord, ManifestDriftMap } from './manifestDrift';
 
 /** A view model row for the `entries` table. */
 export interface ManifestEditorEntryRow {
@@ -24,6 +25,12 @@ export interface ManifestEditorEntryRow {
   syncedAtRelative: string;
   /** Original ISO timestamp, used for the tooltip. */
   syncedAtIso: string;
+  /**
+   * Drift classification for this row, when the wired layer has run a
+   * pass. Undefined while drift is still computing (or when the editor
+   * is rendering in main-user mode, where the drift column is hidden).
+   */
+  drift?: DriftRecord;
 }
 
 /** A view model row for the `decisions` table. */
@@ -89,6 +96,7 @@ export function toManifestViewModel(
   destRootLabel: string,
   now: Date = new Date(),
   mode: ManifestEditorMode = 'mainUser',
+  drift?: ManifestDriftMap,
 ): ManifestEditorViewModel {
   if (read.kind === 'version-mismatch') {
     return {
@@ -103,13 +111,17 @@ export function toManifestViewModel(
     destRootLabel,
     version: 1,
     lastSyncLabel: formatLastSync(read.manifest.lastSync, now),
-    entries: shapeEntries(read.manifest, now),
+    entries: shapeEntries(read.manifest, now, drift),
     decisions: shapeDecisions(read.manifest, now),
     mode,
   };
 }
 
-function shapeEntries(manifest: Manifest, now: Date): ManifestEditorEntryRow[] {
+function shapeEntries(
+  manifest: Manifest,
+  now: Date,
+  drift?: ManifestDriftMap,
+): ManifestEditorEntryRow[] {
   const keys = Object.keys(manifest.entries).sort();
   return keys.map((key) => {
     const e = manifest.entries[key];
@@ -121,6 +133,7 @@ function shapeEntries(manifest: Manifest, now: Date): ManifestEditorEntryRow[] {
       sha256Full: e.sha256,
       syncedAtRelative: relativeTime(e.syncedAt, now),
       syncedAtIso: e.syncedAt,
+      drift: drift?.get(key),
     };
   });
 }
@@ -239,6 +252,9 @@ export function renderManifestEditorHtml(
   </footer>
 
   <section class="actions">
+    ${vm.kind === 'ok' && vm.mode === 'operator'
+      ? '<button id="refresh-drift" class="btn btn-secondary" type="button" title="Recompute drift status for every tracked file">Refresh drift</button>'
+      : ''}
     <button id="open-text" class="btn btn-secondary" type="button" title="Open this file in the default JSON editor">Reopen as text</button>
   </section>
 
@@ -282,7 +298,7 @@ function renderBody(vm: ManifestEditorViewModel): string {
     <h2>Entries <span class="count">(${vm.entries.length})</span></h2>
     ${vm.entries.length === 0
       ? '<p class="hint"><em>No tracked entries — nothing has been synced to this destination yet.</em></p>'
-      : renderEntriesTable(vm.entries)}
+      : renderEntriesTable(vm.entries, vm.mode)}
   </section>`;
   // Decisions are source-side state — the operator has no plan webview
   // to toggle "don't ask again" from, so the section is hidden in operator
@@ -300,7 +316,11 @@ function renderBody(vm: ManifestEditorViewModel): string {
   </section>`;
 }
 
-function renderEntriesTable(rows: ManifestEditorEntryRow[]): string {
+function renderEntriesTable(
+  rows: ManifestEditorEntryRow[],
+  mode: ManifestEditorMode,
+): string {
+  const showDrift = mode === 'operator';
   const head = `
     <thead>
       <tr>
@@ -309,6 +329,7 @@ function renderEntriesTable(rows: ManifestEditorEntryRow[]): string {
         <th class="col-size">Size</th>
         <th class="col-hash">SHA-256</th>
         <th class="col-time">Synced</th>
+        ${showDrift ? '<th class="col-drift" title="On-disk hash vs manifest sha — refreshes automatically when files change">Drift</th>' : ''}
       </tr>
     </thead>`;
   const body = rows
@@ -320,10 +341,31 @@ function renderEntriesTable(rows: ManifestEditorEntryRow[]): string {
         <td class="mono small">${escapeHtml(r.sizeHuman)}</td>
         <td class="mono small" title="${escapeHtml(r.sha256Full)}">${escapeHtml(r.sha256Short)}</td>
         <td class="mono small" title="${escapeHtml(r.syncedAtIso)}">${escapeHtml(r.syncedAtRelative || r.syncedAtIso)}</td>
+        ${showDrift ? `<td class="drift">${renderDriftCell(r)}</td>` : ''}
       </tr>`,
     )
     .join('');
   return `<table class="data">${head}<tbody>${body}</tbody></table>`;
+}
+
+function renderDriftCell(row: ManifestEditorEntryRow): string {
+  const status = row.drift?.status ?? 'computing';
+  const expectedShort = row.sha256Short;
+  switch (status) {
+    case 'matches':
+      return `<span class="drift-match" title="On disk matches manifest sha (${escapeHtml(row.sha256Full)})">✓</span>`;
+    case 'drifted': {
+      const actualFull = row.drift?.actualSha256 ?? '';
+      const actualShort = actualFull.slice(0, 12);
+      const tip = `Expected ${expectedShort}, on disk ${actualShort || '(unknown)'}`;
+      return `<span class="drift-drifted" title="${escapeHtml(tip)}">⚠</span>`;
+    }
+    case 'missing':
+      return `<span class="drift-missing" title="File not present at ${escapeHtml(row.destPath)}">✗</span>`;
+    case 'computing':
+    default:
+      return `<span class="drift-computing" title="Computing…">…</span>`;
+  }
 }
 
 function renderDecisionsTable(rows: ManifestEditorDecisionRow[]): string {
@@ -475,10 +517,14 @@ table.data th {
 table.data tbody tr:last-child td { border-bottom: none; }
 table.data .col-key, table.data .col-dest { width: 28%; }
 table.data .col-size, table.data .col-hash, table.data .col-time { white-space: nowrap; }
-table.data .col-flag { text-align: center; }
-td.flag { text-align: center; }
+table.data .col-flag, table.data .col-drift { text-align: center; white-space: nowrap; }
+td.flag, td.drift { text-align: center; }
 .flag-on { color: var(--vscode-charts-green, #4caf50); font-weight: 600; }
 .flag-off { color: var(--vscode-descriptionForeground); }
+.drift-match { color: var(--vscode-charts-green, #4caf50); font-weight: 600; }
+.drift-drifted { color: var(--vscode-editorWarning-foreground, #b89500); font-weight: 600; }
+.drift-missing { color: var(--vscode-editorError-foreground, #f44336); font-weight: 600; }
+.drift-computing { color: var(--vscode-descriptionForeground); }
 .btn {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
@@ -511,6 +557,12 @@ const CLIENT_JS = `
   if (openText) {
     openText.addEventListener('click', function () {
       vscode.postMessage({ type: 'openAsText' });
+    });
+  }
+  const refreshDrift = document.getElementById('refresh-drift');
+  if (refreshDrift) {
+    refreshDrift.addEventListener('click', function () {
+      vscode.postMessage({ type: 'refresh-drift' });
     });
   }
 })();

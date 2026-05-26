@@ -219,6 +219,7 @@
     "test:sync-orphan-sweep": "node --import tsx test/sync-orphan-sweep.test.ts",
     "test:sync-destination-only": "node --import tsx test/sync-destination-only.test.ts",
     "test:sync-status-bar-operator": "node --import tsx test/sync-status-bar-operator.test.ts",
+    "test:sync-manifest-drift": "node --import tsx test/sync-manifest-drift.test.ts",
     "test:viewer-compare": "node --import tsx test/viewer-compare.test.ts",
     "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
     "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
