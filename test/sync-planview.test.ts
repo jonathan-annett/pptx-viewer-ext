@@ -872,8 +872,10 @@ test('toViewModel: uniqueSourceFiles dedupes the same source file across destina
 });
 
 test('renderPlanHtml: footer shows deduped source-file count across destinations', () => {
-  // 1 source file (stub) mirrored to 3 destinations should read "1 of 1
-  // source file is a placeholder" — not "3 of 6 files".
+  // 1 placeholder source file mirrored to 3 destinations should not say
+  // "3 of 6 files" — the per-pair fanout collapses to the unique source
+  // file. N=M=1 here, so the "all-placeholders" branch fires with the
+  // singular form.
   const items = [
     item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
   ];
@@ -884,7 +886,7 @@ test('renderPlanHtml: footer shows deduped source-file count across destinations
   ];
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
-  assert.match(html, /1 of 1 source file is a placeholder/);
+  assert.match(html, /All 1 source file is a placeholder \(no content received yet\)\./);
 });
 
 test('toViewModel: destination-only and delete-tracked excluded from source-file metrics', () => {
@@ -946,21 +948,91 @@ test('renderPlanHtml: row layout groups path+chips/decisions in .row-lead and si
   assert.match(metaBlock, /class="hashes"/);
 });
 
-test('renderPlanHtml: footer line omitted when no placeholders', () => {
+test('renderPlanHtml: footer shows the all-clean line when source files exist and none are placeholders', () => {
   const plans = [
     fakePlan({
       destName: 'backup',
-      items: [item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' })],
+      items: [
+        item('create', 'real1.pptx', { sourceSize: 100, sourceHash: 'h-1' }),
+        item('create', 'real2.pptx', { sourceSize: 200, sourceHash: 'h-2' }),
+      ],
     }),
   ];
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
-  // The .placeholder-foot-line class is defined in the stylesheet regardless;
-  // exclude the <style> block so we're only checking the body output.
+  // The all-clean line carries both the foot-line and foot-clean classes
+  // — the latter switches the colour to green.
+  assert.match(html, /class="placeholder-foot-line placeholder-foot-clean"/);
+  assert.match(html, /All 2 source files have content\./);
+  // And the "missing content" / "are placeholders" copy doesn't appear in
+  // the body (the stylesheet rule names contain "placeholder-foot-line"
+  // even in the all-clean case, so we don't assert on class absence; we
+  // assert on the cautionary copy instead).
   const body = html.replace(/<style>[\s\S]*?<\/style>/, '');
-  assert.ok(!/placeholder-foot-line/.test(body),
-    'placeholder-foot-line should not appear in the body when count is zero');
-  assert.ok(!/files (are placeholders|is a placeholder)/.test(body));
+  assert.ok(!/missing content/.test(body), 'no cautionary "(missing content)" copy in clean state');
+});
+
+test('renderPlanHtml: all-clean line uses singular noun when M=1', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'real.pptx', { sourceSize: 100, sourceHash: 'h-1' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /All 1 source file have content\./);
+});
+
+test('renderPlanHtml: footer line absent entirely when there are no source files at all', () => {
+  // M=0 (no source-side items in any plan) → silent. The plan has nothing
+  // to comment on. Destination-only and skipped pairs don't contribute to
+  // M, so the line stays absent even when those exist.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('destination-only', 'orphan.pptx', { destSize: 10, destHash: 'h-o' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  const body = html.replace(/<style>[\s\S]*?<\/style>/, '');
+  assert.ok(!/placeholder-foot-line/.test(body), 'no footer line at all when M=0');
+  assert.ok(!/source files? (are|is|have)/.test(body), 'no source-file copy at all');
+});
+
+test('renderPlanHtml: all-placeholders line emphasises the early-workflow state when N=M', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub1.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'stub2.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+        item('create', 'stub3.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /All 3 source files are placeholders \(no content received yet\)\./);
+  // Cautionary blue class, not the green all-clean variant.
+  const body = html.replace(/<style>[\s\S]*?<\/style>/, '');
+  assert.ok(/class="placeholder-foot-line">All 3 source files are placeholders/.test(body),
+    'all-placeholders state uses the cautionary blue class, not the green all-clean class');
+});
+
+test('renderPlanHtml: all-placeholders uses singular when N=M=1', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /All 1 source file is a placeholder \(no content received yet\)\./);
 });
 
 // ───── humanSize sanity ──────────────────────────────────────────────────

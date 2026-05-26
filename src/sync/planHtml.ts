@@ -651,23 +651,42 @@ function renderEmpty(): string {
 }
 
 /**
- * Pure: render the "N of M source files are placeholders" footer line, or
- * empty string when no source-side placeholders are present. Counts are
- * deduped per source — a file mirrored to 3 destinations counts once. The
- * denominator (`uniqueSourceFiles`) is every file under a `.sync.jsonc`
- * source that maps somewhere; `destinationOnly` and `deleteTracked` are
- * excluded because neither describes a live source file.
+ * Pure: render the placeholder-status footer line.
  *
- * The number speaks to the operator's actual concern: "how many speakers
- * still owe me content?" — not "how many per-pair operations are queued"
- * (which is what the totals strip's chip shows).
+ * Three states, each common in the event-planning workflow:
+ *   - N=0, M>0 → "All M source files have content." (green, positive
+ *                — everything is real content, nothing outstanding)
+ *   - N=M, M>0 → "All M source files are placeholders (no content received
+ *                yet)." (blue, emphasises early-workflow state)
+ *   - 0<N<M  → "N of M source files {is|are} placeholders (missing
+ *                content)." (blue, mixed in-flight state)
+ *   - M=0    → empty string (no plan to comment on)
+ *
+ * Counts are deduped per source — a file mirrored to 3 destinations counts
+ * once. The denominator (`uniqueSourceFiles`) is every file under a
+ * `.sync.jsonc` source that maps somewhere; `destinationOnly` and
+ * `deleteTracked` are excluded because neither describes a live source
+ * file. The metric answers the operator's actual question — "how many
+ * speakers still owe me content?" — not "how many per-pair operations are
+ * queued" (the totals strip's chip).
  */
 export function renderPlaceholderFooterLine(t: PlanTotals): string {
-  if (t.uniqueSourcePlaceholders === 0) return '';
-  const n = t.uniqueSourcePlaceholders;
   const m = t.uniqueSourceFiles;
-  const verb = n === 1 ? 'is a placeholder' : 'are placeholders';
+  const n = t.uniqueSourcePlaceholders;
+  if (m === 0) return '';
   const noun = m === 1 ? 'source file' : 'source files';
+
+  if (n === 0) {
+    // All-clean state. Distinct CSS class so the colour can lean green
+    // (positive) instead of the cautionary blue used for the other two
+    // states.
+    return `<p class="placeholder-foot-line placeholder-foot-clean">All ${m} ${noun} have content.</p>`;
+  }
+  if (n === m) {
+    const verb = m === 1 ? 'is a placeholder' : 'are placeholders';
+    return `<p class="placeholder-foot-line">All ${m} ${noun} ${verb} (no content received yet).</p>`;
+  }
+  const verb = n === 1 ? 'is a placeholder' : 'are placeholders';
   return `<p class="placeholder-foot-line">${n} of ${m} ${noun} ${verb} (missing content).</p>`;
 }
 
@@ -961,6 +980,13 @@ function planContentCss(): string {
       margin: 0 0 8px;
       font-size: 0.9em;
       color: var(--vscode-charts-blue, #3794ff);
+    }
+    /* Positive "all clean" variant — operators see this when every source
+       file has real content. Green to make the all-good state legible at a
+       glance alongside the blue cautionary copy used for the other two
+       footer states. */
+    .placeholder-foot-clean {
+      color: var(--vscode-charts-green, #4caf50);
     }
 
     /* Each (source × destination) pair is a card. The left border gives it a
