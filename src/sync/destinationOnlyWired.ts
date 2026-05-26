@@ -235,6 +235,74 @@ export function getOperatorRestoreCapture(
   return context.globalState.get<OperatorRestoreCapture>(OPERATOR_RESTORE_KEY);
 }
 
+/**
+ * M3 — auto-open the canonical manifest on activation when the
+ * workspace is in operator mode, *unless* the active-tab restorer is
+ * about to open a tab (in which case it would steal focus from the
+ * user's last-focused file).
+ *
+ * Caller passes `hadActiveTabMarker` — captured in extension.ts BEFORE
+ * the restorer fires so the check is race-free. If the marker was set,
+ * the restorer will re-open something and we should defer to it. If
+ * the marker was unset, the restorer is a no-op and we're free to
+ * land the user on the manifest inspector (the operator's primary
+ * surface).
+ *
+ * Detection is FS-driven: stat `workspaceFolders[0]/.foldersync-manifest.json`
+ * for the canonical-manifest existence, then findFiles for source
+ * presence. We don't go through the wired layer's state event because
+ * the initial scan may not have completed by the time we want to
+ * auto-open — the FS check is the authoritative source either way.
+ *
+ * Fire-and-forget from `activate()`; errors are logged and swallowed.
+ */
+export async function maybeAutoOpenOperatorManifest(
+  hadActiveTabMarker: boolean,
+): Promise<void> {
+  if (hadActiveTabMarker) {
+    log('manifest-auto-open: active-tab marker present, deferring to active-tab restorer');
+    return;
+  }
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) {
+    log('manifest-auto-open: no workspace folders, skipping');
+    return;
+  }
+  // Canonical-manifest check first — workspaceFolders[0] is the
+  // operator's entry point, and its root manifest is what the M2 status
+  // bar's click target also opens. If folder[0] doesn't have a manifest
+  // we don't auto-open even when a *non-canonical* folder does — the
+  // operator might be inspecting two destinations side-by-side and we
+  // shouldn't pick one arbitrarily.
+  const canonicalUri = vscode.Uri.joinPath(folders[0].uri, MANIFEST_FILENAME);
+  try {
+    await vscode.workspace.fs.stat(canonicalUri);
+  } catch {
+    log(
+      `manifest-auto-open: no canonical manifest at ${canonicalUri.toString()}, skipping`,
+    );
+    return;
+  }
+  // Operator mode requires *zero* sources in the workspace — same gate
+  // as `detectDestinationOnlyFromFs`, inlined here so we short-circuit
+  // the second FS call when the canonical check already fails.
+  const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+  if (sources.length > 0) {
+    log('manifest-auto-open: workspace has source(s), not in operator mode, skipping');
+    return;
+  }
+  log(`manifest-auto-open: opening canonical manifest ${canonicalUri.toString()}`);
+  try {
+    await vscode.commands.executeCommand(
+      'vscode.openWith',
+      canonicalUri,
+      'folderSync.manifestEditor',
+    );
+  } catch (err) {
+    log(`manifest-auto-open: openWith failed — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function readCanonicalManifestSummary(
   folderUri: vscode.Uri,
 ): Promise<ManifestSummary | undefined> {

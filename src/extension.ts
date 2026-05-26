@@ -17,6 +17,7 @@ import { registerProbe } from './sync/probe';
 import {
   activateDestinationOnlyContextKey,
   detectDestinationOnlyFromFs,
+  maybeAutoOpenOperatorManifest,
   registerDestinationOnlyProbe,
 } from './sync/destinationOnlyWired';
 import { registerUploadProbe } from './upload/probeUpload';
@@ -105,6 +106,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // workspace from desktop into vscode.dev still has a fresh marker to
   // replay from.
   migrateLegacyActiveTabKey(context);
+  // Capture marker presence BEFORE the restorer fires so the M3 auto-
+  // open can race-freely decide whether to defer (marker present, the
+  // restorer will reopen something) or take focus (marker absent, the
+  // restorer is a no-op, so the user lands cold). See
+  // `maybeAutoOpenOperatorManifest` for the rationale.
+  const hadActiveTabMarker = isWebHost()
+    ? !!context.globalState.get<SavedActiveTab>(ACTIVE_TAB_KEY)?.uri
+    : false;
   if (isWebHost()) {
     void restoreLastActiveTab(context);
   } else {
@@ -319,6 +328,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log(
       `search-index: init failed — ${err instanceof Error ? err.message : String(err)} (search disabled this session)`,
     );
+  }
+
+  // M3 — auto-open the canonical manifest in operator mode. Fire-and-
+  // forget: the helper checks operator-mode + canonical-manifest
+  // presence + defers when the active-tab restorer is going to open
+  // something. Web-only — desktop persists tabs natively, so the user
+  // gets whatever they had focused last session without our help.
+  if (isWebHost()) {
+    void maybeAutoOpenOperatorManifest(hadActiveTabMarker);
   }
 }
 
