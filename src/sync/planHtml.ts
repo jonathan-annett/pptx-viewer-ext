@@ -134,10 +134,28 @@ export interface PlanTotals {
   /**
    * Items flagged as placeholders by the classifier (sha matches the active
    * placeholder set). Counted across every category — a placeholder can be a
-   * create, an update, a destination-only, etc. The footer surfaces the
-   * "N of M files are placeholders" line when this is non-zero.
+   * create, an update, a destination-only, etc. Per-pair fanout: a single
+   * source-side stub mirrored to 3 destinations contributes 3 here.
+   * Surfaced as the totals-strip chip alongside the other operation counts.
    */
   placeholders: number;
+  /**
+   * Count of distinct (sourceLabel, relPath) tuples observed in the
+   * source-side categories — `create`, `updateTracked`, `updateCollision`,
+   * `skip`. `deleteTracked` is excluded (the source removed those files) and
+   * `destinationOnly` is excluded (those aren't source files). This is the
+   * "how many files live under a .sync.jsonc and map somewhere" count —
+   * deduped across destinations, used as the denominator in the placeholder
+   * footer line so the operator-facing metric reads as files, not per-pair
+   * operations.
+   */
+  uniqueSourceFiles: number;
+  /**
+   * Subset of {@link uniqueSourceFiles} whose `isPlaceholder` flag is set.
+   * Used as the numerator in the footer line — answers "how many source
+   * files are still stubs."
+   */
+  uniqueSourcePlaceholders: number;
 }
 
 export interface PlanViewModel {
@@ -183,7 +201,15 @@ export function toViewModel(
     overridableWarnings: 0,
     skipped: 0,
     placeholders: 0,
+    uniqueSourceFiles: 0,
+    uniqueSourcePlaceholders: 0,
   };
+  // Dedup sets for the source-file counts. Key is `${sourceLabel}\x00${relPath}` —
+  // sourceLabel uniquely identifies the .sync.jsonc folder (the callback used
+  // to derive it returns the same string for every pair of the same source),
+  // so a file mirrored to N destinations only counts once.
+  const uniqueSourceKeys = new Set<string>();
+  const uniqueSourcePlaceholderKeys = new Set<string>();
 
   let destCount = 0;
   const seenSources = new Set<string>();
@@ -238,6 +264,17 @@ export function toViewModel(
       s.destinationOnly,
     ]) {
       for (const it of list) if (it.isPlaceholder) totals.placeholders++;
+    }
+    // Dedup pass for the source-file metrics. Only source-side categories
+    // (create/update/skip) describe live source files; deleteTracked is a
+    // record of a file the source removed, and destinationOnly isn't a
+    // source file at all.
+    for (const list of [s.create, s.updateTracked, s.updateCollision, s.skip]) {
+      for (const it of list) {
+        const key = `${srcKey}\x00${it.relPath}`;
+        uniqueSourceKeys.add(key);
+        if (it.isPlaceholder) uniqueSourcePlaceholderKeys.add(key);
+      }
     }
 
     // Collision rows offer an "Overwrite" decision; destination-only rows
@@ -306,6 +343,9 @@ export function toViewModel(
       },
     });
   }
+
+  totals.uniqueSourceFiles = uniqueSourceKeys.size;
+  totals.uniqueSourcePlaceholders = uniqueSourcePlaceholderKeys.size;
 
   const sourceCount = seenSources.size;
   const scopeLabel =
@@ -611,22 +651,24 @@ function renderEmpty(): string {
 }
 
 /**
- * Pure: render the "N of M files are placeholders" footer line, or empty
- * string when no placeholders are present. Exposed so embedded callers can
- * surface the same metric in their own footer area.
+ * Pure: render the "N of M source files are placeholders" footer line, or
+ * empty string when no source-side placeholders are present. Counts are
+ * deduped per source — a file mirrored to 3 destinations counts once. The
+ * denominator (`uniqueSourceFiles`) is every file under a `.sync.jsonc`
+ * source that maps somewhere; `destinationOnly` and `deleteTracked` are
+ * excluded because neither describes a live source file.
  *
- * M is the count of files across primary categories — every file the user is
- * seeing in the plan. We deliberately exclude `warnings` from the divisor
- * because that's a derived view of items already counted in the primary
- * categories.
+ * The number speaks to the operator's actual concern: "how many speakers
+ * still owe me content?" — not "how many per-pair operations are queued"
+ * (which is what the totals strip's chip shows).
  */
 export function renderPlaceholderFooterLine(t: PlanTotals): string {
-  if (t.placeholders === 0) return '';
-  const totalFiles =
-    t.create + t.updateTracked + t.updateCollision + t.skip + t.deleteTracked + t.destinationOnly;
-  const isOne = t.placeholders === 1;
-  const verb = isOne ? 'is a placeholder' : 'are placeholders';
-  return `<p class="placeholder-foot-line">${t.placeholders} of ${totalFiles} files ${verb} (missing content).</p>`;
+  if (t.uniqueSourcePlaceholders === 0) return '';
+  const n = t.uniqueSourcePlaceholders;
+  const m = t.uniqueSourceFiles;
+  const verb = n === 1 ? 'is a placeholder' : 'are placeholders';
+  const noun = m === 1 ? 'source file' : 'source files';
+  return `<p class="placeholder-foot-line">${n} of ${m} ${noun} ${verb} (missing content).</p>`;
 }
 
 function renderFooter(blocking: number, hasWork: boolean): string {

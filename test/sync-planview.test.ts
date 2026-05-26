@@ -821,7 +821,7 @@ test('renderPlanHtml: totals strip omits the placeholders chip when count is 0',
     'chip-placeholder should not appear in the body when count is zero');
 });
 
-test('renderPlanHtml: footer shows the placeholder count line when count > 0', () => {
+test('renderPlanHtml: footer shows the placeholder count line in source-file terms', () => {
   const plans = [
     fakePlan({
       destName: 'backup',
@@ -833,7 +833,7 @@ test('renderPlanHtml: footer shows the placeholder count line when count > 0', (
   ];
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
-  assert.match(html, /1 of 2 files is a placeholder/);
+  assert.match(html, /1 of 2 source files is a placeholder/);
 });
 
 test('renderPlanHtml: footer line uses plural for multiple placeholders', () => {
@@ -849,7 +849,65 @@ test('renderPlanHtml: footer line uses plural for multiple placeholders', () => 
   ];
   const vm = toViewModel(plans, FIXED_LABEL);
   const html = renderPlanHtml(vm, 'n');
-  assert.match(html, /2 of 3 files are placeholders/);
+  assert.match(html, /2 of 3 source files are placeholders/);
+});
+
+test('toViewModel: uniqueSourceFiles dedupes the same source file across destinations', () => {
+  // One source × 3 destinations, each with two source-side files. The "12
+  // per-pair plan items in source-side categories" should dedupe to 2 unique
+  // source files; 1 placeholder source file dedupes the same way.
+  const items = [
+    item('skip', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+    item('skip', 'real.pptx', { sourceSize: 100, sourceHash: 'h-real' }),
+  ];
+  const plans = [
+    fakePlan({ destName: 'destA', items }),
+    fakePlan({ destName: 'destB', items }),
+    fakePlan({ destName: 'destC', items }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.totals.placeholders, 3, 'per-pair fanout still 3 (chip count)');
+  assert.equal(vm.totals.uniqueSourceFiles, 2, 'dedup across 3 destinations');
+  assert.equal(vm.totals.uniqueSourcePlaceholders, 1, 'dedup across 3 destinations');
+});
+
+test('renderPlanHtml: footer shows deduped source-file count across destinations', () => {
+  // 1 source file (stub) mirrored to 3 destinations should read "1 of 1
+  // source file is a placeholder" — not "3 of 6 files".
+  const items = [
+    item('create', 'stub.pptx', { sourceSize: 0, sourceHash: 'sha-zero', isPlaceholder: true }),
+  ];
+  const plans = [
+    fakePlan({ destName: 'destA', items }),
+    fakePlan({ destName: 'destB', items }),
+    fakePlan({ destName: 'destC', items }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  assert.match(html, /1 of 1 source file is a placeholder/);
+});
+
+test('toViewModel: destination-only and delete-tracked excluded from source-file metrics', () => {
+  // destination-only and delete-tracked describe files that aren't live in
+  // the source. Even with a placeholder-matching hash, they must not
+  // contribute to uniqueSourceFiles or uniqueSourcePlaceholders — those
+  // metrics specifically count "files under a .sync.jsonc that map
+  // somewhere".
+  const plans = [
+    fakePlan({
+      destName: 'destA',
+      items: [
+        item('create', 'live.pptx', { sourceSize: 100, sourceHash: 'h-live', isPlaceholder: true }),
+        item('destination-only', 'orphan.pptx', { destSize: 0, destHash: 'sha-zero', isPlaceholder: true }),
+        item('delete-tracked', 'gone.pptx', { destSize: 0, destHash: 'sha-zero', isPlaceholder: true }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  assert.equal(vm.totals.uniqueSourceFiles, 1, 'only the live source file counts');
+  assert.equal(vm.totals.uniqueSourcePlaceholders, 1, 'only the live placeholder counts');
+  // The chip still includes them — per-pair count is operations.
+  assert.equal(vm.totals.placeholders, 3);
 });
 
 test('renderPlanHtml: row layout groups path+chips/decisions in .row-lead and size+hashes in .row-meta', () => {
