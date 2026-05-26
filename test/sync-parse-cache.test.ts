@@ -21,6 +21,7 @@ import {
   project,
   setParseCacheSingleton,
   getParseCacheSingleton,
+  snapshotLookup,
   type CachedParseResult,
 } from '../src/sync/parseCache';
 import {
@@ -90,6 +91,10 @@ function makeFakeIdb<V>(): IdbStore<V> & { backing: Map<string, V>; ops: string[
     async getAll() {
       ops.push('getAll');
       return [...backing.values()];
+    },
+    async getAllEntries() {
+      ops.push('getAllEntries');
+      return [...backing.entries()];
     },
     close() {
       ops.push('close');
@@ -244,6 +249,63 @@ async function run(): Promise<void> {
     assert.ok(await cache.lookup('one'), 'MRU survives');
     assert.ok(await cache.lookup('three'), 'most-recent insert survives');
     ok('InMemoryParseCache: LRU eviction respects MRU bumps');
+  }
+
+  // ---------- InMemoryParseCache.snapshot: returns a frozen shallow copy ----------
+  {
+    const cache = new InMemoryParseCache();
+    await cache.record('aaa', makeSampleCached('aaa', false));
+    await cache.record('bbb', makeSampleCached('bbb', true));
+    const snap = await cache.snapshot();
+    assert.equal(snap.size, 2, 'snapshot includes both entries');
+    assert.equal(snap.get('aaa')?.sha256, 'aaa');
+    assert.equal(snap.get('bbb')?.sha256, 'bbb');
+
+    // Records added after snapshot() must NOT mutate the snapshot (frozen).
+    await cache.record('ccc', makeSampleCached('ccc', false));
+    assert.equal(snap.size, 2, 'snapshot is frozen against later record()');
+    assert.equal(snap.get('ccc'), undefined);
+
+    // But the underlying cache picked up the new entry — a fresh snapshot
+    // sees it.
+    const snap2 = await cache.snapshot();
+    assert.equal(snap2.size, 3, 'fresh snapshot picks up later record');
+
+    // Mutating the snapshot map must NOT mutate the cache.
+    snap.delete('aaa');
+    const hit = await cache.lookup('aaa');
+    assert.ok(hit, 'underlying cache still has the entry');
+    ok('InMemoryParseCache.snapshot returns a frozen shallow copy');
+  }
+
+  // ---------- snapshotLookup: snapshot hit short-circuits, miss falls through ----------
+  {
+    const cache = new InMemoryParseCache();
+    await cache.record('inboth', makeSampleCached('inboth', false));
+    await cache.record('cachonly', makeSampleCached('cachonly', false));
+    const snap = await cache.snapshot();
+    // Drop cachonly from the snapshot to simulate "added after snapshot".
+    snap.delete('cachonly');
+
+    // Snapshot hit — no underlying lookup needed.
+    const beforeHits = cache.stats().hits;
+    const hit1 = await snapshotLookup(snap, cache, 'inboth');
+    assert.equal(hit1?.sha256, 'inboth', 'snapshot hit returns the value');
+    assert.equal(cache.stats().hits, beforeHits, 'snapshot hit does not bump cache.stats.hits');
+
+    // Snapshot miss + cache hit — falls through to lookup().
+    const hit2 = await snapshotLookup(snap, cache, 'cachonly');
+    assert.equal(hit2?.sha256, 'cachonly', 'fallthrough returns cache value');
+    assert.equal(cache.stats().hits, beforeHits + 1, 'fallthrough bumps cache.stats.hits');
+
+    // Snapshot miss + no cache (snapshot-only mode).
+    const miss = await snapshotLookup(snap, undefined, 'cachonly');
+    assert.equal(miss, undefined, 'snapshot-only mode returns undefined on miss');
+
+    // Snapshot undefined + cache present — degenerates to plain cache.lookup.
+    const hit3 = await snapshotLookup(undefined, cache, 'inboth');
+    assert.equal(hit3?.sha256, 'inboth');
+    ok('snapshotLookup: hit short-circuits, miss falls through, both modes work');
   }
 
   // ---------- parsePptxCached: no cache → falls through to parsePptx ----------
@@ -434,6 +496,67 @@ async function run(): Promise<void> {
     ok('IndexedDbParseCache: parseResults hit + thumbnails miss → CachedParseResult with no thumbnail');
   }
 
+  // ---------- IndexedDbParseCache.snapshot: single getAll(), excludes identity-only + thumbnails ----------
+  {
+    const results = makeFakeIdb<ParseResultRecord>();
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    // Two full parse records (with flags) + one identity-only record (no
+    // flags — like a destination walk's recordIdentity payload).
+    await cache.record('aaa', makeSampleCached('aaa', true));
+    await cache.record('bbb', makeSampleCached('bbb', false));
+    // Identity-only record written directly into the fake — no flags, no
+    // sha (but real records always have sha so we set it). Mirrors what
+    // recordIdentity produces when no parse data exists yet.
+    results.backing.set('ccc', { sha256: 'ccc', knownAt: ['some/path'] });
+
+    results.ops.length = 0; // reset op trace
+    thumbs.ops.length = 0;
+
+    const snap = await cache.snapshot();
+
+    // One IDB op, not N — that's the headline contract.
+    assert.deepEqual(results.ops, ['getAll'], 'snapshot uses a single getAll on parseResults');
+    // Thumbnails store is not touched at all.
+    assert.deepEqual(thumbs.ops, [], 'snapshot does not touch the thumbnails store');
+
+    // Snapshot contains the two full records, excludes the identity-only.
+    assert.equal(snap.size, 2, 'identity-only record excluded');
+    assert.ok(snap.has('aaa'));
+    assert.ok(snap.has('bbb'));
+    assert.ok(!snap.has('ccc'), 'no-flags record excluded from snapshot');
+
+    // Even the entry that had a thumbnail in IDB comes back with thumbnail
+    // omitted — see the snapshot() JSDoc.
+    assert.equal(snap.get('aaa')?.thumbnail, undefined, 'thumbnails omitted from IDB snapshot');
+    ok('IndexedDbParseCache.snapshot: single getAll, no thumbnails, no identity-only');
+  }
+
+  // ---------- IndexedDbParseCache.snapshot: tolerates IDB read failure ----------
+  {
+    const results: IdbStore<ParseResultRecord> = {
+      async get() { return undefined; },
+      async put() { /* noop */ },
+      async delete() { /* noop */ },
+      async clear() { /* noop */ },
+      async count() { return 0; },
+      async getAll() { throw new Error('idb gone'); },
+      async getAllEntries() { throw new Error('idb gone'); },
+      close() { /* noop */ },
+    };
+    const thumbs = makeFakeIdb<Thumbnail>();
+    const cache = await IndexedDbParseCache.open({
+      openResults: async () => results,
+      openThumbnails: async () => thumbs,
+    });
+    const snap = await cache.snapshot();
+    assert.equal(snap.size, 0, 'IDB getAll failure → empty snapshot, no throw');
+    ok('IndexedDbParseCache.snapshot: tolerates IDB read failure');
+  }
+
   // ---------- IndexedDbParseCache: forget drops both stores ----------
   {
     const results = makeFakeIdb<ParseResultRecord>();
@@ -461,6 +584,7 @@ async function run(): Promise<void> {
       async clear() { /* noop */ },
       async count() { return 0; },
       async getAll() { return []; },
+      async getAllEntries() { return []; },
       close() { /* noop */ },
     };
     const thumbs = makeFakeIdb<Thumbnail>();

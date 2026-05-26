@@ -41,6 +41,36 @@ export interface ParseResultCache {
   stats(): ParseCacheStats;
 
   /**
+   * Walk-scoped batch read. Returns a synchronous Map<sha, CachedParseResult>
+   * with every currently-cached parse-data entry.
+   *
+   * Callers that walk a known set of files should call snapshot() once at
+   * walk start, consult the map per file via {@link snapshotLookup}, and
+   * fall through to {@link lookup} on snapshot miss so concurrent additions
+   * by another caller mid-walk are still observed.
+   *
+   * Implementation cost:
+   *   - In-memory tier: shallow copy of the internal map.
+   *   - IDB tier: one `getAll()` per store (results + thumbnails), then
+   *     join — O(2) IDB ops regardless of file count, vs O(2N) for N
+   *     per-file lookups under the old pattern.
+   *
+   * Snapshots are frozen at the moment they're returned — record()/forget()
+   * after snapshot() do not retroactively update the map. Discard at walk
+   * end. Identity-only records (no `flags`) are excluded; this snapshot is
+   * for full parse-data hits, mirroring lookup()'s contract.
+   *
+   * **Thumbnails are omitted from IDB-backed snapshots.** The thumbnail
+   * store is keyed externally and joining it would require a separate read.
+   * Callers that need thumbnails (viewer-open path) should use
+   * {@link lookup} instead — they're not part of any walk hot path. Snapshot
+   * consumers (validators) only read `flags` and `parseError`. In-memory
+   * snapshots include whatever thumbnails are present in the map (free
+   * because they're already in memory).
+   */
+  snapshot(): Promise<Map<string, CachedParseResult>>;
+
+  /**
    * Identity index lookup (M5.3 Phase D). Returns the list of rel-paths
    * where this content (sha256) has been observed via `recordIdentity`,
    * or undefined when no observations are recorded. Independent of the
@@ -157,6 +187,11 @@ export class InMemoryParseCache implements ParseResultCache {
   async forget(sha256: string): Promise<void> {
     this.map.delete(sha256);
     this.identityMap.delete(sha256);
+  }
+
+  async snapshot(): Promise<Map<string, CachedParseResult>> {
+    // Shallow copy — frozen at call time per the interface contract.
+    return new Map(this.map);
   }
 
   stats(): ParseCacheStats {
@@ -295,6 +330,34 @@ export function hydrate(c: CachedParseResult, info: FileInfo): ParseResult {
     parseError: c.parseError,
     // timings deliberately omitted on a cache hit — see CachedParseResult.
   };
+}
+
+// ───── snapshot-aware lookup helper ──────────────────────────────────────
+
+/**
+ * Walk-scoped lookup: consult the snapshot map first; on miss, fall through
+ * to the cache's per-call lookup so concurrent additions mid-walk are still
+ * observed. Pass `cache: undefined` to disable the fallback (snapshot-only).
+ *
+ * Hits served from the snapshot bypass `cache.stats().hits` — they didn't
+ * touch the underlying tier. Callers tracking per-walk wins should compare
+ * elapsed wall-clock instead.
+ *
+ * `snapshot: undefined` degenerates to plain `cache.lookup(sha)` — useful
+ * for callers that share a code path between walks (snapshot known) and
+ * one-off lookups (snapshot unavailable).
+ */
+export async function snapshotLookup(
+  snapshot: Map<string, CachedParseResult> | undefined,
+  cache: ParseResultCache | undefined,
+  sha256: string,
+): Promise<CachedParseResult | undefined> {
+  if (snapshot) {
+    const hit = snapshot.get(sha256);
+    if (hit) return hit;
+  }
+  if (cache) return cache.lookup(sha256);
+  return undefined;
 }
 
 // ───── module singleton ──────────────────────────────────────────────────

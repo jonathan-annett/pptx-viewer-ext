@@ -247,6 +247,43 @@ export class IndexedDbParseCache implements ParseResultCache {
     }
   }
 
+  /**
+   * Single-getAll() snapshot of the parseResults store. Joins nothing — the
+   * thumbnails store is excluded by design (see ParseResultCache.snapshot
+   * JSDoc). Identity-only records (no `flags`) are skipped, matching
+   * lookup()'s "full parse data only" contract. The returned map is
+   * caller-owned — mutate freely.
+   *
+   * Bypasses the in-memory LRU tier on both read and write: we don't want
+   * a snapshot for a 1000-file workspace to evict 800 useful entries from
+   * a 200-entry LRU. The snapshot map is the bounded structure for the
+   * duration of the walk; the LRU keeps serving its existing tenants for
+   * non-walk callers (viewer-open).
+   */
+  async snapshot(): Promise<Map<string, CachedParseResult>> {
+    let records: ParseResultRecord[];
+    try {
+      records = await this.resultsStore.getAll();
+    } catch {
+      // IDB failure — return whatever the in-memory tier knows. Better than
+      // throwing; callers fall through to per-call lookup() on snapshot miss.
+      return new Map(this.map);
+    }
+    const out = new Map<string, CachedParseResult>();
+    for (const record of records) {
+      // sha256 is the IDB key; the record carries it too as the canonical
+      // discriminator. Skip records without a sha (shouldn't happen — but
+      // defensive against partial writes from older versions).
+      if (!record.sha256) continue;
+      // Identity-only records have no `flags` — exclude from snapshot per
+      // the lookup() contract.
+      if (!record.flags) continue;
+      // hydrateCached with thumbnail=undefined; see snapshot() contract.
+      out.set(record.sha256, hydrateCached(record, undefined));
+    }
+    return out;
+  }
+
   async forget(sha256: string): Promise<void> {
     this.map.delete(sha256);
     this.identityMap.delete(sha256);

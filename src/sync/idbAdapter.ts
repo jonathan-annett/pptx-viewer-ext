@@ -29,6 +29,14 @@ export interface IdbStore<V> {
    * the whole store on startup.
    */
   getAll(): Promise<V[]>;
+  /**
+   * Read every entry in the store as [key, value] pairs. Like {@link getAll}
+   * but preserves keys — useful for cache snapshots where the value doesn't
+   * carry its key. Implemented via parallel `getAllKeys()` + `getAll()`;
+   * IndexedDB guarantees both return in the same key order so the zip is
+   * stable. Same caveats as getAll: linear in store size.
+   */
+  getAllEntries(): Promise<Array<[string, V]>>;
   /** Release the connection. Idempotent. */
   close(): void;
 }
@@ -222,6 +230,26 @@ function makeStoreView<V>(db: IDBDatabase, storeName: string, ownsConnection: bo
         req.onerror = () => reject(req.error);
         req.onsuccess = () => resolve(req.result as V[]);
       });
+    },
+    async getAllEntries(): Promise<Array<[string, V]>> {
+      // Two ops on one logical scan; the spec guarantees getAllKeys and
+      // getAll iterate in the same key order so zipping is stable. Issued
+      // in parallel — both share the same tier readonly tx model upstream.
+      const [keys, values] = await Promise.all([
+        new Promise<IDBValidKey[]>((resolve, reject) => {
+          const req = tx('readonly').getAllKeys();
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => resolve(req.result);
+        }),
+        new Promise<V[]>((resolve, reject) => {
+          const req = tx('readonly').getAll();
+          req.onerror = () => reject(req.error);
+          req.onsuccess = () => resolve(req.result as V[]);
+        }),
+      ]);
+      const out: Array<[string, V]> = new Array(keys.length);
+      for (let i = 0; i < keys.length; i++) out[i] = [String(keys[i]), values[i]];
+      return out;
     },
     close() {
       if (closed) return;

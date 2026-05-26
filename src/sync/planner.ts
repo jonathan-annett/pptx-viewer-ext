@@ -18,8 +18,16 @@ import type { FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree } from './walker';
 import { hashFileAtUri } from './hash';
-import { getHashCacheSingleton, type UriHashCache } from './hashCache';
-import { getParseCacheSingleton, type ParseResultCache } from './parseCache';
+import {
+  getHashCacheSingleton,
+  type HashCacheEntry,
+  type UriHashCache,
+} from './hashCache';
+import {
+  getParseCacheSingleton,
+  type CachedParseResult,
+  type ParseResultCache,
+} from './parseCache';
 import { vscodeFs } from './vscodeFs';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
@@ -189,6 +197,15 @@ async function planForSource(
   // singleton is initialised at activation; tests / no-cache contexts get
   // undefined and walkAndHash degrades to stat+read+hash.
   const cache = getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined;
+  // Walk-scoped hash-cache snapshot. One IDB `getAllEntries()` here replaces
+  // up to N+M per-file `lookup()` calls (N source files + M files per
+  // destination, summed across destinations). The snapshot is frozen at
+  // this moment; record() calls from per-file cache misses still go to the
+  // underlying cache and are picked up by snapshotHashLookup's fallthrough.
+  const hashSnapshot = cache ? await cache.snapshot() : undefined;
+  if (hashSnapshot) {
+    log(`sync: hash-cache snapshot: ${hashSnapshot.size} entr${hashSnapshot.size === 1 ? 'y' : 'ies'}`);
+  }
 
   // Parse cache (M5.3 Phase C): only the source walk validates, so this is
   // only consulted there. Stats are deltas of the cache's own counters around
@@ -198,6 +215,18 @@ async function planForSource(
   // validators degrade to plain parsePptx.
   const parseCache = getParseCacheSingleton();
   const parseBefore = snapshotParseStats(parseCache);
+
+  // Walk-scoped snapshot of the parse cache. One IDB `getAll()` here replaces
+  // up to N per-file `lookup()` round-trips inside the validator pass below.
+  // On a 24-file source with all hits warm this was the 2.5s bottleneck;
+  // snapshot collapses it to a single IDB op + N sync `Map.get` calls. The
+  // snapshot is frozen at this moment — record() calls from validators on
+  // misses still go to the underlying cache and are picked up by the
+  // fallthrough in snapshotLookup.
+  const parseSnapshot = parseCache ? await parseCache.snapshot() : undefined;
+  if (parseSnapshot) {
+    log(`sync: parse-cache snapshot: ${parseSnapshot.size} entr${parseSnapshot.size === 1 ? 'y' : 'ies'}`);
+  }
 
   let sourceFiles: FileInfo[] = [];
   const sourceStats = freshStats();
@@ -215,6 +244,8 @@ async function planForSource(
       cache,
       sourceStats,
       parseCache,
+      parseSnapshot,
+      hashSnapshot,
     );
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
@@ -256,6 +287,9 @@ async function planForSource(
         },
         cache,
         destStats,
+        undefined, // destination walk doesn't validate, so no parse cache
+        undefined, // ...and no parse snapshot either
+        hashSnapshot,
       );
     } catch (err) {
       log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
@@ -392,6 +426,8 @@ async function walkAndHash(
   cache: UriHashCache<vscode.Uri> | undefined,
   stats: PlanHashCacheStats,
   parseCache?: ParseResultCache,
+  parseSnapshot?: Map<string, CachedParseResult>,
+  hashSnapshot?: Map<string, HashCacheEntry>,
 ): Promise<FileInfo[]> {
   const entries = await walkTree(root, opts);
   const out: FileInfo[] = [];
@@ -407,15 +443,24 @@ async function walkAndHash(
       // compute — that's a non-trivial saving on big decks (~73% of the
       // parse cost on the 137MB sample per M5.2 timings).
       const needBytes = !!opts.validate;
-      // Snapshot cache stats before the call so we can tell hit vs miss.
-      // hashFileAtUri internally bumps the cache's hit/miss counter — but
-      // we want our own per-walk accounting that includes "no cache"
-      // calls (which never count as hits). Use a simple before/after
-      // delta on the cache's stats when one is present.
+      // Per-walk hit accounting: hashFileAtUri bumps the underlying cache's
+      // stats on lookup-tier hits but a snapshot hit bypasses lookup, so
+      // before/after delta on cache.stats wouldn't catch snapshot hits.
+      // Diff our own counter against the path the call returned: if we
+      // didn't have to read bytes (or we did, but the byte size matches
+      // the cache key shape), we know we got a sha out without re-hashing.
+      // Approximation: `bytes` undefined when needBytes=false and cache hit;
+      // any other shape means a fresh hash compute happened.
       const beforeHits = cache?.stats().hits ?? 0;
-      const result = await hashFileAtUri(fs, e.uri, cache, { needBytes });
+      const result = await hashFileAtUri(fs, e.uri, cache, {
+        needBytes,
+        snapshot: hashSnapshot,
+      });
       const afterHits = cache?.stats().hits ?? 0;
-      const wasHit = afterHits > beforeHits;
+      const cacheHit = afterHits > beforeHits;
+      const snapshotHit =
+        !!hashSnapshot && hashSnapshot.get(e.uri.toString())?.sha256 === result.sha256;
+      const wasHit = cacheHit || snapshotHit;
       stats.walked++;
       if (wasHit) {
         stats.hits++;
@@ -425,9 +470,16 @@ async function walkAndHash(
       }
       const info: FileInfo = { relPath: e.relPath, size: e.size, sha256: result.sha256 };
       if (opts.validate && result.bytes) {
-        // Pass sha256 + parseCache through so the pptx validator can use the
-        // content-hashed cache instead of re-parsing on every plan build.
-        const warnings = await runValidators(e.relPath, result.bytes, result.sha256, parseCache);
+        // Pass sha256 + parseCache + parseSnapshot through. The snapshot
+        // (when present) serves snapshot hits without an IDB round-trip;
+        // parseCache is the per-file fallback for snapshot misses.
+        const warnings = await runValidators(
+          e.relPath,
+          result.bytes,
+          result.sha256,
+          parseCache,
+          parseSnapshot,
+        );
         if (warnings.length > 0) info.warnings = warnings;
       }
       out.push(info);
@@ -449,10 +501,15 @@ async function runValidators(
   bytes: Uint8Array,
   sha256: string,
   parseCache: ParseResultCache | undefined,
+  parseSnapshot: Map<string, CachedParseResult> | undefined,
 ): Promise<PlanWarning[]> {
   if (isPptxPath(relPath)) {
     try {
-      return await validatePptxBytes(relPath, bytes, { sha256, cache: parseCache });
+      return await validatePptxBytes(relPath, bytes, {
+        sha256,
+        cache: parseCache,
+        snapshot: parseSnapshot,
+      });
     } catch (err) {
       log(`sync: validator failed for ${relPath} — ${errMsg(err)} (continuing without warnings)`);
       return [];

@@ -119,6 +119,26 @@ export class IndexedDbHashCache<U extends { toString(): string } = { toString():
     }
   }
 
+  /**
+   * Single getAllEntries() snapshot. Bypasses the in-memory LRU tier on
+   * both read and write: we don't want a 5000-entry snapshot to evict
+   * useful tenants from the bounded LRU. The snapshot map is the bounded
+   * structure for the duration of the walk.
+   */
+  async snapshot(): Promise<Map<string, HashCacheEntry>> {
+    let entries: Array<[string, HashCacheEntry]>;
+    try {
+      entries = await this.store.getAllEntries();
+    } catch {
+      // IDB failure — return whatever the in-memory tier knows. Better than
+      // throwing; per-call lookup() still works for snapshot misses.
+      return new Map(this.map);
+    }
+    const out = new Map<string, HashCacheEntry>();
+    for (const [k, v] of entries) out.set(k, v);
+    return out;
+  }
+
   stats(): HashCacheStats {
     return {
       entries: this.map.size,

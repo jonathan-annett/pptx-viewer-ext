@@ -3,7 +3,7 @@
 // because that module isn't available in the worker context.
 
 import type { SyncFs } from './executor';
-import type { UriHashCache } from './hashCache';
+import { snapshotHashLookup, type HashCacheEntry, type UriHashCache } from './hashCache';
 
 /**
  * Compute the SHA-256 of a byte buffer and return a lowercase hex string.
@@ -68,6 +68,14 @@ export interface HashFileAtUriOptions {
    * the cache values stay consistent with sha256Hex everywhere.
    */
   hash?: (bytes: Uint8Array) => Promise<string>;
+  /**
+   * Walk-scoped snapshot of the URI hash cache, consulted before {@link
+   * cache}. Callers walking many files should call `cache.snapshot()` once
+   * before the walk and thread the resulting map through every per-file
+   * hash call. Snapshot hits avoid the IDB round-trip; `cache` is still
+   * the per-file fallback on miss.
+   */
+  snapshot?: Map<string, HashCacheEntry>;
 }
 
 export async function hashFileAtUri<U extends { toString(): string }>(
@@ -80,8 +88,12 @@ export async function hashFileAtUri<U extends { toString(): string }>(
   const hashFn = opts?.hash ?? sha256Hex;
   const stat = await fs.stat(uri);
 
-  if (cache) {
-    const cached = await cache.lookup(uri, stat.size, stat.mtime);
+  // Consult the snapshot first (sync Map.get with size/mtime validation),
+  // then fall through to per-call cache.lookup() so a record() that landed
+  // mid-walk from another caller is still observed. Either tier returns a
+  // sha string on hit, undefined on miss.
+  if (opts?.snapshot || cache) {
+    const cached = await snapshotHashLookup(opts?.snapshot, cache, uri, stat.size, stat.mtime);
     if (cached !== undefined) {
       if (!needBytes) {
         return { sha256: cached, size: stat.size, mtime: stat.mtime };

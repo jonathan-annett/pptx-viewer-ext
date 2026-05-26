@@ -25,6 +25,25 @@ export interface UriHashCache<U = { toString(): string }> {
   forget(uri: U): Promise<void>;
   /** Diagnostics: entry count + hits/misses since construction. */
   stats(): HashCacheStats;
+
+  /**
+   * Walk-scoped batch read. Returns a synchronous Map<uriString, HashCacheEntry>
+   * of every currently-cached entry.
+   *
+   * Callers that walk a known set of files should call snapshot() once at
+   * walk start, consult the map per file via {@link snapshotHashLookup},
+   * and fall through to {@link lookup} on snapshot miss. The entry's
+   * size/mtime still need validation per-file (file may have changed since
+   * snapshot was taken) — the lookup helper does that.
+   *
+   * Implementation cost:
+   *   - In-memory tier: shallow copy of the internal map.
+   *   - IDB tier: one `getAllEntries()` op — O(1) IDB op regardless of
+   *     file count, vs O(N) for N per-file lookups.
+   *
+   * Snapshots are frozen at the moment they're returned. Discard at walk end.
+   */
+  snapshot(): Promise<Map<string, HashCacheEntry>>;
 }
 
 export interface HashCacheStats {
@@ -133,6 +152,10 @@ export class InMemoryHashCache<U extends { toString(): string } = { toString(): 
     this.map.delete(uri.toString());
   }
 
+  async snapshot(): Promise<Map<string, HashCacheEntry>> {
+    return new Map(this.map);
+  }
+
   stats(): HashCacheStats {
     return {
       entries: this.map.size,
@@ -141,6 +164,32 @@ export class InMemoryHashCache<U extends { toString(): string } = { toString(): 
       idb: false,
     };
   }
+}
+
+// ───── snapshot-aware lookup helper ──────────────────────────────────────
+
+/**
+ * Walk-scoped lookup: consult the snapshot map first (validating
+ * size/mtime — a snapshot entry with stale stat is treated as a miss).
+ * On miss, fall through to the cache's per-call lookup so concurrent
+ * additions mid-walk are observed.
+ *
+ * Hits served from the snapshot bypass `cache.stats().hits` — callers
+ * tracking per-walk wins should compare elapsed wall-clock instead.
+ */
+export async function snapshotHashLookup<U extends { toString(): string }>(
+  snapshot: Map<string, HashCacheEntry> | undefined,
+  cache: UriHashCache<U> | undefined,
+  uri: U,
+  size: number,
+  mtime: number,
+): Promise<string | undefined> {
+  if (snapshot) {
+    const e = snapshot.get(uri.toString());
+    if (e && e.size === size && e.mtime === mtime) return e.sha256;
+  }
+  if (cache) return cache.lookup(uri, size, mtime);
+  return undefined;
 }
 
 // ───── module singleton ──────────────────────────────────────────────────

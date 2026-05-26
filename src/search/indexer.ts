@@ -31,11 +31,14 @@ import type { FileInfo } from '../pptx';
 import { hashFileAtUri } from '../sync/hash';
 import {
   getHashCacheSingleton,
+  type HashCacheEntry,
   type UriHashCache,
 } from '../sync/hashCache';
 import {
   getParseCacheSingleton,
   parsePptxCached,
+  snapshotLookup,
+  type CachedParseResult,
   type ParseResultCache,
 } from '../sync/parseCache';
 import type { SyncManager } from '../sync/manager';
@@ -327,12 +330,30 @@ export function startSearchIndexer(
       log(`search-indexer: dropped ${stale.length} stale URI(s) from engine`);
     }
 
+    // Walk-scoped snapshots: one getAll() per cache replaces N per-URI
+    // lookups inside processUri's hot path. Warm IDB cache + 100-file
+    // workspace drops from ~hundreds-of-ms-per-walk into single-digit-ms.
+    // Snapshots are frozen at this moment — record() from misses still
+    // goes to the underlying caches and is picked up on the next pass.
+    const hashCache = opts.hashCache ?? (getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined);
+    const parseCache = opts.parseCache ?? getParseCacheSingleton();
+    const walkSnapshots = {
+      hash: hashCache ? await hashCache.snapshot() : undefined,
+      parse: parseCache ? await parseCache.snapshot() : undefined,
+    };
+    if (walkSnapshots.hash || walkSnapshots.parse) {
+      log(
+        `search-indexer: snapshots — hash=${walkSnapshots.hash?.size ?? 0} ` +
+          `parse=${walkSnapshots.parse?.size ?? 0}`,
+      );
+    }
+
     let done = 0;
     for (const uri of allUris) {
       if (disposed) return;
       emitProgress({ phase: 'projecting', done, total });
       try {
-        await processUri(uri);
+        await processUri(uri, walkSnapshots);
       } catch (err) {
         stats.errors++;
         log(
@@ -368,14 +389,23 @@ export function startSearchIndexer(
    *      had to read), call parsePptxCached (which will populate the
    *      parseCache for future runs), project, upsert.
    */
-  async function processUri(uri: vscode.Uri): Promise<void> {
+  async function processUri(
+    uri: vscode.Uri,
+    walkSnapshots?: {
+      hash?: Map<string, HashCacheEntry>;
+      parse?: Map<string, CachedParseResult>;
+    },
+  ): Promise<void> {
     const hashCache = opts.hashCache ?? (getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined);
     const parseCache = opts.parseCache ?? getParseCacheSingleton();
 
     // First read: stat + maybe-read for the hash. Source-walk style —
     // bytes returned only on cache miss, which is when we'll likely need
     // them anyway (parse). Hits skip the read.
-    const hashed = await hashFileAtUri(fs, uri, hashCache, { needBytes: false });
+    const hashed = await hashFileAtUri(fs, uri, hashCache, {
+      needBytes: false,
+      snapshot: walkSnapshots?.hash,
+    });
     const sha = hashed.sha256;
     const info: FileInfo = {
       fileName: basenameOf(uri.toString()),
@@ -456,9 +486,12 @@ export function startSearchIndexer(
       }
     }
 
-    // Step 3: parse cache hit — project from the cached payload.
-    if (parseCache) {
-      const cachedParse = await parseCache.lookup(sha);
+    // Step 3: parse cache hit — project from the cached payload. snapshotLookup
+    // consults the walk-scoped snapshot first (sync Map.get) before falling
+    // through to per-call cache.lookup() — keeps the cold-walk fanout to a
+    // single IDB op instead of N per-URI lookups.
+    if (parseCache || walkSnapshots?.parse) {
+      const cachedParse = await snapshotLookup(walkSnapshots?.parse, parseCache, sha);
       if (cachedParse) {
         const projection = projectFromCached(cachedParse, info);
         opts.engine.addOrUpdate(uri.toString(), projection);

@@ -16,6 +16,7 @@ import {
   InMemoryHashCache,
   lruGet,
   lruPut,
+  snapshotHashLookup,
   type HashCacheEntry,
   type UriHashCache,
 } from '../src/sync/hashCache';
@@ -167,6 +168,50 @@ test('InMemoryHashCache: size/mtime mismatch invalidates entry', async () => {
   assert.equal(await cache.lookup('u', 10, 100), 'aa');
 });
 
+test('InMemoryHashCache.snapshot: returns a frozen shallow copy', async () => {
+  const cache = new InMemoryHashCache<string>();
+  await cache.record('a', 1, 100, 'aha');
+  await cache.record('b', 2, 200, 'bha');
+  const snap = await cache.snapshot();
+  assert.equal(snap.size, 2);
+  assert.equal(snap.get('a')?.sha256, 'aha');
+  assert.equal(snap.get('b')?.sha256, 'bha');
+
+  // Records added after snapshot() must NOT mutate the snapshot.
+  await cache.record('c', 3, 300, 'cha');
+  assert.equal(snap.size, 2, 'snapshot frozen against later record');
+
+  // Mutating the snapshot map must NOT mutate the cache.
+  snap.delete('a');
+  assert.equal(await cache.lookup('a', 1, 100), 'aha', 'underlying cache untouched');
+});
+
+test('snapshotHashLookup: snapshot hit, snapshot miss + cache hit, snapshot miss only', async () => {
+  const cache = new InMemoryHashCache<string>();
+  await cache.record('inboth', 1, 100, 'aha');
+  await cache.record('cacheonly', 2, 200, 'bha');
+  const snap = await cache.snapshot();
+  snap.delete('cacheonly'); // simulate "added after snapshot"
+
+  // Snapshot hit — no cache lookup.
+  const beforeHits = cache.stats().hits;
+  const hit1 = await snapshotHashLookup(snap, cache, 'inboth', 1, 100);
+  assert.equal(hit1, 'aha');
+  assert.equal(cache.stats().hits, beforeHits, 'snapshot hit does not bump cache.stats.hits');
+
+  // Snapshot present but size/mtime mismatch → treated as miss, falls through.
+  const hit2 = await snapshotHashLookup(snap, cache, 'inboth', 999, 100);
+  assert.equal(hit2, undefined, 'mismatched stat → snapshot miss + cache miss');
+
+  // Snapshot miss + cache hit.
+  const hit3 = await snapshotHashLookup(snap, cache, 'cacheonly', 2, 200);
+  assert.equal(hit3, 'bha', 'fallthrough returns cache value');
+
+  // Snapshot undefined + cache present.
+  const hit4 = await snapshotHashLookup(undefined, cache, 'inboth', 1, 100);
+  assert.equal(hit4, 'aha');
+});
+
 test('InMemoryHashCache: forget drops an entry', async () => {
   const cache = new InMemoryHashCache<string>();
   await cache.record('u', 10, 100, 'aa');
@@ -269,6 +314,7 @@ test('hashFileAtUri: throwing cache.record does not propagate', async () => {
     async lookup() { return undefined; },
     async record() { throw new Error('idb-full'); },
     async forget() { /* noop */ },
+    async snapshot() { return new Map(); },
     stats() { return { entries: 0, hits: 0, misses: 0, idb: true }; },
   };
   // Should not reject.
@@ -306,6 +352,10 @@ function makeFakeIdb<V>(): IdbStore<V> & { backing: Map<string, V>; ops: string[
     async getAll() {
       ops.push('getAll');
       return [...backing.values()];
+    },
+    async getAllEntries() {
+      ops.push('getAllEntries');
+      return [...backing.entries()];
     },
     close() {
       ops.push('close');
@@ -370,6 +420,38 @@ test('IndexedDbHashCache: forget drops both tiers', async () => {
   assert.equal(await cache.lookup('u', 10, 100), undefined);
 });
 
+test('IndexedDbHashCache.snapshot: single getAllEntries(), preserves keys', async () => {
+  const store = makeFakeIdb<HashCacheEntry>();
+  store.backing.set('u1', { size: 10, mtime: 100, sha256: 'aha' });
+  store.backing.set('u2', { size: 20, mtime: 200, sha256: 'bha' });
+  const cache = await IndexedDbHashCache.open<string>({ open: async () => store });
+
+  store.ops.length = 0;
+  const snap = await cache.snapshot();
+
+  // Single IDB op, not N.
+  assert.deepEqual(store.ops, ['getAllEntries'], 'snapshot uses a single getAllEntries');
+  assert.equal(snap.size, 2);
+  assert.equal(snap.get('u1')?.sha256, 'aha');
+  assert.equal(snap.get('u2')?.sha256, 'bha');
+});
+
+test('IndexedDbHashCache.snapshot: tolerates IDB read failure', async () => {
+  const store: IdbStore<HashCacheEntry> = {
+    async get() { return undefined; },
+    async put() { /* ok */ },
+    async delete() { /* ok */ },
+    async clear() { /* ok */ },
+    async count() { return 0; },
+    async getAll() { return []; },
+    async getAllEntries() { throw new Error('idb gone'); },
+    close() { /* ok */ },
+  };
+  const cache = await IndexedDbHashCache.open<string>({ open: async () => store });
+  const snap = await cache.snapshot();
+  assert.equal(snap.size, 0, 'IDB failure → empty snapshot, no throw');
+});
+
 test('IndexedDbHashCache: tolerates IDB.put failure (in-memory still works)', async () => {
   const store: IdbStore<HashCacheEntry> = {
     async get() { return undefined; },
@@ -378,6 +460,7 @@ test('IndexedDbHashCache: tolerates IDB.put failure (in-memory still works)', as
     async clear() { /* ok */ },
     async count() { return 0; },
     async getAll() { return []; },
+    async getAllEntries() { return []; },
     close() { /* ok */ },
   };
   const cache = await IndexedDbHashCache.open<string>({ open: async () => store });
