@@ -11,6 +11,12 @@ desktop VS Code.
 > thumbnail) so you can tell what a file is at a glance before opening
 > it in PowerPoint, Keynote, or LibreOffice.
 
+> **Pre-release.** Versions in the `0.1.x` series are pre-1.0 builds. See
+> **[CHANGELOG.md](./CHANGELOG.md)** (also rendered as the *Changelog* tab
+> on the Marketplace listing) for what's landed in each publish — and
+> what's queued in the live test build at
+> <https://vscode.sophtwhere.com> ahead of the next publish.
+
 ---
 
 ## Three features, useable independently
