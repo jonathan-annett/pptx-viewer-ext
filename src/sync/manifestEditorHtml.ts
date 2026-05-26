@@ -36,6 +36,20 @@ export interface ManifestEditorDecisionRow {
   decidedAtIso: string;
 }
 
+/**
+ * Two presentation modes:
+ *   - `'mainUser'` — the user who orchestrates syncs from above. Sees the
+ *     full manifest, including the Decisions table (their own remembered
+ *     "don't ask again" toggles).
+ *   - `'operator'` — destination-only workspace. Decisions are source-side
+ *     state (set in the plan webview, which doesn't exist here), so the
+ *     section is hidden. Disclaimer copy is also operator-appropriate.
+ *
+ * Defaults to `'mainUser'` so callers that don't supply it keep the
+ * existing rendering.
+ */
+export type ManifestEditorMode = 'mainUser' | 'operator';
+
 export interface ManifestEditorOkViewModel {
   kind: 'ok';
   /** Display label for the destination root URI. */
@@ -46,6 +60,7 @@ export interface ManifestEditorOkViewModel {
   lastSyncLabel: string;
   entries: ManifestEditorEntryRow[];
   decisions: ManifestEditorDecisionRow[];
+  mode: ManifestEditorMode;
 }
 
 export interface ManifestEditorMismatchViewModel {
@@ -53,6 +68,7 @@ export interface ManifestEditorMismatchViewModel {
   destRootLabel: string;
   /** Stringified `actual` value from the read result. */
   actualLabel: string;
+  mode: ManifestEditorMode;
 }
 
 export type ManifestEditorViewModel =
@@ -72,12 +88,14 @@ export function toManifestViewModel(
   read: ManifestReadResult,
   destRootLabel: string,
   now: Date = new Date(),
+  mode: ManifestEditorMode = 'mainUser',
 ): ManifestEditorViewModel {
   if (read.kind === 'version-mismatch') {
     return {
       kind: 'version-mismatch',
       destRootLabel,
       actualLabel: stringifyActual(read.actual),
+      mode,
     };
   }
   return {
@@ -87,6 +105,7 @@ export function toManifestViewModel(
     lastSyncLabel: formatLastSync(read.manifest.lastSync, now),
     entries: shapeEntries(read.manifest, now),
     decisions: shapeDecisions(read.manifest, now),
+    mode,
   };
 }
 
@@ -197,24 +216,27 @@ export function renderManifestEditorHtml(
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<title>Folder Sync manifest</title>
+<title>Folder Sync Manifest</title>
 <style>${STYLE}</style>
 </head>
 <body>
   <header class="page-header">
-    <h1>Folder Sync manifest</h1>
-    <p class="subtle">This file is managed automatically by Folder Sync. It records which files have been synced to this destination, their hashes at placement time, and any per-file decisions you've toggled in the plan. <strong>Do not hand-edit</strong> — the executor will rewrite it on the next sync run. Use <em>Reopen as text</em> if you need to inspect or hand-edit (e.g. for debugging).</p>
+    <h1 class="mono">${escapeHtml(vm.destRootLabel)}</h1>
+    <p class="subtitle">Folder Sync Manifest</p>
   </header>
 
   <section class="card">
     <h2>Header</h2>
     <dl class="kv">
-      <dt>Destination root</dt><dd class="mono small">${escapeHtml(vm.destRootLabel)}</dd>
       ${renderHeaderRows(vm)}
     </dl>
   </section>
 
   ${renderBody(vm)}
+
+  <footer class="page-footer">
+    <p class="subtle">${renderDisclaimer(vm.mode)}</p>
+  </footer>
 
   <section class="actions">
     <button id="open-text" class="btn btn-secondary" type="button" title="Open this file in the default JSON editor">Reopen as text</button>
@@ -223,6 +245,17 @@ export function renderManifestEditorHtml(
   <script nonce="${nonce}">${CLIENT_JS}</script>
 </body>
 </html>`;
+}
+
+function renderDisclaimer(mode: ManifestEditorMode): string {
+  if (mode === 'operator') {
+    // Operator can't trigger a sync from this workspace; the relevant
+    // warning is "don't hand-edit the destination's tracking record".
+    // The decisions clause doesn't apply (decisions are source-side state
+    // and the section is hidden in operator mode).
+    return `This file is the destination's sync manifest, managed by Folder Sync from the source side. It records which files have been synced to this destination and their hashes at placement time. <strong>Do not hand-edit</strong> — the source will rewrite it on the next sync run. Use <em>Reopen as text</em> if you need to inspect (e.g. for debugging).`;
+  }
+  return `This file is managed automatically by Folder Sync. It records which files have been synced to this destination, their hashes at placement time, and any per-file decisions you've toggled in the plan. <strong>Do not hand-edit</strong> — the executor will rewrite it on the next sync run. Use <em>Reopen as text</em> if you need to inspect or hand-edit (e.g. for debugging).`;
 }
 
 function renderHeaderRows(vm: ManifestEditorViewModel): string {
@@ -244,13 +277,20 @@ function renderBody(vm: ManifestEditorViewModel): string {
     </div>
   </section>`;
   }
-  return `
+  const entriesSection = `
   <section class="card">
     <h2>Entries <span class="count">(${vm.entries.length})</span></h2>
     ${vm.entries.length === 0
       ? '<p class="hint"><em>No tracked entries — nothing has been synced to this destination yet.</em></p>'
       : renderEntriesTable(vm.entries)}
-  </section>
+  </section>`;
+  // Decisions are source-side state — the operator has no plan webview
+  // to toggle "don't ask again" from, so the section is hidden in operator
+  // mode rather than rendering an always-empty table with confusing copy.
+  if (vm.mode === 'operator') {
+    return entriesSection;
+  }
+  return `${entriesSection}
 
   <section class="card">
     <h2>Decisions <span class="count">(${vm.decisions.length})</span></h2>
@@ -341,13 +381,34 @@ body {
   max-width: 1100px;
   margin: 0 auto;
 }
-h1 { font-size: 1.4em; margin: 0 0 4px; }
+h1 {
+  font-size: 1.35em;
+  margin: 0 0 2px;
+  word-break: break-all;
+  line-height: 1.25;
+}
+h1.mono { font-family: var(--vscode-editor-font-family); }
 h2 { font-size: 1.05em; margin: 0 0 10px; }
 .subtle, .hint {
   color: var(--vscode-descriptionForeground);
   font-size: 0.9em;
   margin: 0 0 12px;
 }
+.page-header {
+  margin: 0 0 16px;
+}
+.subtitle {
+  margin: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.95em;
+  letter-spacing: 0.02em;
+}
+.page-footer {
+  margin: 24px 0 4px;
+  border-top: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.2));
+  padding-top: 12px;
+}
+.page-footer .subtle { margin: 0; }
 .mono {
   font-family: var(--vscode-editor-font-family);
 }

@@ -135,7 +135,9 @@ test('renderer emits a CSP meta tag with the supplied nonce', () => {
 test('renderer shows the empty state when there are no entries or decisions', () => {
   const vm = toManifestViewModel(okRead(emptyManifest()), '/x', NOW);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /<h1>Folder Sync manifest<\/h1>/);
+  // Title hierarchy: dest root is the h1, "Folder Sync Manifest" is the subtitle.
+  assert.match(html, /<h1[^>]*>\/x<\/h1>/);
+  assert.match(html, /<p class="subtitle">Folder Sync Manifest<\/p>/);
   assert.match(html, /<h2>Entries <span class="count">\(0\)<\/span><\/h2>/);
   assert.match(html, /<h2>Decisions <span class="count">\(0\)<\/span><\/h2>/);
   assert.match(html, /No tracked entries/);
@@ -237,10 +239,90 @@ test('renderer html-escapes user-controlled strings', () => {
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
-test('renderer surfaces the destRootLabel in the header', () => {
+test('renderer surfaces the destRootLabel as the page title', () => {
   const vm = toManifestViewModel(okRead(emptyManifest()), 'workspaceA/dest', NOW);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /workspaceA\/dest/);
+  assert.match(html, /<h1[^>]*>workspaceA\/dest<\/h1>/);
+});
+
+test('renderer html-escapes the destRootLabel in the h1', () => {
+  const vm = toManifestViewModel(okRead(emptyManifest()), '<bad>&"', NOW);
+  const html = renderManifestEditorHtml(vm, 'n');
+  // Raw chars must not leak into the h1.
+  assert.ok(!/\<h1[^>]*>[^<]*<bad>/.test(html), 'unescaped < leaked into h1');
+  assert.match(html, /&lt;bad&gt;&amp;&quot;/);
+});
+
+test('renderer drops the duplicate Destination root row from the Header section', () => {
+  // Previously the dest root was both the h2-section row and the section
+  // header. Now the h1 carries it, so the dl row should be gone.
+  const vm = toManifestViewModel(okRead(emptyManifest()), '/some/dest', NOW);
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.doesNotMatch(html, /<dt>Destination root<\/dt>/);
+});
+
+test('renderer moves the "managed automatically" disclaimer to the page footer', () => {
+  const vm = toManifestViewModel(okRead(emptyManifest()), '/x', NOW);
+  const html = renderManifestEditorHtml(vm, 'n');
+  // Disclaimer should appear AFTER the entries section, inside a footer.
+  assert.match(html, /<footer class="page-footer">[\s\S]*managed automatically by Folder Sync/);
+  // And must NOT appear in the header anymore.
+  const headerSlice = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+  assert.ok(!/managed automatically/.test(headerSlice), 'disclaimer should not be in header');
+});
+
+// ───── operator mode ────────────────────────────────────────────────────
+
+test('operator mode: Decisions section is hidden', () => {
+  const m: Manifest = {
+    version: 1,
+    lastSync: '2026-05-23T10:00:00.000Z',
+    entries: {
+      'src:a.txt': {
+        destPath: 'a.txt',
+        size: 100,
+        sha256: 'aaaaaaaaaaaa',
+        syncedAt: '2026-05-23T11:00:00.000Z',
+      },
+    },
+    // A decision exists in the data — operator mode should still hide
+    // the section so source-side state doesn't leak into the operator's
+    // view.
+    decisions: {
+      'src:a.txt': {
+        destOnlyDelete: false,
+        collisionOverwrite: true,
+        warningOverride: false,
+        decidedAt: '2026-05-23T09:00:00.000Z',
+      },
+    },
+  };
+  const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator');
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.doesNotMatch(html, /<h2>Decisions /);
+  assert.doesNotMatch(html, /Overwrite collision/);
+  // Entries still rendered.
+  assert.match(html, /<h2>Entries /);
+  assert.match(html, /src:a\.txt/);
+});
+
+test('operator mode: disclaimer copy is operator-appropriate', () => {
+  const vm = toManifestViewModel(okRead(emptyManifest()), '/dest', NOW, 'operator');
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.match(html, /managed by Folder Sync from the source side/);
+  // Main-user copy mentions "decisions you've toggled in the plan" —
+  // operators have no plan, so that phrasing must be gone.
+  assert.doesNotMatch(html, /decisions you[^<]*toggled/);
+});
+
+test('default mode is mainUser (back-compat for callers that omit it)', () => {
+  const vm = toManifestViewModel(okRead(emptyManifest()), '/x', NOW);
+  assert.equal(vm.kind, 'ok');
+  if (vm.kind !== 'ok') return;
+  assert.equal(vm.mode, 'mainUser');
+  const html = renderManifestEditorHtml(vm, 'n');
+  // Main-user rendering still shows the Decisions section.
+  assert.match(html, /<h2>Decisions /);
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

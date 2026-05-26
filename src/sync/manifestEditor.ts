@@ -21,7 +21,12 @@ import { parseManifestText } from './manifest-types';
 import {
   renderManifestEditorHtml,
   toManifestViewModel,
+  type ManifestEditorMode,
 } from './manifestEditorHtml';
+import {
+  getDestinationOnlyState,
+  onDidChangeDestinationOnlyState,
+} from './destinationOnlyWired';
 
 const VIEW_TYPE = 'folderSync.manifestEditor';
 const MANIFEST_FILENAME = '.foldersync-manifest.json';
@@ -58,8 +63,17 @@ export class ManifestEditorProvider implements vscode.CustomTextEditorProvider {
       panel.webview.html = this.renderFor(document);
     });
 
+    // Re-render when the workspace transitions into or out of destination-
+    // only mode (e.g. user adds a .sync.jsonc to a previously operator-
+    // only workspace). Hides/shows the Decisions section and swaps the
+    // disclaimer copy without the user needing to reopen the file.
+    const modeSub = onDidChangeDestinationOnlyState(() => {
+      panel.webview.html = this.renderFor(document);
+    });
+
     panel.onDidDispose(() => {
       docSub.dispose();
+      modeSub.dispose();
     });
 
     panel.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
@@ -79,7 +93,10 @@ export class ManifestEditorProvider implements vscode.CustomTextEditorProvider {
   private renderFor(document: vscode.TextDocument): string {
     const result = parseManifestText(document.getText());
     const destRootLabel = labelForManifest(document.uri);
-    const vm = toManifestViewModel(result, destRootLabel);
+    const mode: ManifestEditorMode = getDestinationOnlyState().isDestinationOnly
+      ? 'operator'
+      : 'mainUser';
+    const vm = toManifestViewModel(result, destRootLabel, new Date(), mode);
     return renderManifestEditorHtml(vm, makeNonce());
   }
 }
