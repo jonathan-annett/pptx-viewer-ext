@@ -76,6 +76,42 @@ function manifestUriForFolder(folderUri: vscode.Uri): vscode.Uri {
   return vscode.Uri.joinPath(folderUri, MANIFEST_FILENAME);
 }
 
+/**
+ * Synchronous(-ish, async) FS-driven detect for "are we currently in
+ * destination-only mode?". Uses `vscode.workspace.findFiles` for source
+ * presence and `fs.stat` for manifest presence — doesn't require the
+ * `SyncManager` or the wired layer's presence map, so it's safe to call
+ * before either of those exists.
+ *
+ * Used as a fire-time gate by source-side machinery that needs to skip
+ * work in operator mode but runs before the wired layer's initial scan
+ * completes (the snapshot writer's first fire) or before activation has
+ * even built the manager (the workspace-lock-settings seeder).
+ *
+ * Same semantics as `isDestinationOnlyTopology`:
+ *   - zero workspace folders → false (no signal)
+ *   - any `.sync.jsonc` anywhere → false (workspace has sources)
+ *   - otherwise → true iff at least one workspace folder has a
+ *     `.foldersync-manifest.json` at its root.
+ */
+export async function detectDestinationOnlyFromFs(): Promise<boolean> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) return false;
+  // `maxResults: 1` short-circuits the glob as soon as one .sync.jsonc is
+  // found anywhere in the workspace — we only need the boolean.
+  const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+  if (sources.length > 0) return false;
+  for (const folder of folders) {
+    try {
+      await vscode.workspace.fs.stat(manifestUriForFolder(folder.uri));
+      return true;
+    } catch {
+      // No manifest at this folder's root — keep looking.
+    }
+  }
+  return false;
+}
+
 async function statManifest(uri: vscode.Uri): Promise<boolean> {
   try {
     await vscode.workspace.fs.stat(uri);

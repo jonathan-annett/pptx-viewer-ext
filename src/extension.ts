@@ -16,6 +16,7 @@ import { ManifestEditorProvider } from './sync/manifestEditor';
 import { registerProbe } from './sync/probe';
 import {
   activateDestinationOnlyContextKey,
+  detectDestinationOnlyFromFs,
   registerDestinationOnlyProbe,
 } from './sync/destinationOnlyWired';
 import { registerUploadProbe } from './upload/probeUpload';
@@ -116,8 +117,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // already set these at workspace scope or when the snapshot just restored
   // them. Must run AFTER maybeRestore (snapshot wins) and BEFORE the manager
   // first emits (so the snapshot writer's initial state captures them).
+  //
+  // Skipped entirely in destination-only mode — workspaceFolders[0] is itself
+  // a destination there, so the "writable carve-out" semantics don't apply
+  // and seeding readonlyInclude would falsely lock the operator out of their
+  // own workspace folder.
   try {
-    await ensureWorkspaceLockSettings();
+    if (await detectDestinationOnlyFromFs()) {
+      log('snapshot: destination-only workspace detected — skipping lock-settings seed');
+    } else {
+      await ensureWorkspaceLockSettings();
+    }
   } catch (err) {
     log(`snapshot: ensureWorkspaceLockSettings threw — ${err instanceof Error ? err.message : String(err)}`);
   }

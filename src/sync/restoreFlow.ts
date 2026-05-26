@@ -22,6 +22,7 @@ import {
   type Snapshot,
 } from './snapshotStore';
 import { KNOWN_WORKSPACE_KEYS } from './snapshot';
+import { detectDestinationOnlyFromFs } from './destinationOnlyWired';
 
 const PENDING_SETTINGS_KEY = 'folderSync.snapshotPendingSettings';
 
@@ -354,6 +355,16 @@ export function startSnapshotWriter(
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
       log('snapshot: no workspace folders — skipping write');
+      return;
+    }
+    // Skip in destination-only mode — writing .admin-sync.jsonc into a
+    // destination workspace creates a spurious source-side artifact and
+    // would surface as a stray tracked file the next time someone opens
+    // that destination as a source. Re-evaluated per fire so the
+    // operator → main-user transition (user adds a .sync.jsonc) starts
+    // writing again on the next change.
+    if (await detectDestinationOnlyFromFs()) {
+      log('snapshot: destination-only workspace — skipping write');
       return;
     }
     const target = folders[0].uri;
