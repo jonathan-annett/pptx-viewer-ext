@@ -6,3 +6,13 @@ dist/
 .pat.env
 .claude/settings.local.json
 
+# Agent / planning docs — kept locally, not in the public repo. Move
+# anything load-bearing for marketplace users into README.md / CHANGELOG.md
+# instead of writing new files matching these patterns.
+CLAUDE.md
+SHIPPED.md
+DEVELOPMENT.md
+desktop-support-review.md
+*-plan.md
+*-report.md
+
