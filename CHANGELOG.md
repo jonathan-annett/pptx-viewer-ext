@@ -10,9 +10,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); sub-sections use
 
 ---
 
-## [Unreleased] — working towards 0.1.2
+## [Unreleased]
 
-_Live on the test instance at `vscode.sophtwhere.com`; not yet published to the Marketplace. Available via the GitHub release page as a `.vsix` for self-install when a build is cut._
+_No entries yet — add bullets here as user-facing changes land between marketplace publishes._
+
+---
+
+## [0.1.3] — 2026-05-26
 
 ### Added
 - **Placeholder files registry.** Workspace-level "this file is a stub, not real content yet" tracking. The admin editor (`.admin-sync.jsonc`) has a new **Placeholders** card — the empty-file sha is locked as the default, and you can add custom blank-template decks via an "Add placeholder…" file picker.
@@ -23,12 +27,16 @@ _Live on the test instance at `vscode.sophtwhere.com`; not yet published to the 
 ### Changed
 - **Plan view row layout.** Per-file rows reorganised so chips/badges/decisions appear right after the filename and the size + hash columns anchor to a stable right-aligned column. Affordance accumulation no longer pushes the data columns around.
 
-### Fixed
-- **Desktop VS Code compatibility.** Cold-restore paths now correctly gate on the web host. Desktop VS Code no longer attempts the vscode.dev silent-restore flow on activation.
-
 ### Performance
 - **Batched IDB reads.** Viewer-open of a non-placeholder `.pptx` drops from **~2.5s to sub-100ms** on warm caches. The hash cache and parse cache each collapse N per-file lookups into one bulk read per walk.
 - **Zero-byte short-circuit.** Empty placeholder `.pptx` files open without any cache or storage round-trip.
+
+---
+
+## [0.1.2] — 2026-05-25
+
+### Fixed
+- **Desktop VS Code compatibility.** Cold-restore paths now correctly gate on the web host. Desktop VS Code no longer attempts the vscode.dev silent-restore flow on activation.
 
 ---
 
