@@ -31,11 +31,30 @@ const MANIFEST_FILENAME = '.foldersync-manifest.json';
 const MANIFEST_GLOB = '**/.foldersync-manifest.json';
 const CONTEXT_KEY = 'folderSync.destinationOnlyWorkspace';
 
+/**
+ * globalState key for the operator-mode restore capture — the
+ * destination-mode equivalent of the file-based `.admin-sync.jsonc`
+ * snapshot. Lives in globalState because operator mode deliberately
+ * doesn't write artifacts into the destination folder.
+ */
+const OPERATOR_RESTORE_KEY = 'folderSync.operatorRestore';
+
+export interface OperatorRestoreCapture {
+  /** Workspace folders to re-mount on cold restore. */
+  folders: { uri: string; name: string }[];
+  capturedAt: string;
+}
+
 interface State {
   manifestPresence: Map<string, boolean>;
   manager: SyncManager;
   /** Last value passed to subscribers — used to seed late subscribers. */
   lastState: DestinationOnlyState;
+  context: vscode.ExtensionContext;
+  /** Last value we wrote to the operator-restore capture — undefined until
+   *  the first recompute. Used to suppress redundant globalState writes
+   *  (we only touch it on transitions). */
+  lastCapturedDestOnly: boolean | undefined;
 }
 
 let current: State | undefined;
@@ -159,6 +178,21 @@ async function recompute(): Promise<void> {
   current.lastState = state;
   stateEmitter.fire(state);
 
+  // Operator-restore capture: maintain a globalState entry mirroring the
+  // current workspace folders so PWA refresh can re-mount them. Only
+  // touched on transitions (true ↔ false) — same idea as the file-based
+  // snapshot writer's skip-on-equal pattern. Cleared when we leave
+  // operator mode so the next cold restore falls through to the
+  // .admin-sync.jsonc pointer (which is now authoritative).
+  if (result !== current.lastCapturedDestOnly) {
+    if (result) {
+      await writeOperatorRestoreCapture(current.context, folders);
+    } else {
+      await clearOperatorRestoreCapture(current.context);
+    }
+    current.lastCapturedDestOnly = result;
+  }
+
   log(
     `destination-only: setContext ${CONTEXT_KEY}=${result} ` +
       `(sources=${current.manager.getTopology().sources.length}, ` +
@@ -166,6 +200,39 @@ async function recompute(): Promise<void> {
       `manifestsPresent=${countTrue(current.manifestPresence)}, ` +
       `canonicalManifest=${canonicalManifest ? `lastSync=${canonicalManifest.lastSync ?? 'null'}` : 'none'})`,
   );
+}
+
+async function writeOperatorRestoreCapture(
+  context: vscode.ExtensionContext,
+  folders: readonly vscode.WorkspaceFolder[],
+): Promise<void> {
+  const capture: OperatorRestoreCapture = {
+    folders: folders.map((f) => ({ uri: f.uri.toString(), name: f.name })),
+    capturedAt: new Date().toISOString(),
+  };
+  await context.globalState.update(OPERATOR_RESTORE_KEY, capture);
+  log(`destination-only: wrote operator-restore capture (${capture.folders.length} folder(s))`);
+}
+
+async function clearOperatorRestoreCapture(
+  context: vscode.ExtensionContext,
+): Promise<void> {
+  if (context.globalState.get<OperatorRestoreCapture>(OPERATOR_RESTORE_KEY) === undefined) {
+    return;
+  }
+  await context.globalState.update(OPERATOR_RESTORE_KEY, undefined);
+  log('destination-only: cleared operator-restore capture (no longer in operator mode)');
+}
+
+/**
+ * Read the operator-restore capture from globalState. Used by
+ * `maybeRestore` in restoreFlow.ts to cold-restore destination-only
+ * workspaces on PWA refresh. Returns undefined when no capture exists.
+ */
+export function getOperatorRestoreCapture(
+  context: vscode.ExtensionContext,
+): OperatorRestoreCapture | undefined {
+  return context.globalState.get<OperatorRestoreCapture>(OPERATOR_RESTORE_KEY);
 }
 
 async function readCanonicalManifestSummary(
@@ -238,6 +305,8 @@ export function activateDestinationOnlyContextKey(
     manifestPresence: new Map(),
     manager,
     lastState: { isDestinationOnly: false },
+    context,
+    lastCapturedDestOnly: undefined,
   };
 
   const watcher = vscode.workspace.createFileSystemWatcher(MANIFEST_GLOB);

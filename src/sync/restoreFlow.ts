@@ -22,7 +22,11 @@ import {
   type Snapshot,
 } from './snapshotStore';
 import { KNOWN_WORKSPACE_KEYS } from './snapshot';
-import { detectDestinationOnlyFromFs } from './destinationOnlyWired';
+import {
+  detectDestinationOnlyFromFs,
+  getOperatorRestoreCapture,
+  type OperatorRestoreCapture,
+} from './destinationOnlyWired';
 
 const PENDING_SETTINGS_KEY = 'folderSync.snapshotPendingSettings';
 
@@ -64,11 +68,18 @@ export async function maybeRestore(
     return;
   }
   const pointer = store.getPointer();
-  if (!pointer) {
-    log('snapshot: no pointer, no restore');
+  const opCapture = getOperatorRestoreCapture(context);
+
+  if (!pointer && !opCapture) {
+    log('snapshot: no pointer, no operator capture, no restore');
     return;
   }
-  log(`snapshot: pointer present uri=${pointer.uri} writtenAt=${pointer.lastWriteAt}`);
+  if (pointer) {
+    log(`snapshot: pointer present uri=${pointer.uri} writtenAt=${pointer.lastWriteAt}`);
+  }
+  if (opCapture) {
+    log(`operator-restore: capture present folders=${opCapture.folders.length} capturedAt=${opCapture.capturedAt}`);
+  }
 
   // Give VS Code a tick to finish any in-flight folder add. Without this
   // we could race a user-initiated "Open Folder" still settling.
@@ -77,7 +88,7 @@ export async function maybeRestore(
   const populated = (vscode.workspace.workspaceFolders ?? []).length > 0;
   const pending = context.globalState.get<boolean>(PENDING_SETTINGS_KEY) ?? false;
 
-  if (populated && pending) {
+  if (populated && pending && pointer) {
     await finishPostRestart(context, store, pointer.uri);
     return;
   }
@@ -85,8 +96,47 @@ export async function maybeRestore(
     log('snapshot: workspace already populated, no restore');
     return;
   }
-  // Cold start — folderless tab + pointer present.
-  await coldRestore(context, store, pointer.uri);
+
+  // Cold start — folderless tab.
+  //
+  // Prefer the operator-mode capture when present: destination-only
+  // workspaces don't write `.admin-sync.jsonc`, so the file-based pointer
+  // (if any) is left over from a prior main-user session and would
+  // re-mount source folders the user no longer wants. The operator
+  // capture is cleared when the user transitions back to main-user mode,
+  // so this preference reliably reflects the latest intentional state.
+  if (opCapture) {
+    await operatorColdRestore(opCapture);
+    return;
+  }
+  if (pointer) {
+    await coldRestore(context, store, pointer.uri);
+  }
+}
+
+/**
+ * Cold restore for destination-only workspaces. Simpler than the main-
+ * user `coldRestore`: no settings to apply (operator mode skips
+ * `ensureWorkspaceLockSettings`), no decisions, no pending-flag handoff.
+ * Just re-mount the captured workspace folders so the active-tab
+ * restorer downstream has a folder for the file to live in.
+ */
+async function operatorColdRestore(capture: OperatorRestoreCapture): Promise<void> {
+  if (capture.folders.length === 0) {
+    log('operator-restore: capture has no folders');
+    return;
+  }
+  const folderArgs = capture.folders.map((f) => ({
+    uri: vscode.Uri.parse(f.uri),
+    name: f.name,
+  }));
+  const ok = vscode.workspace.updateWorkspaceFolders(0, 0, ...folderArgs);
+  log(`operator-restore: updateWorkspaceFolders(0, 0, ${folderArgs.length}) returned ${ok}`);
+  if (!ok) {
+    log('operator-restore: updateWorkspaceFolders failed — leaving workspace alone');
+    return;
+  }
+  log(`operator-restore: re-mounted ${folderArgs.length} folder(s)`);
 }
 
 async function coldRestore(
