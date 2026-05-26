@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Bash(cat *.pat.env*)",
+      "Bash(cat .pat.env*)",
+      "Bash(head *.pat.env*)",
+      "Bash(head .pat.env*)",
+      "Bash(tail *.pat.env*)",
+      "Bash(tail .pat.env*)",
+      "Bash(awk *.pat.env*)",
+      "Bash(sed *.pat.env*)",
+      "Bash(grep *.pat.env*)",
+      "Bash(less *.pat.env*)",
+      "Bash(more *.pat.env*)",
+      "Bash(xxd *.pat.env*)",
+      "Bash(od *.pat.env*)",
+      "Bash(strings *.pat.env*)",
+      "Bash(file *.pat.env*)",
+      "Read(.pat.env)",
+      "Read(./.pat.env)",
+      "Read(**/.pat.env)"
+    ]
+  }
+}

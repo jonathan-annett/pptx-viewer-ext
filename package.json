@@ -201,6 +201,7 @@
     "test:pptx-first-visible-slide-text": "node --import tsx test/pptx-first-visible-slide-text.test.ts",
     "package": "node --require ./scripts/fix-cpus.cjs ./node_modules/@vscode/vsce/vsce package --allow-missing-repository",
     "publish:web": "node scripts/publish-web.cjs",
+    "publish:marketplace": "node scripts/publish-marketplace.cjs",
     "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ./node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
   },
   "webPublish": {

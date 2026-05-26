@@ -157,6 +157,20 @@ From `git log`: short imperative present tense — "Add X for Y", "Fix X". The u
 
 ---
 
+## Secrets
+
+`.pat.env` at the repo root holds the Azure DevOps PAT used by `vsce` to publish to the VS Code Marketplace. It is gitignored and excluded from the `.vsix` bundle.
+
+**Rule: never read `.pat.env` into stdout.** Tool output goes into Claude Code conversation transcripts verbatim, so any stdout-producing command on this file (`cat`, `head`, `tail`, `awk`, `sed`, `grep`, `less`, `xxd`, …) is a secret leak. A prior session leaked it via `awk`; the PAT has been rotated.
+
+**Correct path for everything that needs the PAT:** `npm run publish:marketplace` (which delegates to `scripts/publish-marketplace.cjs`). The script reads `.pat.env` via `fs.readFileSync` into the spawned `vsce` child process's environment — the value never crosses this script's stdout or the agent's tool output. If you need to forward args to `vsce`, use the npm convention: `npm run publish:marketplace -- patch` (lets vsce bump the version) or `npm run publish:marketplace -- --pre-release`.
+
+`.claude/settings.json` carries `permissions.deny` rules that block the common stdout-on-secret Bash patterns at the harness level. They're a safety net, not a substitute for the rule above — a determined script can still read the file via Node, Python, etc. The deny rules are committed (shared with anyone who clones the repo); per-user permission overrides go in `.claude/settings.local.json` (gitignored).
+
+If `.pat.env` needs to be regenerated: Azure DevOps → User settings → Personal access tokens → New token, scope `Marketplace > Manage`. Paste the token into `.pat.env` (single line, no trailing newline ideally — the helper trims either way).
+
+---
+
 ## Dead ends — don't relitigate
 
 Things tried and found wrong. Don't propose them again without new evidence:
@@ -241,7 +255,10 @@ When the same fact would belong in two places, prefer one canonical home and cro
 When cutting a marketplace publish:
 
 1. Roll the `[Unreleased]` section in `CHANGELOG.md` into a new `[<version>] — <YYYY-MM-DD>` entry just below it; open a fresh `[Unreleased]` section at the top for the next iteration.
-2. Bump `package.json` `version` (matching commit / tag conventions: tag the publish commit `v<version>`).
-3. Publish via `vsce` to the Marketplace; attach the `.vsix` to a GitHub release with the new changelog section copied into the release notes.
+2. Bump `package.json` `version`; sync the lockfile with `npm install --package-lock-only`. Tag the publish commit `v<version>`.
+3. Run tests (`for t in test/*.test.ts; do node --import tsx "$t" || echo FAIL "$t"; done`), rebuild the bundle (`npm run bundle`), and verify the `.vsix` with `npm run package`.
+4. Push commit + tag (`git push origin main && git push origin v<version>`).
+5. Publish: `npm run publish:marketplace` (reads `.pat.env` internally — see "Secrets" above; never read `.pat.env` yourself). Attach the `.vsix` to a GitHub release with the new changelog section copied into the release notes.
+6. Pull on the VPS so the live test harness picks up the published version.
 
 Between publishes, **as user-facing changes land, add bullets to the `[Unreleased]` section** so the changelog is always current rather than being reconstructed from `git log` at release time. Internal refactors, docs, and substrate updates don't belong in the changelog — only things a marketplace user would notice (UX, perf, fixes, new commands, new affordances).
