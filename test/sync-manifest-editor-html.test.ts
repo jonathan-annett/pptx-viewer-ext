@@ -162,7 +162,7 @@ test('renderer prints the entries table with size + sha + tooltip', () => {
   const vm = toManifestViewModel(okRead(m), '/x', NOW);
   const html = renderManifestEditorHtml(vm, 'n');
   assert.match(html, /<table class="data">/);
-  assert.match(html, /src:foo\/bar\.txt/);
+  // Key column was dropped; only destPath renders in the table.
   assert.match(html, /foo\/bar\.txt/);
   assert.match(html, /2\.4 MB/);
   // sha256 truncated to 12 chars in cell, full hash in tooltip.
@@ -223,7 +223,10 @@ test('renderer html-escapes user-controlled strings', () => {
     version: 1,
     lastSync: null,
     entries: {
-      '<script>alert(1)</script>': {
+      // Key is no longer rendered (Key column was dropped) so its bytes
+      // don't reach the HTML in either form. destPath still does — it's
+      // the rendered cell and the highest-risk surface.
+      'src:a': {
         destPath: '"><img onerror=alert(1)>',
         size: 1,
         sha256: 'aaaaaaaaaaaa',
@@ -234,9 +237,8 @@ test('renderer html-escapes user-controlled strings', () => {
   };
   const vm = toManifestViewModel(okRead(m), '/x', NOW);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.ok(!html.includes('<script>alert(1)'), 'script tag leaked into HTML');
   assert.ok(!html.includes('"><img onerror=alert(1)>'), 'img onerror leaked');
-  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.match(html, /&quot;&gt;&lt;img onerror=alert\(1\)&gt;/);
 });
 
 test('renderer surfaces the destRootLabel as the page title', () => {
@@ -301,9 +303,10 @@ test('operator mode: Decisions section is hidden', () => {
   const html = renderManifestEditorHtml(vm, 'n');
   assert.doesNotMatch(html, /<h2>Decisions /);
   assert.doesNotMatch(html, /Overwrite collision/);
-  // Entries still rendered.
+  // Entries still rendered. The destPath shows in the table cell;
+  // the manifest key is no longer rendered (Key column was dropped).
   assert.match(html, /<h2>Entries /);
-  assert.match(html, /src:a\.txt/);
+  assert.match(html, />a\.txt/);
 });
 
 test('operator mode: disclaimer copy is operator-appropriate', () => {

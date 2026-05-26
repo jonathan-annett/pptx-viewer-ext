@@ -320,51 +320,52 @@ function renderEntriesTable(
   rows: ManifestEditorEntryRow[],
   mode: ManifestEditorMode,
 ): string {
-  const showDrift = mode === 'operator';
+  const showDriftBadge = mode === 'operator';
   const head = `
     <thead>
       <tr>
-        <th class="col-key">Key</th>
-        <th class="col-dest">Dest path</th>
+        <th class="col-dest">File</th>
         <th class="col-size">Size</th>
         <th class="col-hash">SHA-256</th>
         <th class="col-time">Synced</th>
-        ${showDrift ? '<th class="col-drift" title="On-disk hash vs manifest sha — refreshes automatically when files change">Drift</th>' : ''}
       </tr>
     </thead>`;
   const body = rows
     .map(
       (r) => `
       <tr>
-        <td class="mono small">${escapeHtml(r.key)}</td>
-        <td class="mono small">${escapeHtml(r.destPath)}</td>
+        <td class="mono small">${showDriftBadge ? renderDriftBadge(r) : ''}${escapeHtml(r.destPath)}</td>
         <td class="mono small">${escapeHtml(r.sizeHuman)}</td>
         <td class="mono small" title="${escapeHtml(r.sha256Full)}">${escapeHtml(r.sha256Short)}</td>
         <td class="mono small" title="${escapeHtml(r.syncedAtIso)}">${escapeHtml(r.syncedAtRelative || r.syncedAtIso)}</td>
-        ${showDrift ? `<td class="drift">${renderDriftCell(r)}</td>` : ''}
       </tr>`,
     )
     .join('');
   return `<table class="data">${head}<tbody>${body}</tbody></table>`;
 }
 
-function renderDriftCell(row: ManifestEditorEntryRow): string {
+/**
+ * Drift badge rendered inline as a prefix to the file path. Carries
+ * its own per-status tooltip (the badge tells the whole story; a
+ * separate column header would be redundant).
+ */
+function renderDriftBadge(row: ManifestEditorEntryRow): string {
   const status = row.drift?.status ?? 'computing';
   const expectedShort = row.sha256Short;
   switch (status) {
     case 'matches':
-      return `<span class="drift-match" title="On disk matches manifest sha (${escapeHtml(row.sha256Full)})">✓</span>`;
+      return `<span class="drift-badge drift-match" title="On disk matches manifest sha (${escapeHtml(row.sha256Full)})">✓</span>`;
     case 'drifted': {
       const actualFull = row.drift?.actualSha256 ?? '';
       const actualShort = actualFull.slice(0, 12);
-      const tip = `Expected ${expectedShort}, on disk ${actualShort || '(unknown)'}`;
-      return `<span class="drift-drifted" title="${escapeHtml(tip)}">⚠</span>`;
+      const tip = `On disk differs from manifest. Expected ${expectedShort}, on disk ${actualShort || '(unknown)'}`;
+      return `<span class="drift-badge drift-drifted" title="${escapeHtml(tip)}">⚠</span>`;
     }
     case 'missing':
-      return `<span class="drift-missing" title="File not present at ${escapeHtml(row.destPath)}">✗</span>`;
+      return `<span class="drift-badge drift-missing" title="File not present at ${escapeHtml(row.destPath)}">✗</span>`;
     case 'computing':
     default:
-      return `<span class="drift-computing" title="Computing…">…</span>`;
+      return `<span class="drift-badge drift-computing" title="Checking…">…</span>`;
   }
 }
 
@@ -515,16 +516,25 @@ table.data th {
   white-space: nowrap;
 }
 table.data tbody tr:last-child td { border-bottom: none; }
-table.data .col-key, table.data .col-dest { width: 28%; }
+table.data .col-dest { width: auto; }
 table.data .col-size, table.data .col-hash, table.data .col-time { white-space: nowrap; }
-table.data .col-flag, table.data .col-drift { text-align: center; white-space: nowrap; }
-td.flag, td.drift { text-align: center; }
+table.data .col-flag { text-align: center; white-space: nowrap; }
+td.flag { text-align: center; }
 .flag-on { color: var(--vscode-charts-green, #4caf50); font-weight: 600; }
 .flag-off { color: var(--vscode-descriptionForeground); }
-.drift-match { color: var(--vscode-charts-green, #4caf50); font-weight: 600; }
-.drift-drifted { color: var(--vscode-editorWarning-foreground, #b89500); font-weight: 600; }
-.drift-missing { color: var(--vscode-editorError-foreground, #f44336); font-weight: 600; }
-.drift-computing { color: var(--vscode-descriptionForeground); }
+/* Drift badge — rendered inline as a prefix to the file path. */
+.drift-badge {
+  display: inline-block;
+  width: 1.1em;
+  margin-right: 6px;
+  text-align: center;
+  font-weight: 600;
+  cursor: help;
+}
+.drift-match { color: var(--vscode-charts-green, #4caf50); }
+.drift-drifted { color: var(--vscode-editorWarning-foreground, #b89500); }
+.drift-missing { color: var(--vscode-editorError-foreground, #f44336); }
+.drift-computing { color: var(--vscode-descriptionForeground); font-weight: normal; }
 .btn {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);

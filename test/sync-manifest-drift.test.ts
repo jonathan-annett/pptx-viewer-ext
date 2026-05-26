@@ -89,67 +89,88 @@ test('computeDriftRow: fileExists=true + actualSha undefined → computing', () 
 
 // ───── renderer drift-column markup ─────────────────────────────────────
 
-test('operator mode: drift column header is present', () => {
+test('entries table: Key column is dropped from both modes', () => {
+  // The manifest key is `<source>:<relPath>` — redundant with the
+  // dest-path column for the single-source-per-destination case (which
+  // is everything in v1). Dropped to keep the table compact.
+  const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
+  for (const mode of ['mainUser', 'operator'] as const) {
+    const vm = toManifestViewModel(okRead(m), '/dest', NOW, mode);
+    const html = renderManifestEditorHtml(vm, 'n');
+    assert.doesNotMatch(html, /<th class="col-key"/, `Key col header should be absent (mode=${mode})`);
+    assert.doesNotMatch(html, />Key</, `Key text should not appear as a column header (mode=${mode})`);
+    // The "src:" prefix string shouldn't bleed into the table at all.
+    assert.doesNotMatch(html, /<td[^>]*>src:a\.txt<\/td>/, `key cell content should be absent (mode=${mode})`);
+  }
+});
+
+test('entries table: File column header replaces the old Key/Dest path pair', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator');
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /<th class="col-drift"/);
-  assert.match(html, />Drift</);
+  assert.match(html, /<th class="col-dest">File<\/th>/);
 });
 
-test('main-user mode: drift column is NOT rendered', () => {
-  // Drift is operator-mode-only per the M4 plan. Main-user mode keeps the
-  // pre-drift entries table.
+test('operator mode: drift badge has no column header (badge tells the story)', () => {
+  // The badge inlines as a prefix to the file path; no separate Drift
+  // column. Per design: "less is more — the badge's tooltip explains
+  // the meaning".
+  const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
+  const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator');
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.doesNotMatch(html, /<th class="col-drift"/);
+  assert.doesNotMatch(html, />Drift</);
+});
+
+test('main-user mode: no drift badge rendered', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'mainUser');
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.doesNotMatch(html, /<th class="col-drift"/);
-  assert.doesNotMatch(html, /class="drift-/);
+  assert.doesNotMatch(html, /class="drift-badge/);
 });
 
-test('operator mode without drift map: row renders the computing placeholder', () => {
-  // Editor renders this on initial open, before the wired layer's pass lands.
+test('operator mode without drift map: badge renders the computing placeholder', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator', undefined);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /class="drift-computing"/);
-  assert.match(html, /…<\/span>/);
+  assert.match(html, /class="drift-badge drift-computing"/);
+  assert.match(html, /…<\/span>a\.txt/);
 });
 
-test('operator mode: matches status renders ✓ with full-sha tooltip', () => {
+test('operator mode: matches badge renders ✓ inline before the path', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const drift = driftMap([['src:a.txt', { status: 'matches', actualSha256: EXPECTED_SHA }]]);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator', drift);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /class="drift-match"[^>]*title="On disk matches manifest sha[^"]*"/);
-  assert.match(html, /✓<\/span>/);
+  assert.match(html, /class="drift-badge drift-match"[^>]*title="On disk matches manifest sha[^"]*"/);
+  // Badge sits before the path in the same cell.
+  assert.match(html, /✓<\/span>a\.txt/);
 });
 
-test('operator mode: drifted status renders ⚠ with expected-vs-actual tooltip', () => {
+test('operator mode: drifted badge renders ⚠ with expected-vs-actual tooltip', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const drift = driftMap([['src:a.txt', { status: 'drifted', actualSha256: ACTUAL_DIFFERENT }]]);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator', drift);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /class="drift-drifted"/);
-  assert.match(html, /⚠<\/span>/);
-  // Tooltip should mention both short hashes.
+  assert.match(html, /class="drift-badge drift-drifted"/);
+  assert.match(html, /⚠<\/span>a\.txt/);
   assert.match(html, /Expected abcdef012345, on disk 999fed012345/);
 });
 
-test('operator mode: missing status renders ✗ with destPath tooltip', () => {
+test('operator mode: missing badge renders ✗ with destPath tooltip', () => {
   const m = manifestWithEntry('src:a.txt', EXPECTED_SHA);
   const drift = driftMap([['src:a.txt', { status: 'missing' }]]);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator', drift);
   const html = renderManifestEditorHtml(vm, 'n');
-  assert.match(html, /class="drift-missing"/);
-  assert.match(html, /✗<\/span>/);
+  assert.match(html, /class="drift-badge drift-missing"/);
+  assert.match(html, /✗<\/span>a\.txt/);
   assert.match(html, /title="File not present at a\.txt"/);
 });
 
-test('operator mode: row missing from drift map falls back to computing placeholder', () => {
+test('operator mode: row missing from drift map falls back to computing badge', () => {
   // The wired layer may produce a partial map (e.g. one entry's hash
-  // failed). The renderer must still emit a cell for the missing key
-  // rather than skipping the column for that row.
+  // failed). Each remaining row must still get a badge so the column
+  // alignment stays consistent.
   const m: Manifest = {
     version: 1,
     lastSync: null,
@@ -169,15 +190,13 @@ test('operator mode: row missing from drift map falls back to computing placehol
     },
     decisions: {},
   };
-  // Only 'src:a.txt' has a drift record; 'src:b.txt' is absent from the map.
   const drift = driftMap([['src:a.txt', { status: 'matches', actualSha256: EXPECTED_SHA }]]);
   const vm = toManifestViewModel(okRead(m), '/dest', NOW, 'operator', drift);
   const html = renderManifestEditorHtml(vm, 'n');
-  // Both row glyphs should be present: one match (✓), one computing (…).
-  const matchCount = html.split('class="drift-match"').length - 1;
-  const computingCount = html.split('class="drift-computing"').length - 1;
-  assert.equal(matchCount, 1, 'expected one ✓ for src:a.txt');
-  assert.equal(computingCount, 1, 'expected one … for src:b.txt');
+  const matchCount = html.split('drift-badge drift-match').length - 1;
+  const computingCount = html.split('drift-badge drift-computing').length - 1;
+  assert.equal(matchCount, 1, 'expected one ✓ badge for src:a.txt');
+  assert.equal(computingCount, 1, 'expected one … badge for src:b.txt');
 });
 
 test('operator mode: Refresh drift button is rendered in the actions section', () => {
