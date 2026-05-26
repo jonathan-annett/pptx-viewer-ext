@@ -7,7 +7,13 @@ without needing to read the full `placeholder-files-v1-plan.md`.
 ## What it is
 Workspace-level "this file is a stub, not real content yet" registry, surfaced in three places:
 - **Admin editor (`.admin-sync.jsonc`)** — new Placeholders card. Locked default row (the zero-byte sha) plus user-added rows; "Add placeholder…" file picker hashes the chosen sample, `[x]` removes a custom entry.
-- **Plan view** — per-row blue `[P]` chip, `placeholders: N` chip in the totals strip, and a footer line `"N of M files {is a placeholder | are placeholders} (missing content)."` in the standalone plan webview only.
+- **Plan view** — per-row blue `[P]` chip, `placeholders: N` chip in the totals strip (per-pair operation count, consistent with the other operation-count chips), and a **three-state footer line** in the standalone plan webview, deduped per source:
+  - `N=0, M>0` → green **"All M source files have content."**
+  - `N=M, M>0` → blue **"All M source files are placeholders (no content received yet)."**
+  - `0<N<M`  → blue **"N of M source files {is|are} placeholders (missing content)."**
+  - `M=0`    → silent (no source files mapped; nothing to say).
+
+  Counts dedup per source (a file mirrored to 3 destinations counts once). `destinationOnly` and `deleteTracked` are excluded from M (neither describes a live source file); they remain in the per-pair totals chip.
 - **Pptx viewer** — blue info banner "This is a placeholder file — content not yet uploaded." replaces the corrupt-file banner; validation flags suppressed (meaningless for stub content).
 
 Operators use the workflow to mark which destination files are still placeholders so they know what's outstanding when real content lands. The zero-byte sha (`e3b0c442…`) is the implicit default — Explorer's "New PowerPoint Presentation" right-click always produces one — and is never written to the on-disk array.
@@ -16,7 +22,7 @@ Operators use the workflow to mark which destination files are still placeholder
 - **Pure modules** (tsx-testable):
   - `src/sync/snapshot.ts` — `Snapshot.placeholders: string[]`, `EMPTY_FILE_SHA256`, `effectivePlaceholderSet(snap)`, `computeEffectiveSetFromText(text)`, snapshot equality treats placeholders as a set.
   - `src/sync/plan.ts` — `PlanItem.isPlaceholder?`; `classifyFiles(..., placeholders?: Set<string>)` annotates by category-appropriate identity hash (`sourceHash ?? destHash ?? manifestHash`).
-  - `src/sync/planHtml.ts` — `PlanRowView.isPlaceholder?`, `PlanTotals.placeholders`, chip rendering + footer line + `.row-lead`/`.row-meta` layout split.
+  - `src/sync/planHtml.ts` — `PlanRowView.isPlaceholder?`, `PlanTotals.placeholders` (per-pair) + `PlanTotals.uniqueSourceFiles` / `uniqueSourcePlaceholders` (source-deduped), chip rendering + three-state footer (`renderPlaceholderFooterLine`) + `.row-lead`/`.row-meta` layout split.
   - `src/sync/adminEditorHtml.ts` — `PlaceholderRow` type, Placeholders card markup + client JS.
 - **Wired modules**:
   - `src/sync/placeholderRegistry.ts` — singleton cache + FileSystemWatcher on `.admin-sync.jsonc`; `getActivePlaceholderSet()` (async) and `getActivePlaceholderSetSync()` (cold-tolerant).
@@ -55,8 +61,14 @@ Operators use the workflow to mark which destination files are still placeholder
 ## Status
 v1 shipped at `d8bf688` on 2026-05-26. All M1–M8 milestones complete; sign-off line at the top of `placeholder-files-v1-plan.md`. Live on `vscode.sophtwhere.com`. Marketplace pre-release not yet republished.
 
+Post-sign-off polish (same day, all verified working in PWA):
+- `06fe275` — placeholder footer reads in source-file terms with dedup per source (`uniqueSourceFiles` + `uniqueSourcePlaceholders` totals). Per-pair operation count stays on the totals chip; the footer line speaks in "how many speakers still owe me content" terms.
+- `612a01f` — three-state footer (all-clean / all-placeholders / mixed) with green positive copy for the all-clean state. Operators see meaningful information in every workflow state, not just the mixed-in-flight state.
+
+## Cross-cutting infrastructure spawned by this cycle (shipped, not placeholder-specific)
+- `33e5d26` — **batched IDB reads**. New `ParseResultCache.snapshot()` + `UriHashCache.snapshot()` return synchronous Maps keyed by sha / uriString; one IDB `getAll()` (or `getAllEntries()`) per cache replaces N per-file `lookup()` round-trips. `snapshotLookup` + `snapshotHashLookup` helpers consult snapshot first, fall through to per-call lookup on miss. Planner's `planForSource` takes both snapshots before the source + destination walks; search indexer's `doFullPass` takes both before the per-URI loop. Single-file FileSystemWatcher events fall through to per-call lookup (no batch benefit for one file). New `IdbStore.getAllEntries()` adapter method added — hash cache needs keys since the value doesn't carry the URI. 13 new tests across `sync-hash-cache` + `sync-parse-cache`. **Headline impact** (verified): viewer-open on non-placeholder `.pptx` files drops from ~2.5s to sub-100ms on warm caches. Diagnostic: new `sync: parse-cache snapshot: N entries` + `sync: hash-cache snapshot: N entries` log lines appear instantly at the top of each walk.
+
 Full plan + progress log: `placeholder-files-v1-plan.md`. Substrate bullet: CLAUDE.md "What's currently shipping" → "Placeholder files v1 shipped".
 
 ## Follow-ups
-- **Batched IDB reads (shipped 2026-05-26 at `33e5d26`, awaiting UI verification).** New `ParseResultCache.snapshot()` + `UriHashCache.snapshot()` return synchronous Maps keyed by sha / uriString; one IDB `getAll()` (or `getAllEntries()`) replaces N per-file `lookup()` round-trips. `snapshotLookup` + `snapshotHashLookup` helpers consult snapshot first, fall through to per-call lookup on miss. Planner's `planForSource` takes both snapshots before the source + destination walks; search indexer's `doFullPass` takes both before the per-URI loop. Single-file FileSystemWatcher events fall through to per-call lookup (no batch benefit for one file). New `IdbStore.getAllEntries()` adapter method added — hash cache needs keys since the value doesn't carry the URI. 13 new tests across `sync-hash-cache` + `sync-parse-cache` covering snapshot shape, fallthrough behaviour, IDB-error tolerance, and the single-op contract. Expected impact: viewer-open on non-placeholder files drops from ~2.5s to sub-100ms on warm caches. Verify by Cmd-R'ing the PWA and comparing the gap between `parsed:` and `sync: parse-cache: …` log lines.
-- **Optional: "destination placements pending" secondary count in the placeholder footer.** Operator-requested as a potential follow-on after the source-file dedup landed; not yet wired. Easy add when needed.
+- **Optional: "destination placements pending" secondary count in the placeholder footer.** Operator-requested as a potential follow-on after the source-file dedup landed; not yet wired. Easy add when needed — drop it into `renderPlaceholderFooterLine` alongside the existing three-state branches.
