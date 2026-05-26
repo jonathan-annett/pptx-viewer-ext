@@ -782,6 +782,16 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 - Output Channel diagnostic surfaces hit/miss counts per session and per sync run.
 - `src/sync/probeStat.ts` + `folderSync.probeStat` command + package.json contribution removed as part of sign-off.
 
+**Post-sign-off polish — batched IDB reads (commit `33e5d26`, 2026-05-26).** Per-file `cache.lookup(uri, size, mtime)` round-trips were the dominant cost on cold-cache walks once dozens of files were involved. Both `UriHashCache` and `ParseResultCache` (M5.3) gained a `snapshot()` method that returns a synchronous in-memory `Map`, populated from a single IDB `getAll()` (or `getAllEntries()` for the hash cache, since the value doesn't carry the URI as key). The IDB adapter (`src/sync/idbAdapter.ts`) grew a new `getAllEntries()` method to cover the keyed-result case. Helpers `snapshotLookup` + `snapshotHashLookup` consult the snapshot first and fall through to per-call `lookup()` on miss — single-file `FileSystemWatcher` events still take the fall-through path (no batch benefit for one file).
+
+Wire sites:
+- **Planner** — `planForSource` takes both snapshots once before the source + destination walks; reuses them across both walks for that source.
+- **Search indexer** — `doFullPass` takes both before the per-URI loop.
+
+13 new tests across `test/sync-hash-cache.test.ts` + `test/sync-parse-cache.test.ts`. Diagnostic log lines `sync: parse-cache snapshot: N entries` and `sync: hash-cache snapshot: N entries` appear at the top of each walk so the win is visible.
+
+**Headline measured impact (PWA, real workspace):** viewer-open of a non-placeholder `.pptx` drops from ~2.5s to sub-100ms on warm caches. The savings come from skipping the per-file IDB round-trip; both caches were already hit-rate-positive on warm refreshes, just chatty about it.
+
 ### M5.3 — Content-hashed parse cache + identity store *(Phases A, B & C shipped; D infrastructure landed but unwired)*
 
 **Status: Phases A, B & C shipped and signed off; Phase D code is in the tree but intentionally unwired pending a clearer use case.** Promoted from the post-v1 roadmap into M5 because: (a) the validator pass is now exercised across every embedded preview surface introduced in M5.1, multiplying the cost; (b) the focus-following panel (currently post-v1) needs this as a prerequisite and the user is keen to land that surface; (c) M5.2's timing data informed the design empirically before any cache code was written.
@@ -836,6 +846,8 @@ Size+mtime *both* required for lookup-match (not just mtime): mtime collisions a
 - **`ParseResult` serialisation for IndexedDB.** Most fields are JSON-clean primitives, but the thumbnail data URL is fat and the `parseError` enum needs to round-trip. Should be straightforward — `JSON.stringify`/`parse` with a schema-version stamp so we can evict old shapes on upgrade.
 
 **Slotting:** wait for M5.2 data, then implement. Prerequisite for the focus-following panel (post-v1) — that feature multiplies the validator pass across every focus change and can't ship until the cache lands.
+
+**Post-sign-off polish — batched IDB reads (commit `33e5d26`, 2026-05-26).** `ParseResultCache.snapshot()` joined `UriHashCache.snapshot()` as a single-call read of every entry under that DB, replacing per-file `lookup()` round-trips on cold walks. See the matching note at the end of M5.2.5 for the full design, wire sites, and headline impact (viewer-open ~2.5s → sub-100ms on warm caches).
 
 ### M6 — Polish + remaining surfaces *(shipped 2026-05-23 — all six phases)*
 
@@ -915,6 +927,16 @@ Sequenced as six phases so each can ship + live-test independently on the VPS ha
 - Reopen-as-text opens the same file in the default JSON editor; switching back to the custom editor re-renders cleanly.
 - `renderManifestEditorHtml` is covered by `test/sync-manifest-editor-html.test.ts` for the four cases (empty, entries-only, decisions-only, version-mismatch).
 - CSP locked down to the same shape as `adminEditor` / `configEditor`; one nonced inline script for the Reopen handler.
+
+---
+
+## Post-v1 polish (folded in from adjacent work)
+
+Changes to folder-sync surfaces that landed *after* the M6 sign-off, via adjacent feature work. Recorded here so a future agent reading the plan sees what's drifted from "as-shipped" without rebuilding the picture from `git log`.
+
+- **Batched IDB reads** *(commit `33e5d26`, 2026-05-26 — via placeholder-files-v1 sign-off polish).* `ParseResultCache.snapshot()` + `UriHashCache.snapshot()` collapse N per-file `lookup()` round-trips into a single `getAll()` per cache. Full design + wire sites + headline impact under M5.2.5 (and cross-referenced from M5.3). Viewer-open of a non-placeholder `.pptx` drops from ~2.5s to sub-100ms on warm caches.
+- **Plan row layout refactor — `.row-lead` / `.row-meta` split** *(commit `742da7b`, 2026-05-26 — via placeholder-files-v1 M5.5).* `renderRow` markup in `src/sync/planHtml.ts` was split into a `.row-lead` group (path + chips/badges/decisions; grows + wraps) and a `.row-meta` group (size + hashes; intrinsic-width, anchors right). Triggered by chip accumulation between path and size pushing the size/hash column around. Layout-regression test in `test/sync-planview.test.ts` guards against future drift. Pattern: in any per-file row UI, place chips/badges/decisions right after the filename; size + hash stay in a stable right-anchored column.
+- **Placeholder feature integration points** *(2026-05-26).* `classifyFiles` in `src/sync/plan.ts` accepts an optional `placeholders: Set<string>`; `BuildPlanOptions.placeholders` / `ScopedPlanOptions.placeholders` thread the set through `buildDryRunPlan` and `buildScopedDryRunPlan`. Each call site (`planView.openPlanPanel`, `adminEditor`/`configEditor`/`provider` embedded plans, the `folderSync.dryRunPlan` command) fetches via `getActivePlaceholderSet()` from `src/sync/placeholderRegistry.ts` immediately before building. `PlanRowView.isPlaceholder?` + `PlanTotals.placeholders` + a three-state footer line in the standalone plan webview. Full plan + sign-off history at `placeholder-files-v1-plan.md`; condensed handoff at `placeholder-files-v1-report.md`.
 
 ---
 
