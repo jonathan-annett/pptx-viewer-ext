@@ -17,9 +17,12 @@ tsconfig.json
 CLAUDE.md
 DEVELOPMENT.md
 desktop-support-review.md
+SHIPPED.md
 folder-sync-v1-plan.md
 pptx-search-v1-plan.md
 pptx-search-v1-report.md
+placeholder-files-v1-plan.md
+placeholder-files-v1-report.md
 pptx-upload-via-dropbox-plan.md
 pptx-viewer-agent-plan.md
 *.vsix
