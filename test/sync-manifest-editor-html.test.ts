@@ -218,6 +218,39 @@ test('renderer shows the version-mismatch banner instead of tables', () => {
   assert.match(html, /unsupported: 99/);
 });
 
+test('version-mismatch banner: operator mode reframes the copy', () => {
+  // Operator can't sync — the "sync is disabled" line doesn't apply.
+  const vm = toManifestViewModel(
+    { kind: 'version-mismatch', actual: 99 },
+    '/workspace/dest',
+    NOW,
+    'operator',
+  );
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.match(html, /This destination was tracked by a newer version of Folder Sync/);
+  // Operator copy explicitly mentions the inspection failure mode, not the sync one.
+  assert.match(html, /update it to inspect the manifest/i);
+  assert.doesNotMatch(html, /Sync is disabled/);
+  // Version number still surfaces (useful diagnostic).
+  assert.match(html, /\(version 99\)/);
+  assert.match(html, /unsupported: 99/);
+  // Reopen-as-text affordance is still offered.
+  assert.match(html, /Reopen as text/);
+});
+
+test('version-mismatch banner: main-user copy unchanged', () => {
+  const vm = toManifestViewModel(
+    { kind: 'version-mismatch', actual: 99 },
+    '/workspace/dest',
+    NOW,
+    'mainUser',
+  );
+  const html = renderManifestEditorHtml(vm, 'n');
+  assert.match(html, /This manifest was written by a newer version of Folder Sync/);
+  assert.match(html, /Sync is disabled for this destination/);
+  assert.doesNotMatch(html, /update it to inspect/i);
+});
+
 test('renderer html-escapes user-controlled strings', () => {
   const m: Manifest = {
     version: 1,

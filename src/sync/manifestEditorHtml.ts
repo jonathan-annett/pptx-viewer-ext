@@ -263,6 +263,28 @@ export function renderManifestEditorHtml(
 </html>`;
 }
 
+function renderVersionMismatchCopy(
+  mode: ManifestEditorMode,
+  actualLabel: string,
+): string {
+  const versionPart = `(version ${escapeHtml(actualLabel)})`;
+  if (mode === 'operator') {
+    // In operator mode there's nothing TO sync — reframe the warning as
+    // "you can't inspect this without updating the extension" rather than
+    // "sync is disabled".
+    return (
+      `<strong>This destination was tracked by a newer version of Folder Sync</strong> ${versionPart}. ` +
+      `The current extension only understands version 1; update it to inspect the manifest's entries. ` +
+      `Use <em>Reopen as text</em> to view the raw file in the meantime.`
+    );
+  }
+  return (
+    `<strong>This manifest was written by a newer version of Folder Sync</strong> ${versionPart}. ` +
+    `The current extension only understands version 1. Sync is disabled for this destination until the extension is updated. ` +
+    `Use <em>Reopen as text</em> to inspect or hand-edit the file.`
+  );
+}
+
 function renderDisclaimer(mode: ManifestEditorMode): string {
   if (mode === 'operator') {
     // Operator can't trigger a sync from this workspace; the relevant
@@ -289,7 +311,7 @@ function renderBody(vm: ManifestEditorViewModel): string {
     return `
   <section class="card">
     <div class="banner warn">
-      <strong>This manifest was written by a newer version of Folder Sync</strong> (version ${escapeHtml(vm.actualLabel)}). The current extension only understands version 1. Sync is disabled for this destination until the extension is updated. Use <em>Reopen as text</em> to inspect or hand-edit the file.
+      ${renderVersionMismatchCopy(vm.mode, vm.actualLabel)}
     </div>
   </section>`;
   }

@@ -55,6 +55,14 @@ interface State {
    *  the first recompute. Used to suppress redundant globalState writes
    *  (we only touch it on transitions). */
   lastCapturedDestOnly: boolean | undefined;
+  /**
+   * Whether the canonical manifest was present at the previous recompute.
+   * `undefined` until the first recompute completes — that initial value
+   * keeps the M3 activation auto-open the only entry point at startup; the
+   * mid-session "manifest just arrived" trigger fires only on a `false →
+   * true` transition, never on `undefined → true`.
+   */
+  lastCanonicalManifestPresent: boolean | undefined;
 }
 
 let current: State | undefined;
@@ -177,6 +185,20 @@ async function recompute(): Promise<void> {
   const state: DestinationOnlyState = { isDestinationOnly: result, canonicalManifest };
   current.lastState = state;
   stateEmitter.fire(state);
+
+  // M5 — canonical-manifest-arrival auto-open. Fires only on a true
+  // false→true transition (the operator was running in a manifest-less
+  // workspace and the main user just ran their first sync). The
+  // undefined→true case on first recompute is deliberately NOT a
+  // trigger here — that path belongs to the M3 activation auto-open,
+  // which already runs from extension.ts with proper active-tab-marker
+  // race resolution.
+  const isCanonicalPresent = canonicalManifest !== undefined;
+  const wasCanonicalPresent = current.lastCanonicalManifestPresent;
+  current.lastCanonicalManifestPresent = isCanonicalPresent;
+  if (result && isCanonicalPresent && wasCanonicalPresent === false) {
+    void autoOpenCanonicalManifestOnArrival();
+  }
 
   // Operator-restore capture: maintain a globalState entry mirroring the
   // current workspace folders so PWA refresh can re-mount them. Only
@@ -303,6 +325,58 @@ export async function maybeAutoOpenOperatorManifest(
   }
 }
 
+/**
+ * M5 — mid-session counterpart to `maybeAutoOpenOperatorManifest`. Fires
+ * from `recompute` when the canonical manifest transitions from absent
+ * to present (the main user just ran their first sync into a previously
+ * empty destination). Only opens when no editor tabs are currently open
+ * — if the operator has been doing something else in the workspace
+ * (file exploration, viewing a different file), don't steal focus.
+ *
+ * The activation case is handled by M3's helper. This one is strictly
+ * for the workspace-was-already-open-when-the-manifest-arrived path.
+ */
+async function autoOpenCanonicalManifestOnArrival(): Promise<void> {
+  if (anyEditorTabOpen()) {
+    log('manifest-auto-open: tabs already open mid-session, skipping arrival auto-open');
+    return;
+  }
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) return;
+  const canonicalUri = vscode.Uri.joinPath(folders[0].uri, MANIFEST_FILENAME);
+  // Defensive re-stat — recompute may have computed canonicalManifest from
+  // a stale presence entry, or the file may have been deleted between the
+  // stat and this trigger.
+  try {
+    await vscode.workspace.fs.stat(canonicalUri);
+  } catch {
+    log('manifest-auto-open: canonical manifest disappeared before arrival auto-open');
+    return;
+  }
+  log(`manifest-auto-open: canonical manifest just arrived, opening ${canonicalUri.toString()}`);
+  try {
+    await vscode.commands.executeCommand(
+      'vscode.openWith',
+      canonicalUri,
+      'folderSync.manifestEditor',
+    );
+  } catch (err) {
+    log(`manifest-auto-open: arrival openWith failed — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * True when any tab in any tab group carries an editor input (text,
+ * custom, notebook, or otherwise). We intentionally count "any input"
+ * rather than "input matching a specific URI" — the predicate exists
+ * so we never steal focus from work-in-progress.
+ */
+function anyEditorTabOpen(): boolean {
+  return vscode.window.tabGroups.all.some(
+    (g) => g.tabs.some((t) => t.input !== undefined),
+  );
+}
+
 async function readCanonicalManifestSummary(
   folderUri: vscode.Uri,
 ): Promise<ManifestSummary | undefined> {
@@ -375,6 +449,7 @@ export function activateDestinationOnlyContextKey(
     lastState: { isDestinationOnly: false },
     context,
     lastCapturedDestOnly: undefined,
+    lastCanonicalManifestPresent: undefined,
   };
 
   const watcher = vscode.workspace.createFileSystemWatcher(MANIFEST_GLOB);
