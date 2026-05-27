@@ -12,7 +12,11 @@ import {
   toManifestViewModel,
   type ManifestEditorViewModel,
 } from '../src/sync/manifestEditorHtml';
-import type { Manifest, ManifestReadResult } from '../src/sync/manifest-types';
+import {
+  parseManifestText,
+  type Manifest,
+  type ManifestReadResult,
+} from '../src/sync/manifest-types';
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
@@ -110,6 +114,11 @@ test('toManifestViewModel: version-mismatch variant carries actual label', () =>
 });
 
 test('toManifestViewModel: version-mismatch with missing version field is labelled', () => {
+  // Direct construction of a mismatch result still produces the "missing"
+  // label. This is the renderer-path test — when something *does* reach
+  // the mismatch branch with undefined actual (e.g. crafted by a test or
+  // by a manifest that explicitly sets version: undefined as a parsed
+  // value), the label is human-friendly.
   const vm = toManifestViewModel(
     { kind: 'version-mismatch', actual: undefined },
     '/workspace/dest',
@@ -118,6 +127,41 @@ test('toManifestViewModel: version-mismatch with missing version field is labell
   assert.equal(vm.kind, 'version-mismatch');
   if (vm.kind !== 'version-mismatch') return;
   assert.match(vm.actualLabel, /missing/i);
+});
+
+test('parseManifestText: empty file → ok+empty (not version-mismatch)', () => {
+  // An operator hand-creating the manifest file goes through several
+  // partial-content states before saving. Empty file content shouldn't
+  // surface a version-mismatch banner — it's an incomplete file, not a
+  // hostile newer-version one.
+  const result = parseManifestText('');
+  assert.equal(result.kind, 'ok');
+});
+
+test('parseManifestText: bare "{}" → ok+empty (no version field treated as soft fallback)', () => {
+  // Same logic as the empty-file case — a JSON object with no `version`
+  // is incomplete, not a future-version manifest. Reserve the mismatch
+  // banner for *intentional* non-1 versions.
+  const result = parseManifestText('{}');
+  assert.equal(result.kind, 'ok');
+  if (result.kind !== 'ok') return;
+  assert.equal(result.manifest.version, 1);
+  assert.equal(Object.keys(result.manifest.entries).length, 0);
+});
+
+test('parseManifestText: version=2 is still version-mismatch', () => {
+  // The intentional case — newer extension wrote this file with an
+  // explicit non-1 version. Refuse to interpret to protect the user's
+  // tracking record.
+  const result = parseManifestText('{"version":2}');
+  assert.equal(result.kind, 'version-mismatch');
+  if (result.kind !== 'version-mismatch') return;
+  assert.equal(result.actual, 2);
+});
+
+test('parseManifestText: version=1 with no entries → ok+empty', () => {
+  const result = parseManifestText('{"version":1}');
+  assert.equal(result.kind, 'ok');
 });
 
 // ───── renderer ─────────────────────────────────────────────────────────

@@ -166,6 +166,13 @@ async function scanAll(): Promise<void> {
 async function recompute(): Promise<void> {
   if (!current) return;
   const folders = vscode.workspace.workspaceFolders ?? [];
+  // Re-stat presence at the top of every recompute. The FileSystemWatcher's
+  // onDidCreate / onDidDelete events are FS-provider-specific — on FSA-
+  // backed local filesystems in vscode.dev, certain create flows
+  // (explorer "New File" via rename, atomic tmp+rename writes, etc.) can
+  // miss the right event. Always restating means watcher events are
+  // advisory triggers; the FS is the source of truth.
+  await scanAll();
   const result = isDestinationOnlyTopology(
     current.manager.getTopology(),
     folders,
@@ -467,23 +474,35 @@ export function activateDestinationOnlyContextKey(
   watcher.onDidChange((u) => handleManifestChange(u));
 
   const foldersSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
-    void scanAll().then(() => recompute());
+    void recompute();
   });
 
   const managerSub = manager.onDidChange(() => {
     void recompute();
   });
 
-  // Initial scan + recompute. The managerSub above already fired one
-  // recompute with the empty presence map; this second pass picks up
-  // whatever manifests are sitting at workspace folder roots.
-  void scanAll().then(() => recompute());
+  // Backup trigger — FSA-backed filesystems can skip onDidCreate when a
+  // file is created via rename (the "New File" flow in the explorer is a
+  // documented example). If a manifest opens in any editor and the
+  // wired layer hadn't yet seen it, this kicks a recompute. recompute()
+  // re-stats from scratch via scanAll() so the missed event is recovered.
+  const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => {
+    if (doc.uri.path.endsWith(`/${MANIFEST_FILENAME}`)) {
+      void recompute();
+    }
+  });
+
+  // Initial recompute. recompute() now stats fresh at the top so the
+  // initial empty presence map is repopulated immediately rather than
+  // requiring two passes (manager.onDidChange then scan-completes).
+  void recompute();
 
   const disposable: vscode.Disposable = {
     dispose(): void {
       watcher.dispose();
       foldersSub.dispose();
       managerSub.dispose();
+      docOpenSub.dispose();
       current = undefined;
     },
   };

@@ -105,6 +105,17 @@ export function normaliseManifest(raw: unknown): ManifestReadResult {
     return { kind: 'ok', manifest: emptyManifest() };
   }
   const obj = raw as Record<string, unknown>;
+  // A missing `version` field signals an incomplete or hand-created file
+  // (e.g. an empty `{}` typed by an operator before the source-side sync
+  // has written content). Soft-fallback to empty manifest rather than
+  // surfacing the version-mismatch banner — that copy is reserved for
+  // *intentional* non-1 versions written by a newer extension, where
+  // refusing to interpret protects the user's tracking record. The
+  // executor's writeManifest always emits version=1, so this loosening
+  // costs no real safety against future-version manifests.
+  if (obj.version === undefined) {
+    return { kind: 'ok', manifest: emptyManifest() };
+  }
   if (obj.version !== 1) {
     return { kind: 'version-mismatch', actual: obj.version };
   }
