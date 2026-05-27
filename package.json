@@ -203,6 +203,7 @@
     "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",
     "test:sync-snapshot": "node --import tsx test/sync-snapshot.test.ts",
     "test:sync-admin-editor": "node --import tsx test/sync-admin-editor.test.ts",
+    "test:sync-folder-source-links": "node --import tsx test/sync-folder-source-links.test.ts",
     "test:sync-placeholder-registry": "node --import tsx test/sync-placeholder-registry.test.ts",
     "test:sync-manifest-editor-html": "node --import tsx test/sync-manifest-editor-html.test.ts",
     "test:sync-preview-context": "node --import tsx test/sync-preview-context.test.ts",

@@ -22,10 +22,14 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import {
   renderAdminEditorHtml,
+  type AdminEditorFolder,
+  type AdminEditorFolderSource,
   type AdminEditorSettingSummary,
   type AdminEditorViewModel,
   type PlaceholderRow,
 } from './adminEditorHtml';
+import { findSourceLinksForFolder } from './folderSourceLinks';
+import type { ResolvedTopology } from './topology';
 import {
   EMPTY_FILE_SHA256,
   KNOWN_WORKSPACE_KEYS,
@@ -81,7 +85,7 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     _token: vscode.CancellationToken,
   ): Promise<void> {
     panel.webview.options = { enableScripts: true };
-    panel.webview.html = this.renderFor(document);
+    panel.webview.html = await this.renderFor(document);
     log(`admin-editor: opened ${document.uri.toString()}`);
 
     // ───── plan state + scheduler ─────────────────────────────────────
@@ -151,9 +155,9 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     // Re-render when the document text changes (the snapshot writer rewrites
     // the file on every topology event). We never edit the document from
     // this editor, so there's no own-edit to suppress.
-    const docSub = vscode.workspace.onDidChangeTextDocument((e) => {
+    const docSub = vscode.workspace.onDidChangeTextDocument(async (e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
-      const vm = buildViewModel(document, this.store);
+      const vm = await buildViewModel(document, this.store, this.manager.getTopology());
       void panel.webview.postMessage({ type: 'docChanged', payload: vm });
     });
 
@@ -166,13 +170,21 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     // Topology changes (manager reload after a .sync.jsonc edit, workspace
     // folder changes). The manager fires once on subscribe — suppress that
     // first emit so we don't duplicate the schedulePlan() call above.
+    // The folder section's source-link / create-source-folder affordances
+    // also depend on the topology, so re-post the VM on every change.
     let firstTopologyEmit = true;
-    const topologySub = this.manager.onDidChange(() => {
+    const topologySub = this.manager.onDidChange((topology) => {
       if (firstTopologyEmit) {
         firstTopologyEmit = false;
         return;
       }
       schedulePlan();
+      void (async () => {
+        if (disposed) return;
+        const vm = await buildViewModel(document, this.store, topology);
+        if (disposed) return;
+        void panel.webview.postMessage({ type: 'docChanged', payload: vm });
+      })();
     });
 
     panel.onDidDispose(() => {
@@ -195,6 +207,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
         }
         if (msg.type === 'renameFolder') {
           await this.renameFolder(msg.index, msg.name);
+        } else if (msg.type === 'revealSource') {
+          await this.revealSourceFolder(msg.sourceFolderUri);
+        } else if (msg.type === 'createSourceFolder') {
+          await this.createSourceFolder(msg.folderUri, msg.name);
         } else if (msg.type === 'addPlaceholderFromSample') {
           await this.addPlaceholderFromSample(document);
         } else if (msg.type === 'removePlaceholder') {
@@ -251,9 +267,98 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     });
   }
 
-  private renderFor(document: vscode.TextDocument): string {
-    const vm = buildViewModel(document, this.store);
+  private async renderFor(document: vscode.TextDocument): Promise<string> {
+    const vm = await buildViewModel(document, this.store, this.manager.getTopology());
     return renderAdminEditorHtml(vm, makeNonce());
+  }
+
+  /**
+   * Reveal a source folder in the Explorer view. Triggered by clicking the
+   * source link in a folder row. Uses the built-in `revealInExplorer` command
+   * which both ensures the Explorer is focused and selects the URI. Falls
+   * through silently if the URI no longer resolves — the topology listener
+   * will re-render and remove the stale link on the next emit anyway.
+   */
+  private async revealSourceFolder(sourceFolderUri: string): Promise<void> {
+    let uri: vscode.Uri;
+    try {
+      uri = vscode.Uri.parse(sourceFolderUri);
+    } catch (err) {
+      log(`admin-editor: revealSource — invalid URI '${sourceFolderUri}'`);
+      return;
+    }
+    log(`admin-editor: revealSource — ${uri.toString()}`);
+    try {
+      await vscode.commands.executeCommand('revealInExplorer', uri);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`admin-editor: revealInExplorer failed — ${message}`);
+    }
+  }
+
+  /**
+   * Bootstrap a new source folder for a destination that has none. Creates
+   * `workspaceFolders[0]/<name>/` plus a minimal `.sync.jsonc` inside it that
+   * points at `folderUri` as its sole destination. SyncManager's file watcher
+   * picks up the new .sync.jsonc and reloads the topology; the topology
+   * listener above re-renders the admin editor's Folders section, swapping
+   * the button for the new source link.
+   */
+  private async createSourceFolder(folderUri: string, name: string): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      void vscode.window.showWarningMessage(
+        'No workspace folders open — cannot create a source folder.',
+      );
+      return;
+    }
+    const rootUri = folders[0].uri;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      void vscode.window.showWarningMessage('Folder has no name — cannot create source folder.');
+      return;
+    }
+
+    const newFolderUri = appendUriPath(rootUri, trimmed);
+    const configUri = appendUriPath(newFolderUri, '.sync.jsonc');
+    log(`admin-editor: createSourceFolder — '${trimmed}' at ${newFolderUri.toString()} → ${folderUri}`);
+
+    // Check the target folder doesn't already exist on disk. The Folders
+    // section already hid the button via canCreateSource, but the disk could
+    // have changed since the view model was built. Race-safe: if it exists,
+    // we bail rather than silently writing into an unknown folder.
+    try {
+      await vscode.workspace.fs.stat(newFolderUri);
+      void vscode.window.showWarningMessage(
+        `A folder named '${trimmed}' already exists in the workspace root.`,
+      );
+      return;
+    } catch {
+      // Not found — good, we're free to create.
+    }
+
+    try {
+      await vscode.workspace.fs.createDirectory(newFolderUri);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`admin-editor: createDirectory failed — ${message}`);
+      void vscode.window.showErrorMessage(`Could not create folder: ${message}`);
+      return;
+    }
+
+    const configText = renderNewSyncConfig(folderUri, trimmed);
+    try {
+      await vscode.workspace.fs.writeFile(configUri, new TextEncoder().encode(configText));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`admin-editor: write .sync.jsonc failed — ${message}`);
+      void vscode.window.showErrorMessage(`Could not write .sync.jsonc: ${message}`);
+      return;
+    }
+
+    void vscode.window.showInformationMessage(
+      `Created source folder '${trimmed}' wired to '${folderUri}'.`,
+    );
   }
 
   private async renameFolder(index: number, newName: string): Promise<void> {
@@ -296,7 +401,7 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     );
     // The atomic write fires onDidChangeTextDocument which re-posts the VM.
     // Also push a fresh VM directly in case the doc-change event lags.
-    const vm = buildViewModel(document, this.store);
+    const vm = await buildViewModel(document, this.store, this.manager.getTopology());
     void panel.webview.postMessage({ type: 'docChanged', payload: vm });
   }
 
@@ -400,6 +505,8 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
 
 type WebviewMessage =
   | { type: 'renameFolder'; index: number; name: string }
+  | { type: 'revealSource'; sourceFolderUri: string }
+  | { type: 'createSourceFolder'; folderUri: string; name: string }
   | { type: 'refreshSnapshot' }
   | { type: 'clearSnapshot' }
   | { type: 'openAsText' }
@@ -409,18 +516,133 @@ type WebviewMessage =
   | { type: 'removePlaceholder'; sha256: string }
   | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
-function buildViewModel(document: vscode.TextDocument, store: SnapshotStore): AdminEditorViewModel {
+/**
+ * Build the admin-editor view model. Sync part: parse the snapshot, compute
+ * the per-folder source-link list from the live topology. Async part: for
+ * folders with no incoming sources, stat `workspaceFolders[0]/<name>` to
+ * decide whether the "Create source folder" affordance is offered. Stats run
+ * in parallel; misses (ENOENT) mean the slot is available.
+ */
+async function buildViewModel(
+  document: vscode.TextDocument,
+  store: SnapshotStore,
+  topology: ResolvedTopology,
+): Promise<AdminEditorViewModel> {
   const text = document.getText();
   const { snapshot, errors } = parseSnapshot(text);
   const pointer = store.getPointer();
+
+  const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  const rootUri = workspaceFolders.length > 0 ? workspaceFolders[0].uri : null;
+
+  // First pass — compute everything that's synchronous: source links and the
+  // pieces of canCreateSource we can decide without I/O.
+  const folderRows = snapshot.folders.map<{
+    base: AdminEditorFolder;
+    needsStat: boolean;
+  }>((f, idx) => {
+    const isWorkspaceRoot = idx === 0;
+    const links = findSourceLinksForFolder(topology.sources, f.uri);
+    const sources: AdminEditorFolderSource[] = links.map((l) => ({
+      configUri: l.configUri,
+      sourceFolderUri: l.sourceFolderUri,
+      displayPath: displayPathForSource(l.sourceFolderUri),
+      subpath: l.subpath,
+    }));
+    // canCreateSource is only meaningful when (a) the folder isn't the
+    // workspace root itself, (b) no source already points here, and (c) the
+    // workspace has a root we can create the new folder inside.
+    const eligible =
+      !isWorkspaceRoot && sources.length === 0 && rootUri !== null && f.name.trim().length > 0;
+    return {
+      base: {
+        uri: f.uri,
+        name: f.name,
+        index: idx,
+        isWorkspaceRoot,
+        sources,
+        canCreateSource: false, // filled in async below
+      },
+      needsStat: eligible,
+    };
+  });
+
+  // Async pass — for every eligible row, check whether a folder of the same
+  // name already lives in the workspace root. ENOENT → available; any other
+  // outcome (exists, permission error, etc.) → not available, keep the row
+  // affordance-free. Parallelised so a workspace with many destinations
+  // doesn't serialise the stats.
+  if (rootUri) {
+    await Promise.all(
+      folderRows.map(async (row) => {
+        if (!row.needsStat) return;
+        const probeUri = appendUriPath(rootUri, row.base.name.trim());
+        try {
+          await vscode.workspace.fs.stat(probeUri);
+          // Exists — leave canCreateSource false.
+        } catch {
+          row.base.canCreateSource = true;
+        }
+      }),
+    );
+  }
+
   return {
-    folders: snapshot.folders.map((f) => ({ uri: f.uri, name: f.name })),
+    folders: folderRows.map((r) => r.base),
     settings: summariseSettings(snapshot),
     placeholders: buildPlaceholderRows(snapshot),
     capturedAt: snapshot.capturedAt,
     pointerInfo: pointer ? { uri: pointer.uri, lastWriteAt: pointer.lastWriteAt } : null,
     parseError: errors.length > 0 ? errors.join('; ') : null,
   };
+}
+
+/** Workspace-relative display path for a source folder URI; falls back to the URI itself. */
+function displayPathForSource(sourceFolderUri: string): string {
+  try {
+    const uri = vscode.Uri.parse(sourceFolderUri);
+    const rel = vscode.workspace.asRelativePath(uri, false);
+    return rel || uri.toString();
+  } catch {
+    return sourceFolderUri;
+  }
+}
+
+/**
+ * Append a path segment to a URI. Mirrors topology.ts's appendPath — the
+ * subpath is taken verbatim so the caller is responsible for any encoding.
+ * Names from the snapshot are display names and may contain spaces; the URI
+ * representation is path-as-string and tolerates them.
+ */
+function appendUriPath(base: vscode.Uri, segment: string): vscode.Uri {
+  const joined = base.path.endsWith('/')
+    ? `${base.path}${segment}`
+    : `${base.path}/${segment}`;
+  return base.with({ path: joined });
+}
+
+/**
+ * Template for a fresh .sync.jsonc inside a newly-created source folder.
+ * Minimal but complete: a single destination pointing at the URI the admin
+ * editor was looking at. The user can open it in the config editor to add
+ * include/exclude rules. Newline at EOF for friendliness with text tools.
+ */
+function renderNewSyncConfig(destUri: string, folderName: string): string {
+  // Escape per JSON rules — folderName/destUri may contain quotes or
+  // backslashes; JSON.stringify handles all of it correctly.
+  const safeName = JSON.stringify(folderName);
+  const safeUri = JSON.stringify(destUri);
+  return [
+    '// Folder Sync configuration — created automatically.',
+    `// Source: ${safeName.slice(1, -1)}`,
+    '// Add files to this folder to sync them to the destination below.',
+    '{',
+    '  "destinations": [',
+    `    { "uri": ${safeUri} }`,
+    '  ]',
+    '}',
+    '',
+  ].join('\n');
 }
 
 /**

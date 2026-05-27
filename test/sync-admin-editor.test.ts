@@ -8,10 +8,21 @@
 import { strict as assert } from 'node:assert';
 import {
   renderAdminEditorHtml,
+  type AdminEditorFolder,
   type AdminEditorViewModel,
   type PlaceholderRow,
 } from '../src/sync/adminEditorHtml';
 import { EMPTY_FILE_SHA256 } from '../src/sync/snapshot';
+
+function folder(overrides: Partial<AdminEditorFolder> & { uri: string; name: string }): AdminEditorFolder {
+  return {
+    index: 0,
+    isWorkspaceRoot: false,
+    sources: [],
+    canCreateSource: false,
+    ...overrides,
+  };
+}
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
@@ -44,14 +55,18 @@ test('renders a CSP meta tag with the supplied nonce', () => {
 test('init payload includes folders, settings, capturedAt, pointerInfo', () => {
   const html = renderAdminEditorHtml(
     baseVm({
-      folders: [{ uri: 'file:///x', name: 'X' }],
+      folders: [folder({ uri: 'file:///x', name: 'X', index: 0, isWorkspaceRoot: true })],
       settings: [{ key: 'files.readonlyInclude', valueSummary: '[2 item(s)]', unknown: false }],
       capturedAt: '2026-05-19T03:00:00.000Z',
       pointerInfo: { uri: 'file:///x/.admin-sync.jsonc', lastWriteAt: '2026-05-19T03:00:00.000Z' },
     }),
     'n',
   );
-  assert.match(html, /"folders":\[\{"uri":"file:\/\/\/x","name":"X"\}\]/);
+  // Fields appear in any order in the serialised JSON; check each key
+  // individually rather than locking down the property order.
+  assert.match(html, /"folders":\[/);
+  assert.match(html, /"uri":"file:\/\/\/x"/);
+  assert.match(html, /"name":"X"/);
   assert.match(html, /"key":"files\.readonlyInclude"/);
   assert.match(html, /"valueSummary":"\[2 item\(s\)\]"/);
   assert.match(html, /"capturedAt":"2026-05-19T03:00:00\.000Z"/);
@@ -125,12 +140,66 @@ test('payload escapes </ to prevent script-tag breakout', () => {
   // renderer escapes "<" as "\u003c" inside the JSON payload.
   const html = renderAdminEditorHtml(
     baseVm({
-      folders: [{ uri: 'file:///x', name: '</script><script>alert(1)</script>' }],
+      folders: [folder({ uri: 'file:///x', name: '</script><script>alert(1)</script>' })],
     }),
     'n',
   );
   assert.ok(!html.includes('</script><script>alert(1)'), 'breakout sequence leaked into HTML');
   assert.match(html, /\\u003c\/script>/);
+});
+
+// ───── folder source links / create-source button ──────────────────────
+
+test('folder sources surface in the init payload', () => {
+  // Sources serialise into the data-island so the client renderer can build
+  // the per-row link list at mount. This catches a regression where the
+  // payload accidentally drops `sources` from the JSON shape.
+  const html = renderAdminEditorHtml(
+    baseVm({
+      folders: [
+        folder({
+          uri: 'file:///dest',
+          name: 'Dest',
+          index: 1,
+          isWorkspaceRoot: false,
+          sources: [
+            {
+              configUri: 'file:///src/.sync.jsonc',
+              sourceFolderUri: 'file:///src',
+              displayPath: 'src',
+              subpath: '',
+            },
+          ],
+        }),
+      ],
+    }),
+    'n',
+  );
+  assert.match(html, /"sources":\[/);
+  assert.match(html, /"sourceFolderUri":"file:\/\/\/src"/);
+  assert.match(html, /"displayPath":"src"/);
+  assert.match(html, /"configUri":"file:\/\/\/src\/\.sync\.jsonc"/);
+});
+
+test('canCreateSource surfaces in the init payload', () => {
+  const html = renderAdminEditorHtml(
+    baseVm({
+      folders: [folder({ uri: 'file:///orphan', name: 'Orphan', index: 1, canCreateSource: true })],
+    }),
+    'n',
+  );
+  assert.match(html, /"canCreateSource":true/);
+});
+
+test('folder grid template reserves a column for the source-link cell', () => {
+  // Five tracks now: idx | name | uri | source-links | actions. The pure
+  // renderer's CSS is the contract — a regression that drops the column
+  // would collapse the layout, this assertion catches that early.
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  assert.match(
+    html,
+    /\.folder-list li \{ grid-template-columns: 24px minmax\(140px, 1fr\) minmax\(160px, 2fr\) minmax\(160px, auto\) auto; \}/,
+  );
 });
 
 test('header explains the file is managed automatically', () => {

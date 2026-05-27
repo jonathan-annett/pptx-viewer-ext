@@ -24,6 +24,31 @@ import { decisionWiringScript, planContentStyles } from './planHtml';
 export interface AdminEditorFolder {
   uri: string;
   name: string;
+  /** Position in workspaceFolders. Used by the client to address row events. */
+  index: number;
+  /** True when this is workspaceFolders[0] — the writable source root by convention. */
+  isWorkspaceRoot: boolean;
+  /** Sources whose destinations point at this folder. Empty when none. */
+  sources: AdminEditorFolderSource[];
+  /**
+   * True when no sources link here AND there is no folder of the same name in
+   * workspaceFolders[0]. Always false for workspaceFolders[0] itself. The
+   * filesystem half of this decision is async — the wired side computes it
+   * before constructing the view model.
+   */
+  canCreateSource: boolean;
+}
+
+/** One source pointing at this destination folder, ready for the renderer. */
+export interface AdminEditorFolderSource {
+  /** URI of the .sync.jsonc file in the source folder. */
+  configUri: string;
+  /** URI of the source folder itself (parent of configUri). */
+  sourceFolderUri: string;
+  /** Workspace-relative display path for the link text. */
+  displayPath: string;
+  /** Empty when the source targets the destination root; otherwise the subpath. */
+  subpath: string;
 }
 
 export interface AdminEditorSettingSummary {
@@ -229,7 +254,7 @@ code {
   padding: 8px 0;
   border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.15));
 }
-.folder-list li { grid-template-columns: 24px minmax(140px, 1fr) minmax(160px, 2fr) auto; }
+.folder-list li { grid-template-columns: 24px minmax(140px, 1fr) minmax(160px, 2fr) minmax(160px, auto) auto; }
 .setting-list li { grid-template-columns: minmax(180px, 1fr) auto; }
 .folder-list li:last-child, .setting-list li:last-child { border-bottom: none; }
 .folder-idx {
@@ -311,6 +336,50 @@ input[type="text"] {
   background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.15));
 }
 .actions { display: flex; gap: 8px; margin: 16px 0 8px; flex-wrap: wrap; }
+.folder-source-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85em;
+}
+.folder-source-cell .source-link {
+  /* Inline link styled like a VS Code clickable token — uses the editor
+   * link colour so it picks up theme variants without us hard-coding. */
+  color: var(--vscode-textLink-foreground, #3794ff);
+  text-decoration: underline;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  font-family: var(--vscode-editor-font-family);
+  word-break: break-all;
+}
+.folder-source-cell .source-link:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, #3794ff));
+}
+.folder-source-cell .source-subpath {
+  /* Subpath suffix on the link, e.g. "→ sub/folder". Greyed to keep the
+   * source-folder name dominant. */
+  color: var(--vscode-descriptionForeground);
+  margin-left: 6px;
+  font-size: 0.95em;
+}
+.btn-create-source {
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-button-border, rgba(127,127,127,0.4));
+  border-radius: 3px;
+  padding: 2px 10px;
+  font-size: 0.85em;
+  font-family: var(--vscode-font-family);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-create-source:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.15));
+}
 .editing { background: var(--vscode-editor-selectionBackground, rgba(127,127,127,0.15)); }
 .placeholder-list {
   list-style: none;
@@ -539,6 +608,49 @@ const CLIENT_JS = `
     uriCell.className = 'folder-uri';
     uriCell.textContent = folder.uri;
 
+    // Source-link / create-source cell. Sits between the URI and the
+    // Rename action. One of three states:
+    //   1. One+ sources point here → list each as a clickable link that
+    //      asks the extension to reveal the source folder in the explorer.
+    //   2. canCreateSource → render "Create source folder" — clicking it
+    //      asks the extension to mkdir + write .sync.jsonc pointing here.
+    //   3. Otherwise empty (workspaceFolders[0], or a folder of the same
+    //      name already exists in the workspace root).
+    const sourceCell = document.createElement('div');
+    sourceCell.className = 'folder-source-cell';
+    const sources = folder.sources || [];
+    if (sources.length > 0) {
+      sources.forEach((s) => {
+        const wrap = document.createElement('div');
+        const link = document.createElement('button');
+        link.type = 'button';
+        link.className = 'source-link';
+        link.textContent = s.displayPath || s.sourceFolderUri;
+        link.title = 'Reveal source folder in Explorer';
+        link.addEventListener('click', () => {
+          vscode.postMessage({ type: 'revealSource', sourceFolderUri: s.sourceFolderUri });
+        });
+        wrap.appendChild(link);
+        if (s.subpath) {
+          const sub = document.createElement('span');
+          sub.className = 'source-subpath';
+          sub.textContent = '→ ' + s.subpath;
+          wrap.appendChild(sub);
+        }
+        sourceCell.appendChild(wrap);
+      });
+    } else if (folder.canCreateSource) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn-create-source';
+      btn.textContent = 'Create source folder';
+      btn.title = 'Create an empty folder in the workspace root and wire it up as a source for this destination';
+      btn.addEventListener('click', () => {
+        vscode.postMessage({ type: 'createSourceFolder', folderUri: folder.uri, name: folder.name });
+      });
+      sourceCell.appendChild(btn);
+    }
+
     const actionCell = document.createElement('div');
     if (editing[idx] !== undefined) {
       const save = document.createElement('button');
@@ -570,6 +682,7 @@ const CLIENT_JS = `
     li.appendChild(idxCell);
     li.appendChild(nameCell);
     li.appendChild(uriCell);
+    li.appendChild(sourceCell);
     li.appendChild(actionCell);
     return li;
   }
