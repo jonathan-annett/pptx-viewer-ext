@@ -16,3 +16,9 @@ desktop-support-review.md
 *-plan.md
 *-report.md
 
+# Test-fixture outputs from scripts/generate-event-* (generated, not source).
+event-schedule.json
+event.json
+events/
+events-by-day/
+
