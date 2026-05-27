@@ -51,10 +51,14 @@ interface State {
   /** Last value passed to subscribers — used to seed late subscribers. */
   lastState: DestinationOnlyState;
   context: vscode.ExtensionContext;
-  /** Last value we wrote to the operator-restore capture — undefined until
-   *  the first recompute. Used to suppress redundant globalState writes
-   *  (we only touch it on transitions). */
-  lastCapturedDestOnly: boolean | undefined;
+  /**
+   * Last value we wrote to the folder-restore capture (true = "wrote a
+   * capture because workspace has no sources"). Undefined until the
+   * first recompute. Used to suppress redundant globalState writes —
+   * we only touch it on transitions, same idea as the file-based
+   * snapshot writer's skip-on-equal.
+   */
+  lastWroteFolderRestore: boolean | undefined;
   /**
    * Whether the canonical manifest was present at the previous recompute.
    * `undefined` until the first recompute completes — that initial value
@@ -200,19 +204,21 @@ async function recompute(): Promise<void> {
     void autoOpenCanonicalManifestOnArrival();
   }
 
-  // Operator-restore capture: maintain a globalState entry mirroring the
-  // current workspace folders so PWA refresh can re-mount them. Only
-  // touched on transitions (true ↔ false) — same idea as the file-based
-  // snapshot writer's skip-on-equal pattern. Cleared when we leave
-  // operator mode so the next cold restore falls through to the
-  // .admin-sync.jsonc pointer (which is now authoritative).
-  if (result !== current.lastCapturedDestOnly) {
-    if (result) {
+  // Folder-restore capture: maintain a globalState entry mirroring the
+  // current workspace folders so PWA refresh can re-mount them. Fires
+  // whenever the workspace has *no sources* — covers operator mode
+  // proper (no sources + manifest present) AND the cold-folder case
+  // (no sources + no manifest yet; could be a destination-in-waiting).
+  // The .admin-sync.jsonc pointer is the authoritative restore when
+  // sources exist; this globalState capture covers everything else.
+  const noSources = current.manager.getTopology().sources.length === 0 && folders.length > 0;
+  if (noSources !== current.lastWroteFolderRestore) {
+    if (noSources) {
       await writeOperatorRestoreCapture(current.context, folders);
     } else {
       await clearOperatorRestoreCapture(current.context);
     }
-    current.lastCapturedDestOnly = result;
+    current.lastWroteFolderRestore = noSources;
   }
 
   log(
@@ -448,7 +454,7 @@ export function activateDestinationOnlyContextKey(
     manager,
     lastState: { isDestinationOnly: false },
     context,
-    lastCapturedDestOnly: undefined,
+    lastWroteFolderRestore: undefined,
     lastCanonicalManifestPresent: undefined,
   };
 

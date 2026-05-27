@@ -23,7 +23,6 @@ import {
 } from './snapshotStore';
 import { KNOWN_WORKSPACE_KEYS } from './snapshot';
 import {
-  detectDestinationOnlyFromFs,
   getOperatorRestoreCapture,
   type OperatorRestoreCapture,
 } from './destinationOnlyWired';
@@ -407,15 +406,26 @@ export function startSnapshotWriter(
       log('snapshot: no workspace folders — skipping write');
       return;
     }
-    // Skip in destination-only mode — writing .admin-sync.jsonc into a
-    // destination workspace creates a spurious source-side artifact and
-    // would surface as a stray tracked file the next time someone opens
-    // that destination as a source. Re-evaluated per fire so the
-    // operator → main-user transition (user adds a .sync.jsonc) starts
-    // writing again on the next change.
-    if (await detectDestinationOnlyFromFs()) {
-      log('snapshot: destination-only workspace — skipping write');
+    // Gate on source presence rather than manifest presence. Without any
+    // `.sync.jsonc` in the workspace, there's no source intent expressed
+    // yet — the folder might be a destination-in-waiting (manifest will
+    // arrive later), a fresh code folder, or anything else. Writing
+    // .admin-sync.jsonc pre-emptively would litter destination folders
+    // with a source-only artifact. When sources eventually appear, the
+    // next manager.onDidChange fires this listener and writes normally.
+    const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+    if (sources.length === 0) {
+      log('snapshot: workspace has no sources — skipping write');
       return;
+    }
+    // Now that we've confirmed source intent, seed read-only lock
+    // settings. Idempotent (`ensureWorkspaceLockSettings` is seed-if-
+    // missing), so no harm calling it on every write. Runs BEFORE
+    // captureCurrent so the snapshot includes the freshly-seeded values.
+    try {
+      await ensureWorkspaceLockSettings();
+    } catch (err) {
+      log(`snapshot: ensureWorkspaceLockSettings threw — ${errMsg(err)}`);
     }
     const target = folders[0].uri;
     // Preserve any user-added placeholder hashes across recapture; they live

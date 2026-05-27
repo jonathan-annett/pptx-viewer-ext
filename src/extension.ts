@@ -16,7 +16,6 @@ import { ManifestEditorProvider } from './sync/manifestEditor';
 import { registerProbe } from './sync/probe';
 import {
   activateDestinationOnlyContextKey,
-  detectDestinationOnlyFromFs,
   maybeAutoOpenOperatorManifest,
   registerDestinationOnlyProbe,
 } from './sync/destinationOnlyWired';
@@ -28,7 +27,6 @@ import { openParseCache } from './sync/parseCacheIdb';
 import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
-  ensureWorkspaceLockSettings,
   maybeRestore,
   showSnapshotCommand,
   startSnapshotWriter,
@@ -120,26 +118,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log('restore: desktop host — last-active-tab replay skipped (native tab persistence)');
   }
 
-  // Seed read-only lock settings (files.readonlyInclude / readonlyExclude)
-  // if missing — destinations are read-only by default; the source folder
-  // (workspaceFolders[0]) is the writable carve-out. No-op when the user has
-  // already set these at workspace scope or when the snapshot just restored
-  // them. Must run AFTER maybeRestore (snapshot wins) and BEFORE the manager
-  // first emits (so the snapshot writer's initial state captures them).
-  //
-  // Skipped entirely in destination-only mode — workspaceFolders[0] is itself
-  // a destination there, so the "writable carve-out" semantics don't apply
-  // and seeding readonlyInclude would falsely lock the operator out of their
-  // own workspace folder.
-  try {
-    if (await detectDestinationOnlyFromFs()) {
-      log('snapshot: destination-only workspace detected — skipping lock-settings seed');
-    } else {
-      await ensureWorkspaceLockSettings();
-    }
-  } catch (err) {
-    log(`snapshot: ensureWorkspaceLockSettings threw — ${err instanceof Error ? err.message : String(err)}`);
-  }
+  // Lock-settings seeding (`files.readonlyInclude` / `readonlyExclude`)
+  // used to run here at activation, gated on destination-only detection.
+  // It's now deferred to the snapshot writer's `tryWrite` so it only
+  // fires when source intent is actually present (≥1 `.sync.jsonc`),
+  // avoiding the false-positive where a cold destination folder
+  // (no manifest yet, looks indistinguishable from a fresh source) got
+  // its workspaceFolders[0] erroneously locked. See restoreFlow.ts.
 
   // M5.2.5 — URI hash cache. Initialised once at activation and parked on a
   // module singleton (planner.ts + runSync.ts read it via getHashCacheSingleton).
