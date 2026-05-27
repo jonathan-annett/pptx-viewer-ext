@@ -26,6 +26,7 @@ import {
   getOperatorRestoreCapture,
   type OperatorRestoreCapture,
 } from './destinationOnlyWired';
+import { SYNC_CONFIG_GLOB } from './configFilenames';
 
 const PENDING_SETTINGS_KEY = 'folderSync.snapshotPendingSettings';
 
@@ -407,13 +408,14 @@ export function startSnapshotWriter(
       return;
     }
     // Gate on source presence rather than manifest presence. Without any
-    // `.sync.jsonc` in the workspace, there's no source intent expressed
-    // yet — the folder might be a destination-in-waiting (manifest will
-    // arrive later), a fresh code folder, or anything else. Writing
-    // .admin-sync.jsonc pre-emptively would litter destination folders
-    // with a source-only artifact. When sources eventually appear, the
-    // next manager.onDidChange fires this listener and writes normally.
-    const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+    // source config (`.sync.jsonc` or `.roomSync`) in the workspace,
+    // there's no source intent expressed yet — the folder might be a
+    // destination-in-waiting (manifest will arrive later), a fresh code
+    // folder, or anything else. Writing .admin-sync.jsonc pre-emptively
+    // would litter destination folders with a source-only artifact. When
+    // sources eventually appear, the next manager.onDidChange fires this
+    // listener and writes normally.
+    const sources = await vscode.workspace.findFiles(SYNC_CONFIG_GLOB, undefined, 1);
     if (sources.length === 0) {
       log('snapshot: workspace has no sources — skipping write');
       return;

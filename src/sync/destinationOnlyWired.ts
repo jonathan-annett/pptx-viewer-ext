@@ -26,6 +26,7 @@ import { isDestinationOnlyTopology } from './destinationOnly';
 import type { SyncManager } from './manager';
 import { readManifest } from './manifest';
 import type { ManifestSummary } from './statusBarOperator';
+import { SYNC_CONFIG_GLOB } from './configFilenames';
 
 const MANIFEST_FILENAME = '.foldersync-manifest.json';
 const MANIFEST_GLOB = '**/.foldersync-manifest.json';
@@ -121,16 +122,17 @@ function manifestUriForFolder(folderUri: vscode.Uri): vscode.Uri {
  *
  * Same semantics as `isDestinationOnlyTopology`:
  *   - zero workspace folders → false (no signal)
- *   - any `.sync.jsonc` anywhere → false (workspace has sources)
+ *   - any source config (`.sync.jsonc` or `.roomSync`) anywhere → false
+ *     (workspace has source intent)
  *   - otherwise → true iff at least one workspace folder has a
  *     `.foldersync-manifest.json` at its root.
  */
 export async function detectDestinationOnlyFromFs(): Promise<boolean> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return false;
-  // `maxResults: 1` short-circuits the glob as soon as one .sync.jsonc is
-  // found anywhere in the workspace — we only need the boolean.
-  const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+  // `maxResults: 1` short-circuits the glob as soon as one source config
+  // is found anywhere in the workspace — we only need the boolean.
+  const sources = await vscode.workspace.findFiles(SYNC_CONFIG_GLOB, undefined, 1);
   if (sources.length > 0) return false;
   for (const folder of folders) {
     try {
@@ -321,7 +323,7 @@ export async function maybeAutoOpenOperatorManifest(
   // Operator mode requires *zero* sources in the workspace — same gate
   // as `detectDestinationOnlyFromFs`, inlined here so we short-circuit
   // the second FS call when the canonical check already fails.
-  const sources = await vscode.workspace.findFiles('**/.sync.jsonc', undefined, 1);
+  const sources = await vscode.workspace.findFiles(SYNC_CONFIG_GLOB, undefined, 1);
   if (sources.length > 0) {
     log('manifest-auto-open: workspace has source(s), not in operator mode, skipping');
     return;

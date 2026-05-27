@@ -50,11 +50,30 @@ export interface Diagnostic {
   configUri?: vscode.Uri;
 }
 
+/**
+ * One source folder carrying both `.sync.jsonc` AND `.roomSync` —
+ * the room-sync v1 alias landed (see room-sync-format-v1-plan.md M1) but
+ * two files of the same logical config can't coexist in one folder. The
+ * manager picks `.roomSync` as the deterministic winner so the topology
+ * still loads, and records the pair here for the resolve-conflict command
+ * to walk.
+ */
+export interface SyncConfigConflict {
+  /** Parent folder both files live in. */
+  sourceFolderUri: vscode.Uri;
+  /** URI of the `.sync.jsonc` file. */
+  legacyUri: vscode.Uri;
+  /** URI of the `.roomSync` file. */
+  roomSyncUri: vscode.Uri;
+}
+
 export interface ResolvedTopology {
   sources: ResolvedSource[];
   /** Sources that failed to load. Kept for diagnostic display. */
   failed: SourceLoad[];
   diagnostics: Diagnostic[];
+  /** Folders with both `.sync.jsonc` and `.roomSync`. Populated by the manager. */
+  conflicts: SyncConfigConflict[];
 }
 
 export function resolveTopology(
@@ -192,7 +211,7 @@ export function resolveTopology(
     }
   }
 
-  return { sources, failed, diagnostics };
+  return { sources, failed, diagnostics, conflicts: [] };
 }
 
 /** Render a topology as multi-line text for the Output Channel. */

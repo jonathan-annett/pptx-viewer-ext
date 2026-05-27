@@ -16,18 +16,24 @@ import {
   resolveTopology,
   formatTopology,
   type ResolvedTopology,
+  type SyncConfigConflict,
 } from './topology';
+import {
+  SYNC_CONFIG_GLOB,
+  partitionConfigUris,
+} from './configFilenames';
 import { log } from '../log';
 
 type Listener = (topology: ResolvedTopology) => void;
 
-const CONFIG_GLOB = '**/.sync.jsonc';
+const CONFIG_GLOB = SYNC_CONFIG_GLOB;
 
 export class SyncManager implements vscode.Disposable {
   private topology: ResolvedTopology = {
     sources: [],
     failed: [],
     diagnostics: [],
+    conflicts: [],
   };
   private listeners = new Set<Listener>();
   private watcher: vscode.FileSystemWatcher | undefined;
@@ -81,17 +87,27 @@ export class SyncManager implements vscode.Disposable {
   private async doReload(): Promise<void> {
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
-      this.topology = { sources: [], failed: [], diagnostics: [] };
+      this.topology = { sources: [], failed: [], diagnostics: [], conflicts: [] };
       log('sync: no workspace folders — topology is empty');
       this.emit();
       return;
     }
 
-    // Find all .sync.jsonc files. findFiles respects the user's files.exclude
-    // settings but ignores .gitignore by default — fine for our purposes.
+    // Find every recognised source-config file. `findFiles` respects the
+    // user's files.exclude settings but ignores .gitignore by default —
+    // fine for our purposes. The glob honours both `.sync.jsonc` and
+    // `.roomSync`; conflict detection below resolves the same-folder pair.
     const configUris = await vscode.workspace.findFiles(CONFIG_GLOB);
+    const { keep, conflicts: rawConflicts } = partitionConfigUris(configUris);
+    // Marshal the pure-helper output into vscode.Uri-shaped conflict
+    // records that the rest of the extension consumes.
+    const conflicts: SyncConfigConflict[] = rawConflicts.map((c) => ({
+      sourceFolderUri: c.roomSync.with({ path: c.parentPath }),
+      legacyUri: c.legacy,
+      roomSyncUri: c.roomSync,
+    }));
     const loads: SourceLoad[] = [];
-    for (const configUri of configUris) {
+    for (const configUri of keep) {
       const owner = workspaceFolderOf(configUri, folders);
       if (!owner) {
         // Shouldn't happen — findFiles searches within workspace folders.
@@ -103,12 +119,22 @@ export class SyncManager implements vscode.Disposable {
     }
 
     this.topology = resolveTopology(loads, folders);
+    this.topology.conflicts = conflicts;
     log(
       `sync: topology resolved — ${this.topology.sources.length} source(s), ` +
-        `${this.topology.failed.length} failed, ${this.topology.diagnostics.length} diagnostic(s)`,
+        `${this.topology.failed.length} failed, ` +
+        `${this.topology.diagnostics.length} diagnostic(s), ` +
+        `${conflicts.length} config conflict(s)`,
     );
     for (const d of this.topology.diagnostics) {
       log(`sync: [${d.severity}] ${d.message}`);
+    }
+    for (const c of conflicts) {
+      log(
+        `sync: [conflict] ${displayFolder(c.sourceFolderUri)} contains both ` +
+          `.sync.jsonc and .roomSync — using .roomSync; ` +
+          `run "Folder Sync: Resolve Config Conflict" to fix`,
+      );
     }
     this.emit();
   }
@@ -144,6 +170,11 @@ export class SyncManager implements vscode.Disposable {
     this.folderListener?.dispose();
     this.listeners.clear();
   }
+}
+
+function displayFolder(uri: vscode.Uri): string {
+  const rel = vscode.workspace.asRelativePath(uri, false);
+  return rel || uri.toString();
 }
 
 function workspaceFolderOf(

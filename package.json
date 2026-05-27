@@ -54,6 +54,9 @@
         "selector": [
           {
             "filenamePattern": ".sync.jsonc"
+          },
+          {
+            "filenamePattern": ".roomSync"
           }
         ],
         "priority": "default"
@@ -82,6 +85,10 @@
     "jsonValidation": [
       {
         "fileMatch": "**/.sync.jsonc",
+        "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/.roomSync",
         "url": "./schemas/sync.schema.json"
       }
     ],
@@ -127,6 +134,11 @@
         "category": "Folder Sync"
       },
       {
+        "command": "folderSync.resolveConfigConflict",
+        "title": "Folder Sync: Resolve Config Conflict",
+        "category": "Folder Sync"
+      },
+      {
         "command": "pptxViewer.probeUpload",
         "title": "Pptx Info: Probe Upload (M4 diagnostic)",
         "category": "Pptx Info"
@@ -169,6 +181,10 @@
           "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
         },
         {
+          "command": "folderSync.resolveConfigConflict",
+          "when": "folderSync.hasConfigConflict"
+        },
+        {
           "command": "folderSync.showTopology",
           "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
         },
@@ -195,6 +211,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
     "test:sync-jsonc": "node --import tsx test/sync-jsonc.test.ts",
+    "test:sync-config-filenames": "node --import tsx test/sync-config-filenames.test.ts",
     "test:sync-glob": "node --import tsx test/sync-glob.test.ts",
     "test:sync-plan": "node --import tsx test/sync-plan.test.ts",
     "test:sync-scoped-plan": "node --import tsx test/sync-scoped-plan.test.ts",

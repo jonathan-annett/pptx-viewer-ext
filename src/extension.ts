@@ -18,6 +18,10 @@ import {
   activateDestinationOnlyContextKey,
   maybeAutoOpenOperatorManifest,
 } from './sync/destinationOnlyWired';
+import {
+  attachConflictNotifier,
+  registerConfigConflictCommand,
+} from './sync/configConflict';
 import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
@@ -205,8 +209,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // detector + a probe palette command for verification.
   activateDestinationOnlyContextKey(context, manager);
 
+  // Source-config filename conflict surface — when a folder ends up
+  // carrying both `.sync.jsonc` and `.roomSync`, SyncManager records the
+  // pair on topology.conflicts. The notifier keeps the
+  // `folderSync.hasConfigConflict` context key in sync and pops a one-shot
+  // toast on first detection; the command lets the user pick a winner.
+  context.subscriptions.push(attachConflictNotifier(manager));
+  context.subscriptions.push(registerConfigConflictCommand(manager));
+
   context.subscriptions.push(SyncConfigEditorProvider.register(manager));
-  log('activate: .sync.jsonc custom editor registered');
+  log('activate: source-config custom editor registered (.sync.jsonc + .roomSync)');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
   log('activate: .admin-sync.jsonc custom editor registered');
   context.subscriptions.push(ManifestEditorProvider.register());
