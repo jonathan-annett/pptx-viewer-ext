@@ -12,7 +12,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); sub-sections use
 
 ## [Unreleased]
 
-_No entries yet — add bullets here as user-facing changes land between marketplace publishes._
+### Added
+- **Destination-room operator view.** Auto-detects workspaces that mirror a sync destination but don't host a source (manifest present, zero `.sync.jsonc`). In that mode the status bar replaces the source-side "Folder Sync" entry with **`Destination only — last sync …`** that opens the manifest inspector on click; source-side commands (Show Plan, Sync This Folder, Open Admin Config, Show Topology, Dry-Run Plan, Show/Clear Workspace Snapshot) hide from the palette + explorer menus; and the canonical manifest auto-opens on activation (deferring to whatever you were last focused on if you already had a tab open).
+- **Drift status per manifest entry.** Inside the manifest editor (operator mode only), every tracked file gets an inline badge prefix on its path: **✓ matches**, **⚠ drifted** (on-disk hash differs from the manifest), **✗ missing**, or **…** while computing. Hover for the per-status tooltip; a **Refresh drift** button forces a re-check; file-system events under the destination root flip badges automatically.
+
+### Changed
+- **Manifest editor layout.** The destination root path is now the bold page title, with "Folder Sync Manifest" as a subtitle. The redundant `Key` column was dropped from the Entries table — the destPath cell is enough. The "this file is managed automatically…" disclaimer moved from the top of the page to a footer, with mode-aware copy (operator-mode framing reads "the source will rewrite it on the next sync" rather than "the executor will rewrite it"; decisions clause omitted).
+- **Manifest version-mismatch banner.** Reframed in operator mode: "This destination was tracked by a newer version of Folder Sync. Update the extension to inspect this manifest." (Main-user copy unchanged.) Incomplete / hand-edited manifests without a `version` field are now treated as soft-fallback empty instead of surfacing the mismatch banner.
+
+### Fixed
+- **No more spurious `.admin-sync.jsonc` in workspaces with no source intent.** Workspaces that have zero `.sync.jsonc` files anywhere — including cold destination folders that haven't received a manifest yet — no longer get a snapshot file or read-only lock settings written. Both pieces of source-side machinery now gate on actual source presence.
+- **Destination-only workspaces survive PWA refresh.** Adds a globalState capture (parallel to the file-based `.admin-sync.jsonc` pointer) so refreshing the browser while sitting in a destination workspace re-mounts the folder before the active-tab restorer fires.
 
 ---
 

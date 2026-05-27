@@ -112,11 +112,6 @@
         "category": "Folder Sync"
       },
       {
-        "command": "folderSync.probeDestinationOnly",
-        "title": "Folder Sync: Probe Destination-Only Mode (M1 diagnostic)",
-        "category": "Folder Sync"
-      },
-      {
         "command": "folderSync.showSnapshot",
         "title": "Folder Sync: Show Workspace Snapshot",
         "category": "Folder Sync"

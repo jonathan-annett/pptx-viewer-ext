@@ -17,7 +17,6 @@ import { registerProbe } from './sync/probe';
 import {
   activateDestinationOnlyContextKey,
   maybeAutoOpenOperatorManifest,
-  registerDestinationOnlyProbe,
 } from './sync/destinationOnlyWired';
 import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
@@ -242,7 +241,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     ),
     registerProbe(context),
-    registerDestinationOnlyProbe(),
     registerUploadProbe(),
     vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
       log('snapshot: showSnapshot invoked');
