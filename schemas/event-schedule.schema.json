@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Event schedule",
+  "description": "Schedule + room/speaker/session model for the .eventSchedule custom editor. Mirrors src/event/schedule.ts.",
+  "type": "object",
+  "required": ["config", "speakers", "rooms", "sessions"],
+  "properties": {
+    "generatedAt": { "type": "string", "description": "ISO-8601 timestamp; the editor refreshes this on each save." },
+    "config": {
+      "type": "object",
+      "required": ["name", "days"],
+      "properties": {
+        "seed": { "type": "number", "description": "Deterministic PRNG seed (used by the Regenerate Tools button)." },
+        "name": { "type": "string", "description": "Event name; downstream tools use this as the top-level folder name." },
+        "days": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Three-letter day labels in order (e.g. MON, TUE, WED)."
+        },
+        "breakoutRoomCount": { "type": "number" },
+        "plenaryOpenSpeakers": { "type": "number" },
+        "closingSpeakers": { "type": "number" },
+        "breakoutSessionsPerDay": { "type": "number" },
+        "breakoutSessionsLastDay": { "type": "number" },
+        "speakerPoolSize": { "type": "number" },
+        "speakersPerBreakoutMin": { "type": "number" },
+        "speakersPerBreakoutMax": { "type": "number" },
+        "relocations": { "type": "number" }
+      }
+    },
+    "timeslots": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "speakers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^spk-[0-9]+$" },
+          "name": { "type": "string" }
+        }
+      }
+    },
+    "rooms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "kind"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["plenary", "breakout"] }
+        }
+      }
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "day", "timeslot", "roomId", "kind", "speakers"],
+        "properties": {
+          "id": { "type": "string" },
+          "day": { "type": "string" },
+          "timeslot": { "type": "string" },
+          "roomId": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["plenary-open", "plenary-close", "breakout", "breakout-relocated"]
+          },
+          "relocatedFromRoomId": { "type": ["string", "null"] },
+          "speakers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["slot", "speakerId", "speakerName"],
+              "properties": {
+                "slot": { "type": "number" },
+                "speakerId": { "type": "string" },
+                "speakerName": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "vacancies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["day", "timeslot", "roomId", "reason"],
+        "properties": {
+          "day": { "type": "string" },
+          "timeslot": { "type": "string" },
+          "roomId": { "type": "string" },
+          "reason": { "type": "string", "enum": ["relocated-to-plenary"] }
+        }
+      }
+    }
+  }
+}

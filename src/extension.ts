@@ -26,6 +26,7 @@ import {
   attachSnapshotConflictNotifier,
   registerSnapshotConflictCommand,
 } from './sync/snapshotConflict';
+import { EventEditorProvider } from './event/eventEditor';
 import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
@@ -235,6 +236,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   log('activate: .admin-sync.jsonc custom editor registered');
   context.subscriptions.push(ManifestEditorProvider.register());
   log('activate: .foldersync-manifest.json custom editor registered');
+  context.subscriptions.push(EventEditorProvider.register());
+  log('activate: .eventSchedule custom editor registered');
   context.subscriptions.push(
     vscode.commands.registerCommand('folderSync.showTopology', () => {
       log('sync: showTopology invoked');

@@ -89,6 +89,16 @@
           }
         ],
         "priority": "default"
+      },
+      {
+        "viewType": "pptxViewer.eventEditor",
+        "displayName": "Event schedule",
+        "selector": [
+          {
+            "filenamePattern": "*.eventSchedule"
+          }
+        ],
+        "priority": "default"
       }
     ],
     "jsonValidation": [
@@ -103,6 +113,10 @@
       {
         "fileMatch": "**/*.roomSync",
         "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/*.eventSchedule",
+        "url": "./schemas/event-schedule.schema.json"
       }
     ],
     "commands": [
@@ -247,6 +261,7 @@
     "gen:event-schedule": "node --import tsx scripts/generate-event-schedule.ts",
     "gen:event-folders": "node --import tsx scripts/generate-event-folders.ts",
     "test:generate-event-folders": "node --import tsx test/generate-event-folders.test.ts",
+    "test:event-schedule-data": "node --import tsx test/event-schedule-data.test.ts",
     "test:sync-placeholder-registry": "node --import tsx test/sync-placeholder-registry.test.ts",
     "test:sync-manifest-editor-html": "node --import tsx test/sync-manifest-editor-html.test.ts",
     "test:sync-preview-context": "node --import tsx test/sync-preview-context.test.ts",
