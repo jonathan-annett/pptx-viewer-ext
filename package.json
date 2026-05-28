@@ -70,6 +70,9 @@
         "selector": [
           {
             "filenamePattern": ".admin-sync.jsonc"
+          },
+          {
+            "filenamePattern": ".eventSync"
           }
         ],
         "priority": "default"
@@ -80,6 +83,9 @@
         "selector": [
           {
             "filenamePattern": "**/.foldersync-manifest.json"
+          },
+          {
+            "filenamePattern": "**/.syncManifest"
           }
         ],
         "priority": "default"
@@ -146,6 +152,11 @@
         "category": "Folder Sync"
       },
       {
+        "command": "folderSync.resolveSnapshotConflict",
+        "title": "Folder Sync: Resolve Workspace Snapshot Conflict",
+        "category": "Folder Sync"
+      },
+      {
         "command": "pptxViewer.probeUpload",
         "title": "Pptx Info: Probe Upload (M4 diagnostic)",
         "category": "Pptx Info"
@@ -190,6 +201,10 @@
         {
           "command": "folderSync.resolveConfigConflict",
           "when": "folderSync.hasConfigConflict"
+        },
+        {
+          "command": "folderSync.resolveSnapshotConflict",
+          "when": "folderSync.hasSnapshotConflict"
         },
         {
           "command": "folderSync.showTopology",

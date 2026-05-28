@@ -1,7 +1,11 @@
-// vscode-wired half of the .foldersync-manifest.json custom text editor.
+// vscode-wired half of the manifest custom text editor.
+//
+// Recognises both honoured filenames — `.foldersync-manifest.json` (legacy)
+// and `.syncManifest` (preferred alias). See manifestFilenames.ts for the
+// single-source-of-truth filename list.
 //
 // Pairs with the pure renderer in manifestEditorHtml.ts. This module:
-//   - Registers the CustomTextEditorProvider for .foldersync-manifest.json
+//   - Registers the CustomTextEditorProvider for both manifest filenames
 //   - Builds the view model by parsing the document text via the shared
 //     `parseManifestText` helper in manifest-types.ts
 //   - Posts the rendered HTML to the panel and re-renders on document
@@ -37,9 +41,9 @@ import {
   computeDriftMap,
   destRootFromManifestUri,
 } from './manifestDriftWired';
+import { stripManifestFilenameSuffix } from './manifestFilenames';
 
 const VIEW_TYPE = 'folderSync.manifestEditor';
-const MANIFEST_FILENAME = '.foldersync-manifest.json';
 
 export class ManifestEditorProvider implements vscode.CustomTextEditorProvider {
   static register(): vscode.Disposable {
@@ -195,13 +199,11 @@ type WebviewMessage =
 /**
  * Compute a display label for the manifest's destination root. The custom
  * editor opens the manifest *file*, but the user thinks in destination
- * folders — strip the trailing `/.foldersync-manifest.json` and prefer a
- * workspace-relative form when available.
+ * folders — strip the trailing filename (either honoured form) and prefer
+ * a workspace-relative form when available.
  */
 function labelForManifest(manifestFileUri: vscode.Uri): string {
-  const path = manifestFileUri.path;
-  const suffix = `/${MANIFEST_FILENAME}`;
-  const destPath = path.endsWith(suffix) ? path.slice(0, -suffix.length) : path;
+  const destPath = stripManifestFilenameSuffix(manifestFileUri.path);
   const destRootUri = manifestFileUri.with({ path: destPath || '/' });
   const rel = vscode.workspace.asRelativePath(destRootUri, false);
   if (rel && rel !== destRootUri.toString()) return rel;

@@ -10,7 +10,7 @@ import { buildDryRunPlan, buildScopedDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary, type RunSummary } from './runSync';
-import { manifestUri } from './manifest';
+import { manifestUri, resolveManifestUri } from './manifest';
 import {
   countAccepted,
   handleDecisionMessage,
@@ -217,7 +217,10 @@ export function surfaceManifestVersionMismatches(summary: RunSummary): void {
   const mismatches = summary.manifestVersionMismatches;
   if (mismatches.length === 0) return;
 
-  const firstManifestUri = manifestUri(mismatches[0].destWorkspaceFolderUri);
+  // Resolve to the actually-existing manifest filename (the toast's
+  // "Open Manifest" action needs the on-disk URI, not the canonical one);
+  // fall back to the canonical URI if the file vanished between the read
+  // that surfaced the mismatch and this toast.
   const message =
     mismatches.length === 1
       ? `Folder Sync: skipped a destination — its manifest declares ` +
@@ -228,8 +231,12 @@ export function surfaceManifestVersionMismatches(summary: RunSummary): void {
 
   void vscode.window
     .showWarningMessage(message, 'Open Manifest', 'Show Details')
-    .then((choice) => {
+    .then(async (choice) => {
       if (choice === 'Open Manifest') {
+        const resolved = await resolveManifestUri(mismatches[0].destWorkspaceFolderUri);
+        const firstManifestUri = resolved.existed
+          ? resolved.uri
+          : manifestUri(mismatches[0].destWorkspaceFolderUri);
         void vscode.commands.executeCommand('vscode.open', firstManifestUri);
       } else if (choice === 'Show Details') {
         void vscode.commands.executeCommand('workbench.action.output.toggleOutput');

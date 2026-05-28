@@ -24,19 +24,16 @@ import {
 } from './manifestDrift';
 import type { Manifest } from './manifest-types';
 import { vscodeFs } from './vscodeFs';
-
-const MANIFEST_FILENAME = '.foldersync-manifest.json';
+import { stripManifestFilenameSuffix } from './manifestFilenames';
 
 /**
- * Derive the destination root URI from a `.foldersync-manifest.json`
- * URI by stripping the trailing filename. Exposed so the manifest
- * editor can compute the same root for its FileSystemWatcher
- * registration.
+ * Derive the destination root URI from a manifest URI by stripping the
+ * trailing filename. Handles both `.foldersync-manifest.json` (legacy) and
+ * `.syncManifest` (alias). Exposed so the manifest editor can compute the
+ * same root for its FileSystemWatcher registration.
  */
 export function destRootFromManifestUri(manifestUri: vscode.Uri): vscode.Uri {
-  const path = manifestUri.path;
-  const suffix = `/${MANIFEST_FILENAME}`;
-  const destPath = path.endsWith(suffix) ? path.slice(0, -suffix.length) : path;
+  const destPath = stripManifestFilenameSuffix(manifestUri.path);
   return manifestUri.with({ path: destPath || '/' });
 }
 

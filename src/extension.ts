@@ -22,12 +22,16 @@ import {
   attachConflictNotifier,
   registerConfigConflictCommand,
 } from './sync/configConflict';
+import {
+  attachSnapshotConflictNotifier,
+  registerSnapshotConflictCommand,
+} from './sync/snapshotConflict';
 import { registerUploadProbe } from './upload/probeUpload';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
 import { setParseCacheSingleton } from './sync/parseCache';
 import { openParseCache } from './sync/parseCacheIdb';
-import { SnapshotStore, snapshotUri } from './sync/snapshotStore';
+import { SnapshotStore, resolveSnapshotUri } from './sync/snapshotStore';
 import {
   clearSnapshotCommand,
   maybeRestore,
@@ -217,6 +221,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(attachConflictNotifier(manager));
   context.subscriptions.push(registerConfigConflictCommand(manager));
 
+  // Workspace-snapshot filename conflict surface — the parallel of the
+  // source-config conflict above, but for `.admin-sync.jsonc` ↔ `.eventSync`
+  // at workspaceFolders[0]. Auto-migrates empty `.eventSync` → contents of
+  // legacy file (silent rename intent); toasts once on a genuine conflict;
+  // the resolve command lets the user pick a winner.
+  context.subscriptions.push(attachSnapshotConflictNotifier());
+  context.subscriptions.push(registerSnapshotConflictCommand());
+
   context.subscriptions.push(SyncConfigEditorProvider.register(manager));
   log('activate: source-config custom editor registered (.sync.jsonc + .roomSync)');
   context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
@@ -274,11 +286,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       // Prefer the pointer's URI if present (handles the case where the
       // user has moved/renamed workspaceFolders[0] but the snapshot still
-      // lives where it was). Fall back to workspaceFolders[0]/.admin-sync.jsonc.
+      // lives where it was). Fall back to whichever snapshot filename
+      // actually exists at workspaceFolders[0] — preferred (`.eventSync`)
+      // when neither does.
       const pointer = snapshotStore.getPointer();
       const target = pointer
         ? vscode.Uri.parse(pointer.uri)
-        : snapshotUri(folders[0].uri);
+        : (await resolveSnapshotUri(folders[0].uri)).uri;
       await vscode.commands.executeCommand(
         'vscode.openWith',
         target,

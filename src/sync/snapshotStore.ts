@@ -2,7 +2,10 @@
 //
 // This is the vscode-touching half of the snapshot system. It owns:
 //   - The globalState pointer (read/write)
-//   - The .admin-sync.jsonc file on disk (atomic read/write/delete)
+//   - The on-disk snapshot file (atomic read/write/delete); recognised
+//     filenames live in ./snapshotFilenames.ts — `.eventSync` is the
+//     preferred new name, `.admin-sync.jsonc` is the legacy alias kept for
+//     backward compat (existing workspaces keep their file).
 //   - Capturing a Snapshot from the current vscode.workspace state
 //
 // Pure data shaping (marshal/unmarshal, equality, types) lives in
@@ -22,9 +25,13 @@ import {
   type SnapshotPointer,
   type SnapshotSettings,
 } from './snapshot';
+import {
+  PREFERRED_SNAPSHOT_FILENAME,
+  SNAPSHOT_FILENAMES,
+  type SnapshotFilename,
+} from './snapshotFilenames';
 
 const POINTER_KEY = 'folderSync.snapshotPointer';
-const SNAPSHOT_FILENAME = '.admin-sync.jsonc';
 
 export {
   emptySnapshot,
@@ -101,7 +108,14 @@ export class SnapshotStore {
    * can decide whether to surface or swallow.
    */
   async writeSnapshot(folderUri: vscode.Uri, snapshot: Snapshot): Promise<vscode.Uri> {
-    const finalUri = snapshotUri(folderUri);
+    // Write to whichever snapshot filename already exists at this folder, or
+    // to the preferred new filename (`.eventSync`) when neither does. This
+    // way an in-place edit doesn't migrate the legacy `.admin-sync.jsonc`
+    // out from under a user who's chosen to keep it; the rename happens
+    // only when the user explicitly creates the alias file (handled by the
+    // conflict surface in `snapshotConflict.ts`).
+    const resolved = await resolveSnapshotUri(folderUri);
+    const finalUri = resolved.uri;
     const text = marshalSnapshot(snapshot);
 
     const openDoc = vscode.workspace.textDocuments.find(
@@ -140,10 +154,49 @@ export class SnapshotStore {
   }
 }
 
-/** URI of the snapshot file at the root of a given workspace folder. */
+/**
+ * URI of the *preferred* snapshot filename at the root of a given
+ * workspace folder. Used when we need a single canonical URI without
+ * touching the filesystem (cold-restore fallback, openAdminConfig when no
+ * pointer is set). For paths where "which file is actually on disk" matters,
+ * call {@link resolveSnapshotUri} instead.
+ */
 export function snapshotUri(folderUri: vscode.Uri): vscode.Uri {
+  return snapshotUriAt(folderUri, PREFERRED_SNAPSHOT_FILENAME);
+}
+
+function snapshotUriAt(folderUri: vscode.Uri, filename: SnapshotFilename): vscode.Uri {
   const base = folderUri.path.endsWith('/') ? folderUri.path.slice(0, -1) : folderUri.path;
-  return folderUri.with({ path: `${base}/${SNAPSHOT_FILENAME}` });
+  return folderUri.with({ path: `${base}/${filename}` });
+}
+
+/**
+ * Resolve which snapshot file to use at `folderUri`. Checks the preferred
+ * filename first (`.eventSync`); falls back to the legacy `.admin-sync.jsonc`
+ * if only that one exists; returns the preferred URI with `existed: false`
+ * when neither does (ready for a fresh write).
+ *
+ * The preferred-first probe means a workspace that's already migrated takes
+ * one stat. The legacy-fallback probe adds a second stat only on workspaces
+ * still carrying the original filename.
+ */
+export async function resolveSnapshotUri(
+  folderUri: vscode.Uri,
+): Promise<{ uri: vscode.Uri; filename: SnapshotFilename; existed: boolean }> {
+  const preferred = snapshotUriAt(folderUri, PREFERRED_SNAPSHOT_FILENAME);
+  try {
+    await vscode.workspace.fs.stat(preferred);
+    return { uri: preferred, filename: PREFERRED_SNAPSHOT_FILENAME, existed: true };
+  } catch { /* fall through to legacy probe */ }
+  for (const filename of SNAPSHOT_FILENAMES) {
+    if (filename === PREFERRED_SNAPSHOT_FILENAME) continue;
+    const candidate = snapshotUriAt(folderUri, filename);
+    try {
+      await vscode.workspace.fs.stat(candidate);
+      return { uri: candidate, filename, existed: true };
+    } catch { /* try next */ }
+  }
+  return { uri: preferred, filename: PREFERRED_SNAPSHOT_FILENAME, existed: false };
 }
 
 /**
@@ -187,14 +240,16 @@ export function captureCurrent(existingPlaceholders: string[] = []): Snapshot | 
 }
 
 /**
- * Read the `placeholders` array off the on-disk `.admin-sync.jsonc`. Returns
- * an empty array if the file doesn't exist or fails to parse. Used by the
- * recapture callers so that rebuilding a snapshot from vscode state doesn't
- * silently drop the user's placeholder entries (vscode doesn't model them
- * at all — they live only on disk).
+ * Read the `placeholders` array off the on-disk snapshot file (whichever
+ * of the honoured filenames exists). Returns an empty array if neither
+ * file exists or parsing fails. Used by the recapture callers so that
+ * rebuilding a snapshot from vscode state doesn't silently drop the user's
+ * placeholder entries (vscode doesn't model them at all — they live only
+ * on disk).
  */
 export async function readPlaceholdersFromDisk(folderUri: vscode.Uri): Promise<string[]> {
-  const target = snapshotUri(folderUri);
+  const { uri: target, existed } = await resolveSnapshotUri(folderUri);
+  if (!existed) return [];
   let bytes: Uint8Array;
   try {
     bytes = await vscode.workspace.fs.readFile(target);

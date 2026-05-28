@@ -52,6 +52,11 @@ import {
   type Manifest,
   type ManifestReadResult,
 } from './manifest-types';
+import {
+  MANIFEST_FILENAMES,
+  PREFERRED_MANIFEST_FILENAME,
+  type ManifestFilename,
+} from './manifestFilenames';
 
 export { emptyManifest, manifestKey, parseManifestText } from './manifest-types';
 export type {
@@ -60,8 +65,6 @@ export type {
   ManifestEntry,
   ManifestReadResult,
 } from './manifest-types';
-
-const MANIFEST_FILENAME = '.foldersync-manifest.json';
 
 /**
  * Read the manifest at the given destination root URI.
@@ -79,13 +82,21 @@ const MANIFEST_FILENAME = '.foldersync-manifest.json';
  *     informational surfaces treat this like a missing manifest.
  */
 export async function readManifest(destRootUri: vscode.Uri): Promise<ManifestReadResult> {
-  const uri = manifestUri(destRootUri);
+  // Find whichever manifest filename exists at this destination root. New
+  // destinations land on the preferred `.syncManifest`; existing
+  // destinations carrying the legacy `.foldersync-manifest.json` keep using
+  // it (no silent migration of operator-owned files).
+  const resolved = await resolveManifestUri(destRootUri);
+  const uri = resolved.uri;
 
+  if (!resolved.existed) {
+    // File doesn't exist — empty manifest is the documented behaviour.
+    return okEmpty();
+  }
   let bytes: Uint8Array;
   try {
     bytes = await vscode.workspace.fs.readFile(uri);
   } catch {
-    // File doesn't exist — empty manifest is the documented behaviour.
     return okEmpty();
   }
 
@@ -124,9 +135,44 @@ function okEmpty(): ManifestReadResult {
   return { kind: 'ok', manifest: emptyManifest() };
 }
 
+/**
+ * URI of the *preferred* manifest filename at the root of a given
+ * destination folder. Used when we need a canonical URI without touching
+ * the filesystem (display labels, auto-open paths). For "where is the
+ * actual file" paths, call {@link resolveManifestUri} instead.
+ */
 export function manifestUri(destRootUri: vscode.Uri): vscode.Uri {
+  return manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
+}
+
+function manifestUriAt(destRootUri: vscode.Uri, filename: ManifestFilename): vscode.Uri {
   const base = destRootUri.path.endsWith('/') ? destRootUri.path.slice(0, -1) : destRootUri.path;
-  return destRootUri.with({ path: `${base}/${MANIFEST_FILENAME}` });
+  return destRootUri.with({ path: `${base}/${filename}` });
+}
+
+/**
+ * Resolve which manifest file to use at `destRootUri`. Checks the preferred
+ * filename first (`.syncManifest`); falls back to the legacy
+ * `.foldersync-manifest.json` if only that one exists; returns the
+ * preferred URI with `existed: false` when neither does.
+ */
+export async function resolveManifestUri(
+  destRootUri: vscode.Uri,
+): Promise<{ uri: vscode.Uri; filename: ManifestFilename; existed: boolean }> {
+  const preferred = manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
+  try {
+    await vscode.workspace.fs.stat(preferred);
+    return { uri: preferred, filename: PREFERRED_MANIFEST_FILENAME, existed: true };
+  } catch { /* try legacy */ }
+  for (const filename of MANIFEST_FILENAMES) {
+    if (filename === PREFERRED_MANIFEST_FILENAME) continue;
+    const candidate = manifestUriAt(destRootUri, filename);
+    try {
+      await vscode.workspace.fs.stat(candidate);
+      return { uri: candidate, filename, existed: true };
+    } catch { /* try next */ }
+  }
+  return { uri: preferred, filename: PREFERRED_MANIFEST_FILENAME, existed: false };
 }
 
 /**
@@ -139,7 +185,12 @@ export async function writeManifest(
   destRootUri: vscode.Uri,
   manifest: Manifest,
 ): Promise<void> {
-  const finalUri = manifestUri(destRootUri);
+  // Write to whichever filename already exists at this destination, or to
+  // the preferred new filename (`.syncManifest`) when neither exists. The
+  // resolver does one stat on warm-migrated destinations, two on
+  // legacy-only destinations — negligible per-sync overhead.
+  const resolved = await resolveManifestUri(destRootUri);
+  const finalUri = resolved.uri;
   const tmpUri = destRootUri.with({ path: `${finalUri.path}.tmp` });
   // 2-space indent keeps the file diff-friendly when the user inspects it.
   const bytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2) + '\n');

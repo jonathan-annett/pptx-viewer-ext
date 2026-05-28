@@ -24,12 +24,15 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import { isDestinationOnlyTopology } from './destinationOnly';
 import type { SyncManager } from './manager';
-import { readManifest } from './manifest';
+import { readManifest, resolveManifestUri } from './manifest';
 import type { ManifestSummary } from './statusBarOperator';
 import { SYNC_CONFIG_GLOB } from './configFilenames';
+import {
+  MANIFEST_GLOB,
+  PREFERRED_MANIFEST_FILENAME,
+  pathEndsWithManifestFilename,
+} from './manifestFilenames';
 
-const MANIFEST_FILENAME = '.foldersync-manifest.json';
-const MANIFEST_GLOB = '**/.foldersync-manifest.json';
 const CONTEXT_KEY = 'folderSync.destinationOnlyWorkspace';
 
 /**
@@ -104,8 +107,28 @@ export function getDestinationOnlyState(): DestinationOnlyState {
   return current?.lastState ?? { isDestinationOnly: false };
 }
 
-function manifestUriForFolder(folderUri: vscode.Uri): vscode.Uri {
-  return vscode.Uri.joinPath(folderUri, MANIFEST_FILENAME);
+/**
+ * URI of any manifest file that exists at the root of `folderUri`. Tries
+ * the preferred filename first, falls back to the legacy. Returns undefined
+ * when neither exists — the caller treats that as "no manifest here".
+ */
+async function findManifestAtFolder(folderUri: vscode.Uri): Promise<vscode.Uri | undefined> {
+  const resolved = await resolveManifestUri(folderUri);
+  return resolved.existed ? resolved.uri : undefined;
+}
+
+/**
+ * The canonical place we'd put a *new* manifest at this folder — used for
+ * display, watcher comparisons, and auto-open targets. The actual file on
+ * disk may live under either honoured filename; see {@link findManifestAtFolder}.
+ */
+function canonicalManifestUriForFolder(folderUri: vscode.Uri): vscode.Uri {
+  // The preferred filename is the right canonical for new destinations.
+  // For an existing legacy-named manifest, callers that need the on-disk
+  // URI go through findManifestAtFolder; this helper is only used for
+  // "open the manifest at this folder" flows where opening either filename
+  // is correct (VS Code dispatches to the same custom editor either way).
+  return vscode.Uri.joinPath(folderUri, PREFERRED_MANIFEST_FILENAME);
 }
 
 /**
@@ -135,23 +158,10 @@ export async function detectDestinationOnlyFromFs(): Promise<boolean> {
   const sources = await vscode.workspace.findFiles(SYNC_CONFIG_GLOB, undefined, 1);
   if (sources.length > 0) return false;
   for (const folder of folders) {
-    try {
-      await vscode.workspace.fs.stat(manifestUriForFolder(folder.uri));
-      return true;
-    } catch {
-      // No manifest at this folder's root — keep looking.
-    }
+    const hit = await findManifestAtFolder(folder.uri);
+    if (hit) return true;
   }
   return false;
-}
-
-async function statManifest(uri: vscode.Uri): Promise<boolean> {
-  try {
-    await vscode.workspace.fs.stat(uri);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function scanAll(): Promise<void> {
@@ -159,8 +169,8 @@ async function scanAll(): Promise<void> {
   const folders = vscode.workspace.workspaceFolders ?? [];
   const next = new Map<string, boolean>();
   for (const folder of folders) {
-    const has = await statManifest(manifestUriForFolder(folder.uri));
-    next.set(folder.uri.toString(), has);
+    const hit = await findManifestAtFolder(folder.uri);
+    next.set(folder.uri.toString(), hit !== undefined);
   }
   current.manifestPresence = next;
 }
@@ -310,14 +320,10 @@ export async function maybeAutoOpenOperatorManifest(
   // bar's click target also opens. If folder[0] doesn't have a manifest
   // we don't auto-open even when a *non-canonical* folder does — the
   // operator might be inspecting two destinations side-by-side and we
-  // shouldn't pick one arbitrarily.
-  const canonicalUri = vscode.Uri.joinPath(folders[0].uri, MANIFEST_FILENAME);
-  try {
-    await vscode.workspace.fs.stat(canonicalUri);
-  } catch {
-    log(
-      `manifest-auto-open: no canonical manifest at ${canonicalUri.toString()}, skipping`,
-    );
+  // shouldn't pick one arbitrarily. Accepts either honoured filename.
+  const canonicalUri = await findManifestAtFolder(folders[0].uri);
+  if (!canonicalUri) {
+    log(`manifest-auto-open: no canonical manifest at ${folders[0].uri.toString()}, skipping`);
     return;
   }
   // Operator mode requires *zero* sources in the workspace — same gate
@@ -358,13 +364,11 @@ async function autoOpenCanonicalManifestOnArrival(): Promise<void> {
   }
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return;
-  const canonicalUri = vscode.Uri.joinPath(folders[0].uri, MANIFEST_FILENAME);
-  // Defensive re-stat — recompute may have computed canonicalManifest from
-  // a stale presence entry, or the file may have been deleted between the
-  // stat and this trigger.
-  try {
-    await vscode.workspace.fs.stat(canonicalUri);
-  } catch {
+  // Defensive re-resolve — recompute may have computed canonicalManifest
+  // from a stale presence entry, or the file may have been deleted between
+  // the stat and this trigger. Accepts either honoured filename.
+  const canonicalUri = await findManifestAtFolder(folders[0].uri);
+  if (!canonicalUri) {
     log('manifest-auto-open: canonical manifest disappeared before arrival auto-open');
     return;
   }
@@ -402,8 +406,12 @@ async function readCanonicalManifestSummary(
   // for version-mismatch and will branch on that case explicitly.
   const result = await readManifest(folderUri);
   if (result.kind !== 'ok') return undefined;
+  // The on-disk manifest may be either honoured filename; use the existing
+  // file's URI when one is there, otherwise fall back to the canonical
+  // (preferred) URI for display purposes.
+  const existing = await findManifestAtFolder(folderUri);
   return {
-    manifestUri: manifestUriForFolder(folderUri),
+    manifestUri: existing ?? canonicalManifestUriForFolder(folderUri),
     folderUri,
     lastSync: result.manifest.lastSync,
   };
@@ -417,10 +425,24 @@ function countTrue(map: ReadonlyMap<string, boolean>): number {
 
 function handleManifestEvent(uri: vscode.Uri, kind: 'create' | 'delete'): void {
   if (!current) return;
+  // The event URI carries whichever filename actually changed. Match it to
+  // a folder by checking that its parent equals a workspace folder and the
+  // basename is one of the honoured manifest names. The presence map is
+  // keyed by folder, not by filename — either file's create/delete flips
+  // the same boolean. recompute() re-stats both forms via scanAll, so a
+  // delete of one when the other still exists keeps presence true.
+  if (!pathEndsWithManifestFilename(uri.path)) return;
+  const parentPath = uri.path.slice(0, uri.path.lastIndexOf('/'));
   const folders = vscode.workspace.workspaceFolders ?? [];
   for (const folder of folders) {
-    if (manifestUriForFolder(folder.uri).toString() === uri.toString()) {
-      current.manifestPresence.set(folder.uri.toString(), kind === 'create');
+    const folderPath = folder.uri.path.endsWith('/')
+      ? folder.uri.path.slice(0, -1)
+      : folder.uri.path;
+    if (folderPath === parentPath) {
+      // Optimistic update; recompute() restats so a wrong guess corrects.
+      if (kind === 'create') {
+        current.manifestPresence.set(folder.uri.toString(), true);
+      }
       void recompute();
       return;
     }
@@ -431,15 +453,19 @@ function handleManifestEvent(uri: vscode.Uri, kind: 'create' | 'delete'): void {
  * Manifest content changed (edit, not create/delete). Presence doesn't
  * flip, but the canonical manifest's `lastSync` may have just rolled
  * forward, so the status bar's relative-time copy needs to update.
- * Filtered to the canonical folder's root manifest — edits to manifests
- * elsewhere don't drive the status bar.
+ * Filtered to the canonical folder's root manifest (either honoured
+ * filename) — edits to manifests elsewhere don't drive the status bar.
  */
 function handleManifestChange(uri: vscode.Uri): void {
   if (!current) return;
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return;
-  const canonicalUri = manifestUriForFolder(folders[0].uri).toString();
-  if (uri.toString() === canonicalUri) {
+  if (!pathEndsWithManifestFilename(uri.path)) return;
+  const parentPath = uri.path.slice(0, uri.path.lastIndexOf('/'));
+  const canonicalFolderPath = folders[0].uri.path.endsWith('/')
+    ? folders[0].uri.path.slice(0, -1)
+    : folders[0].uri.path;
+  if (parentPath === canonicalFolderPath) {
     void recompute();
   }
 }
@@ -489,7 +515,7 @@ export function activateDestinationOnlyContextKey(
   // wired layer hadn't yet seen it, this kicks a recompute. recompute()
   // re-stats from scratch via scanAll() so the missed event is recovered.
   const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => {
-    if (doc.uri.path.endsWith(`/${MANIFEST_FILENAME}`)) {
+    if (pathEndsWithManifestFilename(doc.uri.path)) {
       void recompute();
     }
   });

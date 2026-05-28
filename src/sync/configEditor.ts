@@ -24,6 +24,7 @@ import {
   isWorkspaceRootNamedConfig,
   roomSyncHandle,
 } from './configFilenames';
+import { pathEndsWithManifestFilename } from './manifestFilenames';
 import {
   renderPlanChips,
   renderPlanPairs,
@@ -217,10 +218,11 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     );
     const fileTrigger = (uri: vscode.Uri): void => {
       // Ignore self — the doc-change subscription already handles config
-      // edits, and the manifest live-write must not loop us.
+      // edits, and the manifest live-write must not loop us (matches either
+      // honoured manifest filename — see manifestFilenames.ts).
       const s = uri.toString();
       if (s === document.uri.toString()) return;
-      if (s.endsWith('/.foldersync-manifest.json')) return;
+      if (pathEndsWithManifestFilename(uri.path)) return;
       schedulePlan();
     };
     fileWatcher.onDidCreate(fileTrigger);

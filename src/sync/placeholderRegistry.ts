@@ -15,8 +15,8 @@ import {
   EMPTY_FILE_SHA256,
   computeEffectiveSetFromText,
 } from './snapshot';
-
-const SNAPSHOT_FILENAME = '.admin-sync.jsonc';
+import { SNAPSHOT_FILE_PATTERN } from './snapshotFilenames';
+import { resolveSnapshotUri } from './snapshotStore';
 
 let cached: Set<string> | undefined;
 /** Active load promise — shared so concurrent callers don't trigger duplicate reads. */
@@ -67,8 +67,9 @@ export function _resetForTesting(): void {
 
 /**
  * Wire the registry up to the workspace. Sets up a FileSystemWatcher on the
- * `.admin-sync.jsonc` at `workspaceFolders[0]`, re-creates it when the
- * workspace topology changes, and seeds the cache by reading the file once.
+ * snapshot file at `workspaceFolders[0]` (matches both `.admin-sync.jsonc`
+ * and the `.eventSync` alias), re-creates it when the workspace topology
+ * changes, and seeds the cache by reading whichever file exists.
  *
  * Returns a Disposable that tears down the watcher + workspace-folder
  * subscription. Push it onto `context.subscriptions` from `extension.ts`.
@@ -120,7 +121,10 @@ function refreshWatcher(): void {
   watcher = undefined;
   watchedFolderUri = target;
   if (!target) return;
-  const pattern = new vscode.RelativePattern(target, SNAPSHOT_FILENAME);
+  // Brace-expansion pattern matches both the preferred `.eventSync` and the
+  // legacy `.admin-sync.jsonc`. Either filename changing invalidates the
+  // cache; the reload via `loadFromDisk` picks whichever exists.
+  const pattern = new vscode.RelativePattern(target, SNAPSHOT_FILE_PATTERN);
   watcher = vscode.workspace.createFileSystemWatcher(pattern);
   watcher.onDidCreate(() => invalidate());
   watcher.onDidChange(() => invalidate());
@@ -135,12 +139,15 @@ async function loadFromDisk(): Promise<Set<string>> {
     // user-added placeholder hash.
     return new Set<string>([EMPTY_FILE_SHA256]);
   }
-  const target = snapshotPath(folders[0].uri);
+  const { uri: target, existed } = await resolveSnapshotUri(folders[0].uri);
+  if (!existed) {
+    // No snapshot file yet (fresh workspace, or pre-M4.6 layout).
+    return new Set<string>([EMPTY_FILE_SHA256]);
+  }
   let bytes: Uint8Array;
   try {
     bytes = await vscode.workspace.fs.readFile(target);
   } catch {
-    // No .admin-sync.jsonc yet (fresh workspace, or pre-M4.6 layout).
     return new Set<string>([EMPTY_FILE_SHA256]);
   }
   let text: string;
@@ -151,11 +158,6 @@ async function loadFromDisk(): Promise<Set<string>> {
     return new Set<string>([EMPTY_FILE_SHA256]);
   }
   return computeEffectiveSetFromText(text);
-}
-
-function snapshotPath(folderUri: vscode.Uri): vscode.Uri {
-  const base = folderUri.path.endsWith('/') ? folderUri.path.slice(0, -1) : folderUri.path;
-  return folderUri.with({ path: `${base}/${SNAPSHOT_FILENAME}` });
 }
 
 function errMsg(err: unknown): string {

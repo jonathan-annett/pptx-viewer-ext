@@ -16,9 +16,9 @@ import {
   captureCurrent,
   emptySnapshot,
   readPlaceholdersFromDisk,
+  resolveSnapshotUri,
   SnapshotStore,
   snapshotsEqual,
-  snapshotUri,
   type Snapshot,
 } from './snapshotStore';
 import { KNOWN_WORKSPACE_KEYS } from './snapshot';
@@ -441,14 +441,18 @@ export function startSnapshotWriter(
 
     if (lastWritten === undefined) {
       // First fire post-activation. Read on-disk so we can skip a no-op
-      // rewrite if nothing actually changed.
-      const onDiskUri = snapshotUri(target);
-      const onDisk = await store.readSnapshot(onDiskUri).catch(() => undefined);
+      // rewrite if nothing actually changed. Resolve the URI so we hit
+      // whichever honoured filename is actually there (`.eventSync` or
+      // legacy `.admin-sync.jsonc`).
+      const resolved = await resolveSnapshotUri(target);
+      const onDisk = resolved.existed
+        ? await store.readSnapshot(resolved.uri).catch(() => undefined)
+        : undefined;
       if (onDisk && snapshotsEqual(onDisk, captured)) {
         lastWritten = onDisk;
         // Refresh pointer (in case it was missing/stale).
         await store.setPointer({
-          uri: onDiskUri.toString(),
+          uri: resolved.uri.toString(),
           lastWriteAt: onDisk.capturedAt || captured.capturedAt,
         });
         log('snapshot: on-disk matches current state — no write needed');
