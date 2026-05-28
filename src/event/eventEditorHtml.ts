@@ -336,18 +336,20 @@ function clientScript(): string {
       try { vscode.postMessage(msg); } catch (_) {}
     }
 
-    // Replace the body on every docChanged so the form always mirrors disk.
+    // Replace the body's innerHTML whenever the wired layer pushes a fresh
+    // render. Event handlers are delegated on the root element and attached
+    // once at script-load time — they survive innerHTML swaps because the
+    // root element itself isn't replaced, only its descendants.
+    //
+    // The wired layer pushes on every successful own-write (with the next
+    // schedule directly) AND on every onDidChangeTextDocument event (with
+    // the parsed-from-doc view model). Both paths produce the same body
+    // for a stable file state, so a double-fire is visually a no-op.
     window.addEventListener('message', function(e){
       const m = e.data;
       if (!m || typeof m !== 'object') return;
-      if (m.type === 'docChanged' && m.payload && typeof m.payload === 'object') {
-        // Server re-render: the extension re-issued the full HTML body via
-        // a separate path; nothing to do here. The wired layer alternatively
-        // sends the parsed VM as JSON for in-place updates. v1 keeps it
-        // simple: any docChanged forces a postMessage round trip is unneeded
-        // because the extension also re-renders panel.webview.html when the
-        // doc changes for non-self writes — but the suppression flag covers
-        // own writes. So docChanged is informational; no-op for now.
+      if (m.type === 'docChanged' && typeof m.html === 'string') {
+        root.innerHTML = m.html;
       }
     });
 

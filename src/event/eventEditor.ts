@@ -37,7 +37,7 @@ import {
   setSessionKind,
   setSessionSpeakers,
 } from './scheduleData';
-import { renderEventEditorHtml } from './eventEditorHtml';
+import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind } from './schedule';
 import { getActivePlaceholderSet } from '../sync/placeholderRegistry';
 import { sha256Hex } from '../sync/hash';
@@ -64,46 +64,68 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
     panel.webview.options = { enableScripts: true };
     log(`event-editor: opened ${document.uri.toString()}`);
 
-    // True when our own write triggered the next onDidChangeTextDocument —
-    // lets us suppress the resulting re-render so the user's transient form
-    // state isn't clobbered. Same flag pattern as configEditor.ts.
-    let suppressNextDocChange = false;
-
     const renderInitial = async (): Promise<void> => {
       panel.webview.html = await this.renderFor(document);
     };
     await renderInitial();
 
-    const postRefresh = async (): Promise<void> => {
+    // Re-render the body and push it to the webview. The webview replaces
+    // `#root`'s innerHTML on receipt — event handlers are delegated on the
+    // root element so they survive the swap.
+    //
+    // Two entry points:
+    //
+    //  1. Own writes: after fs.writeFile resolves, we call
+    //     pushRefreshFromSchedule(next) with the freshly-mutated schedule
+    //     directly. This avoids re-reading `document.getText()` — the
+    //     in-memory TextDocument reloads from disk asynchronously after
+    //     fs.writeFile, so a `document.getText()` here may still return
+    //     the pre-write content and re-render the stale state.
+    //
+    //  2. External doc changes (someone editing the file via the raw-text
+    //     editor, or a file-watcher event): we re-parse the document text
+    //     and re-render. By the time onDidChangeTextDocument fires the
+    //     document is up to date.
+    const pushRefreshFromSchedule = async (schedule: EventSchedule): Promise<void> => {
+      const text = marshalSchedule(schedule);
+      const currentSha = await sha256Hex(new TextEncoder().encode(text));
+      const placeholders = await getActivePlaceholderSet();
+      const vm = {
+        schedule,
+        parseErrors: [],
+        isEmpty: text.trim() === '',
+        isPlaceholder: text.trim() === '' || placeholders.has(currentSha),
+      };
+      void panel.webview.postMessage({ type: 'docChanged', html: renderBody(vm) });
+    };
+
+    const pushRefreshFromDocument = async (): Promise<void> => {
       const vm = await buildViewModel(document);
-      void panel.webview.postMessage({ type: 'docChanged', payload: vm });
+      void panel.webview.postMessage({ type: 'docChanged', html: renderBody(vm) });
     };
 
     const docSub = vscode.workspace.onDidChangeTextDocument(async (e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
-      if (suppressNextDocChange) {
-        suppressNextDocChange = false;
-        return;
-      }
-      await postRefresh();
+      await pushRefreshFromDocument();
     });
 
     // Write back via direct fs.writeFile (no tmp+rename, no applyEdit) so
     // the bytes always reach disk on vscode.dev's FSA-backed file://
-    // provider. The open TextDocument reloads via the file watcher, which
-    // fires onDidChangeTextDocument — suppressed by the flag above.
+    // provider. We then push an immediate refresh using the next-schedule
+    // we already have in memory, so the form updates without waiting for
+    // the file-watcher round-trip. The watcher-driven refresh later (via
+    // docSub) is a no-op visually because the rendered body is identical.
     const writeSchedule = async (next: EventSchedule): Promise<void> => {
       const text = marshalSchedule(next);
       if (text === document.getText()) {
         log('event-editor: setSchedule produced identical text — skipping write');
         return;
       }
-      suppressNextDocChange = true;
       try {
         await vscode.workspace.fs.writeFile(document.uri, new TextEncoder().encode(text));
         log(`event-editor: wrote ${text.length} bytes to ${document.uri.toString()}`);
+        await pushRefreshFromSchedule(next);
       } catch (err) {
-        suppressNextDocChange = false;
         const message = err instanceof Error ? err.message : String(err);
         log(`event-editor: fs.writeFile failed — ${message}`);
         void vscode.window.showErrorMessage(
