@@ -187,6 +187,13 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
       <button id="run-sync-safe" class="btn btn-orange" type="button" hidden title="Sync only the items without collisions or warnings — skips the blocked ones so the clean items can still flow">Run Sync (safe items only)</button>
       <span id="run-sync-hint" class="hint plan-actions-hint"></span>
     </div>
+    <div id="sync-progress" class="sync-progress" hidden role="status" aria-live="polite">
+      <div class="sync-progress-bar"><div class="sync-progress-fill" style="width:0%"></div></div>
+      <div class="sync-progress-meta">
+        <span class="sync-progress-count">0 / 0</span>
+        <span class="sync-progress-path"></span>
+      </div>
+    </div>
   </section>
 
   <section class="actions">
@@ -415,6 +422,41 @@ const EMBEDDED_PLAN_STYLE = `
   flex-wrap: wrap;
 }
 .plan-actions-hint { margin: 0; }
+/* Per-op sync progress bar — fed by syncProgress messages while a run is
+   in flight; re-hidden when syncStatus done/error follows. */
+.sync-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.sync-progress[hidden] { display: none; }
+.sync-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.sync-progress-fill {
+  height: 100%;
+  background: var(--vscode-button-background, #0e639c);
+  transition: width 140ms ease-out;
+}
+.sync-progress-fill-error { background: var(--vscode-errorForeground, #f14c4c); }
+.sync-progress-meta {
+  display: flex;
+  gap: 12px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+.sync-progress-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .btn-green {
   background: var(--vscode-charts-green, #4caf50);
   color: #fff;
@@ -1023,6 +1065,7 @@ const CLIENT_JS = `
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
         refreshOrangeButton();
+        hideSyncProgress();
       } else if (msg.status === 'error') {
         runSyncBtn.textContent = 'Run Sync';
         runSyncSafeBtn.textContent = 'Run Sync (safe items only)';
@@ -1030,9 +1073,45 @@ const CLIENT_JS = `
         if (!runSyncSafeBtn.hidden) runSyncSafeBtn.disabled = false;
         runSyncHintEl.textContent = 'Sync failed: ' + (msg.error || 'unknown error');
         refreshOrangeButton();
+        hideSyncProgress();
       }
+    } else if (msg.type === 'syncProgress') {
+      showSyncProgress(
+        typeof msg.done === 'number' ? msg.done : 0,
+        typeof msg.total === 'number' ? msg.total : 0,
+        typeof msg.relPath === 'string' ? msg.relPath : '',
+        typeof msg.destLabel === 'string' ? msg.destLabel : '',
+        typeof msg.status === 'string' ? msg.status : 'ok',
+      );
     }
   });
+
+  // Per-op progress bar — same wiring shape as the admin editor (which
+  // shares the workspace-wide engine). Hidden until the executor fires its
+  // first onProgress event; re-hidden on the syncStatus done/error follow-up.
+  const progressBox = document.getElementById('sync-progress');
+  const progressFill = progressBox ? progressBox.querySelector('.sync-progress-fill') : null;
+  const progressCount = progressBox ? progressBox.querySelector('.sync-progress-count') : null;
+  const progressPath = progressBox ? progressBox.querySelector('.sync-progress-path') : null;
+  function showSyncProgress(done, total, relPath, destLabel, status){
+    if (!progressBox || !progressFill || !progressCount || !progressPath) return;
+    progressBox.hidden = false;
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    progressFill.style.width = pct + '%';
+    if (status === 'failed') progressFill.classList.add('sync-progress-fill-error');
+    progressCount.textContent = done + ' / ' + total + (total > 0 ? ' (' + pct + '%)' : '');
+    let suffix = '';
+    if (destLabel && relPath) suffix = destLabel + ' • ' + relPath;
+    else if (relPath) suffix = relPath;
+    else if (destLabel) suffix = destLabel;
+    else suffix = 'Starting\\u2026';
+    progressPath.textContent = suffix;
+  }
+  function hideSyncProgress(){
+    if (!progressBox || !progressFill) return;
+    progressBox.hidden = true;
+    progressFill.classList.remove('sync-progress-fill-error');
+  }
 
   renderDestList();
   renderAliasList();

@@ -155,7 +155,19 @@ async function runProceed(
 
   let summary;
   try {
-    summary = await runSync(plans, decisions);
+    summary = await runSync(plans, {
+      decisions,
+      onProgress: (e) => {
+        void panel.webview.postMessage({
+          type: 'progress',
+          done: e.done,
+          total: e.total,
+          relPath: e.relPath,
+          destLabel: e.destLabel,
+          status: e.status,
+        });
+      },
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync: execution threw — ${message}`);

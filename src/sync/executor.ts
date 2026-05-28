@@ -98,6 +98,47 @@ export interface ExecuteOptions<U> {
    * bytes in the cache so the next plan-build's destination walk hits.
    */
   cache?: UriHashCache<U>;
+  /**
+   * Per-operation progress callback. Fires after each dispatched item
+   * completes (both `ok` and `failed` outcomes). Skipped items (those
+   * filtered by {@link resolveDispatch}) never fire.
+   *
+   * The runSync orchestrator wraps this to add a running `done` counter
+   * + total across all plans, so the UI can render a true progress bar.
+   * Pure callers (tests) can leave it undefined.
+   */
+  onProgress?: (event: ExecuteProgressEvent) => void;
+}
+
+export interface ExecuteProgressEvent {
+  /** The operation kind that was dispatched (mirrors OperationResult). */
+  kind: OperationResult['kind'];
+  /** Destination-relative path of the item just processed. */
+  relPath: string;
+  /** Whether the op succeeded or failed. */
+  status: 'ok' | 'failed';
+}
+
+/**
+ * Predicate counterpart of {@link resolveDispatch}: would the executor
+ * actually dispatch an op for this item, given these decisions? Exposed
+ * so the orchestrator can pre-compute a total *executable item count*
+ * before the run, without duplicating the dispatch logic.
+ */
+export type DispatchOptions = Pick<
+  ExecuteOptions<unknown>,
+  'decidedOverwrites' | 'decidedDeletes' | 'decidedWarningOverrides'
+>;
+
+export function countExecutableItems(
+  items: readonly PlanItem[],
+  opts: DispatchOptions = {},
+): number {
+  let n = 0;
+  for (const item of items) {
+    if (resolveDispatchPredicate(item, opts)) n++;
+  }
+  return n;
 }
 
 export interface OperationResult {
@@ -167,10 +208,12 @@ export async function executePlan<U extends { toString(): string }>(
       }
       results.push({ relPath: item.relPath, kind, status: 'ok' });
       bump(counts, kind, 'ok');
+      opts.onProgress?.({ kind, relPath: item.relPath, status: 'ok' });
     } catch (err) {
       const message = errMsg(err);
       results.push({ relPath: item.relPath, kind, status: 'failed', error: message });
       bump(counts, kind, 'failed');
+      opts.onProgress?.({ kind, relPath: item.relPath, status: 'failed' });
     }
   }
 
@@ -207,6 +250,19 @@ export async function executePlan<U extends { toString(): string }>(
 function resolveDispatch<U>(
   item: PlanItem,
   opts: ExecuteOptions<U>,
+): OperationResult['kind'] | undefined {
+  return resolveDispatchPredicate(item, opts);
+}
+
+/**
+ * The minimal dispatch decision — same matrix as {@link resolveDispatch} but
+ * takes only the decision Sets. Shared with {@link countExecutableItems} so
+ * a "would this dispatch?" pre-pass uses the exact same logic the executor
+ * will use at run time.
+ */
+function resolveDispatchPredicate(
+  item: PlanItem,
+  opts: DispatchOptions,
 ): OperationResult['kind'] | undefined {
   if (hasBlockingWarning(item)) return undefined;
 

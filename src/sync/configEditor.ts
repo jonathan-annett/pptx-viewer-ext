@@ -531,7 +531,19 @@ async function runSyncFromConfig(
 
   let summary;
   try {
-    summary = await runSync(plans, decisions);
+    summary = await runSync(plans, {
+      decisions,
+      onProgress: (e) => {
+        void panel.webview.postMessage({
+          type: 'syncProgress',
+          done: e.done,
+          total: e.total,
+          relPath: e.relPath,
+          destLabel: e.destLabel,
+          status: e.status,
+        });
+      },
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync-config-editor: sync execution threw — ${message}`);

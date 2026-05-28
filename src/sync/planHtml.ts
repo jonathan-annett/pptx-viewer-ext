@@ -436,7 +436,15 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
     ${renderPlanPairs(vm)}
 
     <footer class="plan-foot" role="group" aria-label="Plan actions">
-      ${renderPlaceholderFooterLine(t)}${renderFooter(blocking, hasWork)}
+      ${renderPlaceholderFooterLine(t)}
+      <div id="sync-progress" class="sync-progress" hidden role="status" aria-live="polite">
+        <div class="sync-progress-bar"><div class="sync-progress-fill" style="width:0%"></div></div>
+        <div class="sync-progress-meta">
+          <span class="sync-progress-count">0 / 0</span>
+          <span class="sync-progress-path"></span>
+        </div>
+      </div>
+      ${renderFooter(blocking, hasWork)}
     </footer>
   </main>
   <script nonce="${nonce}">${decisionWiringScript()}</script>
@@ -901,11 +909,42 @@ function footerScript(): string {
 
     refreshOrangeLabel();
 
+    const progressBox = document.getElementById('sync-progress');
+    const progressFill = progressBox ? progressBox.querySelector('.sync-progress-fill') : null;
+    const progressCount = progressBox ? progressBox.querySelector('.sync-progress-count') : null;
+    const progressPath = progressBox ? progressBox.querySelector('.sync-progress-path') : null;
+
+    function showProgress(done, total, relPath, destLabel, status){
+      if (!progressBox || !progressFill || !progressCount || !progressPath) return;
+      progressBox.hidden = false;
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+      progressFill.style.width = pct + '%';
+      if (status === 'failed') progressFill.classList.add('sync-progress-fill-error');
+      progressCount.textContent = done + ' / ' + total + (total > 0 ? ' (' + pct + '%)' : '');
+      // Combine destination + path so a multi-dest run shows where each
+      // file landed. Empty relPath (the initial zero-progress kick) renders
+      // as the dest label alone, or "Starting…" when both are empty.
+      let suffix = '';
+      if (destLabel && relPath) suffix = destLabel + ' • ' + relPath;
+      else if (relPath) suffix = relPath;
+      else if (destLabel) suffix = destLabel;
+      else suffix = 'Starting\\u2026';
+      progressPath.textContent = suffix;
+    }
+
     window.addEventListener('message', function(e){
       const m = e.data;
       if (!m || typeof m !== 'object') return;
       if (m.type === 'status' && typeof m.label === 'string') {
         lock(m.label);
+      } else if (m.type === 'progress') {
+        showProgress(
+          typeof m.done === 'number' ? m.done : 0,
+          typeof m.total === 'number' ? m.total : 0,
+          typeof m.relPath === 'string' ? m.relPath : '',
+          typeof m.destLabel === 'string' ? m.destLabel : '',
+          typeof m.status === 'string' ? m.status : 'ok',
+        );
       }
     });
   })();`;
@@ -1267,12 +1306,55 @@ function planFooterCss(): string {
       position: sticky;
       bottom: 0;
       display: flex;
+      flex-wrap: wrap;
       gap: 10px;
       justify-content: flex-end;
+      align-items: center;
       padding: 12px 0;
       margin-top: 16px;
       background: linear-gradient(to top, var(--vscode-editor-background) 70%, transparent);
       border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+    }
+    /* Per-op progress bar — sits between the placeholder footer line and the
+       action buttons. Hidden until the executor fires its first event; from
+       there the bar fills as files complete and the meta line shows
+       destination + current relPath. */
+    .sync-progress {
+      flex: 1 1 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-right: auto;
+    }
+    .sync-progress[hidden] { display: none; }
+    .sync-progress-bar {
+      width: 100%;
+      height: 6px;
+      background: var(--vscode-progressBar-background, color-mix(in srgb, var(--vscode-foreground) 12%, transparent));
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .sync-progress-fill {
+      height: 100%;
+      background: var(--vscode-progressBar-background, var(--vscode-button-background, #0e639c));
+      background: var(--vscode-button-background, #0e639c);
+      transition: width 140ms ease-out;
+    }
+    .sync-progress-fill-error {
+      background: var(--vscode-errorForeground, #f14c4c);
+    }
+    .sync-progress-meta {
+      display: flex;
+      gap: 12px;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .sync-progress-path {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .btn {
       font-family: inherit;

@@ -16,7 +16,13 @@ import * as vscode from 'vscode';
 import type { PlanForDestination } from './planner';
 import type { PlanItem } from './plan';
 import { readManifest, writeManifest } from './manifest';
-import { executePlan, type ExecuteResult, type OperationResult } from './executor';
+import {
+  countExecutableItems,
+  executePlan,
+  type ExecuteProgressEvent,
+  type ExecuteResult,
+  type OperationResult,
+} from './executor';
 import type { RowDecision } from './decisions';
 import { manifestKey } from './manifest-types';
 import { sha256Hex } from './hash';
@@ -56,6 +62,35 @@ export interface PlanSummary {
 }
 
 /**
+ * Aggregated per-operation progress event emitted by {@link runSync}. The
+ * `done` counter increments across every plan in the run; `total` is fixed
+ * at the start (pre-computed from the dispatch predicate, so it matches
+ * what the executor will actually run). Skipped items (placeholders,
+ * blocked-warning rows, unarmed orange-path rows) are not counted.
+ */
+export interface SyncProgressEvent extends ExecuteProgressEvent {
+  /** 1-indexed count of items completed so far (this op included). */
+  done: number;
+  /** Total executable items across every plan in this run. */
+  total: number;
+  /** Workspace-relative label of the destination this op landed in. */
+  destLabel: string;
+  /** Workspace-relative label of the source this op came from. */
+  sourceLabel: string;
+}
+
+export interface RunSyncOptions {
+  decisions?: ReadonlyMap<string, RowDecision>;
+  /**
+   * Fires after each dispatched item completes. Used by the webviews to
+   * drive a progress bar. The event carries running `done` + fixed `total`
+   * so callers can render `${done}/${total}` or a percentage directly.
+   * Leave undefined for non-UI callers (tests, palette dry-runs).
+   */
+  onProgress?: (event: SyncProgressEvent) => void;
+}
+
+/**
  * Execute the green-path subset (create / update-tracked / delete-tracked),
  * plus any orange-path rows (update-collision / destination-only) the user
  * armed via the plan webview's per-row checkboxes.
@@ -74,8 +109,21 @@ export interface PlanSummary {
  */
 export async function runSync(
   plans: readonly PlanForDestination[],
-  decisions?: ReadonlyMap<string, RowDecision>,
+  decisionsOrOptions?: ReadonlyMap<string, RowDecision> | RunSyncOptions,
 ): Promise<RunSummary> {
+  // Back-compat: callers used to pass `(plans, decisions)`. The new
+  // options-object form carries `onProgress` for the progress-bar wiring.
+  // Detect by shape — a Map has `.get`; an options object doesn't.
+  const isMap =
+    decisionsOrOptions !== undefined &&
+    typeof (decisionsOrOptions as ReadonlyMap<string, RowDecision>).get === 'function';
+  const decisions: ReadonlyMap<string, RowDecision> | undefined = isMap
+    ? (decisionsOrOptions as ReadonlyMap<string, RowDecision>)
+    : (decisionsOrOptions as RunSyncOptions | undefined)?.decisions;
+  const onProgress: ((event: SyncProgressEvent) => void) | undefined = isMap
+    ? undefined
+    : (decisionsOrOptions as RunSyncOptions | undefined)?.onProgress;
+
   const fs = vscodeFs();
   // Cache is set at activation. Treated as optional so tests / partial setups
   // still work; production always has one (in-memory at minimum).
@@ -132,6 +180,40 @@ export async function runSync(
     }
   }
 
+  // Pre-compute the total number of items the executor will actually
+  // dispatch across every plan in this run. Uses the same predicate the
+  // executor will use, so the progress bar's denominator matches the
+  // numerator's eventual ceiling exactly — no surprise jumps when the
+  // executor decides to skip something the UI was counting on. Skipped
+  // plans (unresolved destinations, version-mismatch groups) contribute 0.
+  let progressTotal = 0;
+  if (onProgress) {
+    for (const group of groups) {
+      for (const plan of group.plans) {
+        if (plan.skippedReason || !plan.destination.destRootUri) continue;
+        const pairIndex = pairIndices.get(plan) ?? 0;
+        const armed = pickArmedDecisions(decisions, pairIndex);
+        progressTotal += countExecutableItems(plan.items, {
+          decidedOverwrites: armed.decidedOverwrites,
+          decidedDeletes: armed.decidedDeletes,
+          decidedWarningOverrides: armed.decidedWarningOverrides,
+        });
+      }
+    }
+    // Fire one zero-progress event up front so the webview can render the
+    // initial "0 / N" state before the first file finishes.
+    onProgress({
+      done: 0,
+      total: progressTotal,
+      kind: 'create',
+      relPath: '',
+      status: 'ok',
+      destLabel: '',
+      sourceLabel: '',
+    });
+  }
+  let progressDone = 0;
+
   for (const group of groups) {
     const manifestResult = await readManifest(group.destWorkspaceFolderUri);
     if (manifestResult.kind === 'version-mismatch') {
@@ -164,6 +246,8 @@ export async function runSync(
 
       const pairIndex = pairIndices.get(plan) ?? 0;
       const armed = pickArmedDecisions(decisions, pairIndex);
+      const planSourceLabel = relPath(plan.source.sourceFolderUri);
+      const planDestLabel = pairDestLabel(plan);
 
       const result = await executePlan({
         sourceWorkspaceFolderName: plan.source.workspaceFolderName,
@@ -178,6 +262,18 @@ export async function runSync(
         decidedOverwrites: armed.decidedOverwrites,
         decidedDeletes: armed.decidedDeletes,
         decidedWarningOverrides: armed.decidedWarningOverrides,
+        onProgress: onProgress
+          ? (e) => {
+              progressDone++;
+              onProgress({
+                ...e,
+                done: progressDone,
+                total: progressTotal,
+                destLabel: planDestLabel,
+                sourceLabel: planSourceLabel,
+              });
+            }
+          : undefined,
       });
 
       for (const r of result.results) {
