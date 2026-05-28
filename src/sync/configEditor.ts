@@ -258,6 +258,23 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
           if (!applied) {
             suppressNextDocChange = false;
             log('sync-config-editor: applyEdit rejected');
+          } else {
+            // Persist to disk immediately — the form is a settings-style UI
+            // and the user expects edits to be saved without an explicit
+            // Ctrl-S. In vscode.dev the dirty in-memory buffer can be
+            // discarded when the custom-editor panel is hidden + replaced
+            // (especially for workspace-root .roomSync files), which
+            // manifests as "edits revert on tab navigation" — see
+            // snapshotStore.ts:writeSnapshot for the same applyEdit+save
+            // pattern. Save errors are logged but don't unwind the edit:
+            // the in-memory state is still correct, only persistence
+            // failed (read-only file, FSA permission revoked, etc.).
+            try {
+              await document.save();
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              log(`sync-config-editor: save after applyEdit failed — ${message}`);
+            }
           }
         } else if (msg.type === 'openWorkspacePlan') {
           // Open the workspace-wide plan in a separate panel — the embedded
