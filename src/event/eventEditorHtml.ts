@@ -276,7 +276,7 @@ function renderCell(
   return `<td class="cell cell-filled" data-day="${escapeAttr(day)}" data-ts="${escapeAttr(timeslot)}" data-room="${escapeAttr(room.id)}" data-session-id="${escapeAttr(sess.id)}">
     <button type="button" class="cell-swap-up" data-swap-up="${escapeAttr(sess.id)}" title="Swap with the session above in ${escapeAttr(room.name)}" aria-label="Swap up">▲</button>
     <button type="button" class="cell-swap-down" data-swap-down="${escapeAttr(sess.id)}" title="Swap with the session below in ${escapeAttr(room.name)}" aria-label="Swap down">▼</button>
-    <details class="session-edit">
+    <details class="session-edit" name="event-session-edit-group">
       <summary>
         <span class="${titleClass}">${escapeHtml(titleText)}</span>
         <ul class="speaker-pills">${speakerList}</ul>
