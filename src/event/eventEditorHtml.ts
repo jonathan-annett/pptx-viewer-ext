@@ -678,10 +678,16 @@ function clientScript(): string {
     // the user presses Enter / clicks Add to commit.
     root.addEventListener('paste', function(e){
       const t = e.target;
-      if (!t || !t.id) return;
+      if (!t) return;
+      // Identify which paste target this is. Add inputs key on id; the
+      // speaker-picker filter input lives inside the session edit panel
+      // and identifies its session via data-picker-filter-for. Anything
+      // else falls through to default browser paste.
       const isSpeakerInput = t.id === 'add-speaker-name';
       const isRoomInput = t.id === 'add-room-name';
-      if (!isSpeakerInput && !isRoomInput) return;
+      const pickerSessionId = (t.dataset && t.dataset.pickerFilterFor) || '';
+      if (!isSpeakerInput && !isRoomInput && !pickerSessionId) return;
+
       const clipboard = e.clipboardData;
       if (!clipboard) return;
       const text = clipboard.getData('text/plain');
@@ -702,12 +708,26 @@ function clientScript(): string {
       if (lines.length === 0) return;
       if (isSpeakerInput) {
         post({ type: 'addSpeakers', names: lines });
-      } else {
+        t.value = '';
+        return;
+      }
+      if (isRoomInput) {
         const kindEl = document.getElementById('add-room-kind');
         const kind = (kindEl && (kindEl.value === 'plenary' || kindEl.value === 'breakout')) ? kindEl.value : 'breakout';
         post({ type: 'addRooms', names: lines, kind: kind });
+        t.value = '';
+        return;
       }
+      // Speaker-picker filter input: a multi-line paste means "replace
+      // this session's speakers with these names". Unknown names get
+      // auto-added to the pool; same-timeslot conflicts get resolved on
+      // the wired side and surfaced via a modal listing each move.
+      post({ type: 'replaceSessionSpeakersByNames', sessionId: pickerSessionId, names: lines });
       t.value = '';
+      // Close the picker — the operator just finished an explicit action
+      // and we don't want the filter list lingering with stale state.
+      const picker = root.querySelector('.speaker-picker[data-speaker-picker-for="' + cssEscape(pickerSessionId) + '"]');
+      if (picker) picker.hidden = true;
     });
 
     // Button clicks — single delegated listener

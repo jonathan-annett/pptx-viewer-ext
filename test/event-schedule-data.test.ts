@@ -29,6 +29,7 @@ import {
   renameSpeaker,
   renameTimeslot,
   reorderTimeslots,
+  replaceSessionSpeakersByNames,
   setDays,
   setDefaultTimeslots,
   setEventName,
@@ -696,6 +697,108 @@ test('defaultTimeslots round-trips through marshal/parse; absent when empty', ()
   const cleared = setDefaultTimeslots(s, []);
   const text2 = marshalSchedule(cleared);
   assert.ok(!/"defaultTimeslots"/.test(text2));
+});
+
+// ───── replaceSessionSpeakersByNames ─────────────────────────────────
+
+test('replaceSessionSpeakersByNames matches existing speakers case-insensitively', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice Smith', 'Bob Jones', 'Carol Lee']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  // Paste with mixed case + extra whitespace — all should resolve to
+  // existing ids.
+  const result = replaceSessionSpeakersByNames(s, 'MON-B-breakout-1', [
+    'alice smith',
+    '  CAROL LEE  ',
+  ]);
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(result.addedSpeakers.length, 0, 'no new speakers added');
+  const ids = result.schedule.sessions[0].speakers.map((sp) => sp.speakerId);
+  assert.deepEqual(ids, ['spk-01', 'spk-03'], 'matched by name, paste order preserved');
+});
+
+test('replaceSessionSpeakersByNames auto-adds unknown names to the pool', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  const result = replaceSessionSpeakersByNames(s, 'MON-B-breakout-1', [
+    'Alice',
+    'New Person',
+    'Another One',
+  ]);
+  assert.equal(result.addedSpeakers.length, 2, 'two unknown names became new speakers');
+  assert.deepEqual(
+    result.addedSpeakers.map((sp) => sp.name),
+    ['New Person', 'Another One'],
+  );
+  // Pool grew to 3, session got all 3 in paste order.
+  assert.equal(result.schedule.speakers.length, 3);
+  assert.deepEqual(
+    result.schedule.sessions[0].speakers.map((sp) => sp.speakerName),
+    ['Alice', 'New Person', 'Another One'],
+  );
+});
+
+test('replaceSessionSpeakersByNames dedupes within the paste', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  const result = replaceSessionSpeakersByNames(s, 'MON-B-breakout-1', [
+    'Alice',
+    'Bob',
+    'alice', // case-fold dupe of first
+    'Bob',   // exact dupe
+  ]);
+  assert.equal(result.schedule.sessions[0].speakers.length, 2, 'dedupe across paste');
+  assert.equal(result.addedSpeakers.length, 1, 'only Bob is new');
+});
+
+test('replaceSessionSpeakersByNames moves speakers from sibling sessions at same (day, timeslot)', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice', 'Bob']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addRoom(s, { name: 'Breakout 2' });
+  // Two concurrent sessions at MON/B; Alice currently in breakout-1.
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-2', kind: 'breakout', speakerIds: ['spk-02'] });
+  // Paste Alice into breakout-2 — Alice should be displaced from breakout-1.
+  const result = replaceSessionSpeakersByNames(s, 'MON-B-breakout-2', ['Alice']);
+  assert.equal(result.conflicts.length, 1);
+  assert.equal(result.conflicts[0].speakerName, 'Alice');
+  assert.equal(result.conflicts[0].fromRoomName, 'Breakout 1');
+  assert.equal(result.conflicts[0].day, 'MON');
+  assert.equal(result.conflicts[0].timeslot, 'B');
+  // After: breakout-1 has nobody, breakout-2 has only Alice.
+  const sessions = new Map(result.schedule.sessions.map((s2) => [s2.roomId, s2]));
+  assert.equal(sessions.get('breakout-1')!.speakers.length, 0);
+  assert.equal(sessions.get('breakout-2')!.speakers[0].speakerName, 'Alice');
+});
+
+test('replaceSessionSpeakersByNames leaves OTHER timeslots alone', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  // Alice is in MON/B/breakout-1; we're pasting Alice into MON/C/breakout-1.
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  s = addSession(s, { day: 'MON', timeslot: 'C', roomId: 'breakout-1', kind: 'breakout' });
+  const result = replaceSessionSpeakersByNames(s, 'MON-C-breakout-1', ['Alice']);
+  assert.equal(result.conflicts.length, 0, 'different timeslot is not a conflict');
+  const sessions = new Map(result.schedule.sessions.map((s2) => [`${s2.day}-${s2.timeslot}`, s2]));
+  assert.equal(sessions.get('MON-B')!.speakers.length, 1, 'B-Alice unchanged');
+  assert.equal(sessions.get('MON-C')!.speakers[0].speakerName, 'Alice');
+});
+
+test('replaceSessionSpeakersByNames is a no-op when sessionId is unknown', () => {
+  let s = emptySchedule();
+  s = addSpeakers(s, ['Alice']);
+  const before = s;
+  const result = replaceSessionSpeakersByNames(s, 'NOPE', ['Alice', 'Bob']);
+  assert.equal(result.schedule, before, 'schedule reference unchanged');
+  assert.deepEqual(result.conflicts, []);
+  assert.deepEqual(result.addedSpeakers, []);
 });
 
 test('isStructurallyEmpty: empty + cleared schedules count; populated does not', () => {

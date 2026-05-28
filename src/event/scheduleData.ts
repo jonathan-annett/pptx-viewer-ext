@@ -342,6 +342,149 @@ export function setSessionSpeakers(
   return { ...schedule, sessions };
 }
 
+// ───── Bulk replace via name paste ──────────────────────────────────────
+
+/**
+ * A single side-effect of `replaceSessionSpeakersByNames`: a speaker who
+ * used to be in another session at the same (day, timeslot) and had to
+ * move because the paste claimed them. The wired layer surfaces these in
+ * a modal so the operator sees what just happened.
+ */
+export interface ReplaceByNamesConflict {
+  speakerId: string;
+  speakerName: string;
+  fromRoomId: string;
+  fromRoomName: string;
+  day: string;
+  timeslot: string;
+}
+
+export interface ReplaceSessionSpeakersByNamesResult {
+  schedule: EventSchedule;
+  conflicts: ReplaceByNamesConflict[];
+  /** Speakers created by this paste (names that didn't match the pool). */
+  addedSpeakers: EventSpeaker[];
+}
+
+/**
+ * Replace a session's speakers with a list of names. Names are matched
+ * case-insensitively against the existing pool; unknown names are
+ * appended to the pool as new speakers (so the operator can build a
+ * schedule from a roster paste without first populating the speaker
+ * list). Duplicates within the paste are coalesced to one assignment.
+ *
+ * Same-timeslot conflicts: if any resolved speaker is currently in
+ * another session sharing (this.day, this.timeslot), they're removed
+ * from that other session — the paste wins. The displaced
+ * (speaker × old session × old room) tuples are returned so the
+ * wired layer can show a "John Smith was removed from Breakout 1 at
+ * MON A" modal.
+ *
+ * Returns the original schedule + empty conflicts when the sessionId
+ * doesn't match (defensive against stale messages).
+ */
+export function replaceSessionSpeakersByNames(
+  schedule: EventSchedule,
+  sessionId: string,
+  names: readonly string[],
+): ReplaceSessionSpeakersByNamesResult {
+  const session = schedule.sessions.find((s) => s.id === sessionId);
+  if (!session) {
+    return { schedule, conflicts: [], addedSpeakers: [] };
+  }
+
+  const cleanedNames = names.map((n) => n.trim()).filter((n) => n.length > 0);
+  if (cleanedNames.length === 0) {
+    return { schedule, conflicts: [], addedSpeakers: [] };
+  }
+
+  // Case-insensitive lookup against the current pool. Lower-case key.
+  const speakerByLowerName = new Map<string, EventSpeaker>();
+  for (const sp of schedule.speakers) {
+    speakerByLowerName.set(sp.name.trim().toLowerCase(), sp);
+  }
+
+  // Resolve each pasted name to a speaker id, threading through addSpeaker
+  // so newly-added ones get sequential ids consistent with the rest of the
+  // pool. Dedup within the paste — first occurrence wins.
+  let work = schedule;
+  const addedSpeakers: EventSpeaker[] = [];
+  const resolvedIds: string[] = [];
+  const seenIds = new Set<string>();
+
+  for (const name of cleanedNames) {
+    const key = name.toLowerCase();
+    let speaker = speakerByLowerName.get(key);
+    if (!speaker) {
+      // Unknown name → add to pool. addSpeaker handles the sequential
+      // spk-NN id and the trim. Pick the newest entry off the result.
+      const before = work.speakers.length;
+      work = addSpeaker(work, name);
+      if (work.speakers.length > before) {
+        speaker = work.speakers[work.speakers.length - 1];
+        speakerByLowerName.set(key, speaker);
+        addedSpeakers.push(speaker);
+      }
+    }
+    if (speaker && !seenIds.has(speaker.id)) {
+      resolvedIds.push(speaker.id);
+      seenIds.add(speaker.id);
+    }
+  }
+
+  // Build conflicts + new sessions in one pass. A "conflict" is a speaker
+  // assignment in another session at the same (day, timeslot) that we're
+  // about to break to satisfy the paste.
+  const roomById = new Map(work.rooms.map((r) => [r.id, r]));
+  const speakerById = new Map(work.speakers.map((s) => [s.id, s]));
+  const conflicts: ReplaceByNamesConflict[] = [];
+
+  const nextSessions = work.sessions.map((s) => {
+    if (s.id === sessionId) {
+      // Target session — replace speakers with the resolved list in
+      // paste order. Slot numbers re-number from 1.
+      return {
+        ...s,
+        speakers: resolvedIds.map((id, i) => ({
+          slot: i + 1,
+          speakerId: id,
+          speakerName: speakerById.get(id)?.name ?? id,
+        })),
+      };
+    }
+    if (s.day !== session.day || s.timeslot !== session.timeslot) {
+      return s;
+    }
+    // Sibling session at the same (day, timeslot): drop any conflicting
+    // ids, record the displacement.
+    let displaced = false;
+    const filtered = s.speakers.filter((slot) => {
+      if (!seenIds.has(slot.speakerId)) return true;
+      displaced = true;
+      const room = roomById.get(s.roomId);
+      conflicts.push({
+        speakerId: slot.speakerId,
+        speakerName: slot.speakerName,
+        fromRoomId: s.roomId,
+        fromRoomName: room?.name ?? s.roomId,
+        day: s.day,
+        timeslot: s.timeslot,
+      });
+      return false;
+    });
+    if (!displaced) return s;
+    // Slot numbers: keep their original slot indices intact — gaps are
+    // fine, matching the existing removeSpeaker convention.
+    return { ...s, speakers: filtered };
+  });
+
+  return {
+    schedule: { ...work, sessions: nextSessions },
+    conflicts,
+    addedSpeakers,
+  };
+}
+
 /**
  * Speaker IDs that may be added to the session at `(day, timeslot)` without
  * double-booking. A speaker is *eligible* iff they're not already assigned

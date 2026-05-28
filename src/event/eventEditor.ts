@@ -41,6 +41,7 @@ import {
   renameSpeaker,
   renameTimeslot,
   reorderTimeslots,
+  replaceSessionSpeakersByNames,
   setDays,
   setDefaultTimeslots,
   setEventName,
@@ -209,6 +210,43 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'setSessionSpeakers':
             await mutate((s) => setSessionSpeakers(s, msg.sessionId, msg.speakerIds));
             break;
+          case 'replaceSessionSpeakersByNames': {
+            // Bulk replace via paste. The mutator returns conflicts +
+            // newly-added speakers; we write the schedule first (so the
+            // editor reflects the new state) then surface the modal
+            // listing displaced speakers, so the operator sees what just
+            // happened.
+            const parsed = parseSchedule(document.getText());
+            const result = replaceSessionSpeakersByNames(
+              parsed.schedule,
+              msg.sessionId,
+              msg.names,
+            );
+            await writeSchedule(result.schedule);
+            if (result.addedSpeakers.length > 0) {
+              log(
+                `event-editor: replaceSpeakersByNames auto-added ${result.addedSpeakers.length} ` +
+                  `speaker(s): ${result.addedSpeakers.map((sp) => sp.name).join(', ')}`,
+              );
+            }
+            if (result.conflicts.length > 0) {
+              const detail = result.conflicts
+                .map(
+                  (c) =>
+                    `• ${c.speakerName} was removed from ${c.fromRoomName} at ${c.day} ${c.timeslot}`,
+                )
+                .join('\n');
+              const summary =
+                result.conflicts.length === 1
+                  ? '1 speaker was moved from another session at this timeslot'
+                  : `${result.conflicts.length} speakers were moved from other sessions at this timeslot`;
+              void vscode.window.showInformationMessage(
+                summary,
+                { modal: true, detail },
+              );
+            }
+            break;
+          }
           case 'setSessionKind':
             await mutate((s) => setSessionKind(s, msg.sessionId, msg.kind));
             break;
@@ -572,6 +610,7 @@ type WebviewMessage =
     }
   | { type: 'removeSession'; sessionId: string }
   | { type: 'setSessionSpeakers'; sessionId: string; speakerIds: string[] }
+  | { type: 'replaceSessionSpeakersByNames'; sessionId: string; names: string[] }
   | { type: 'setSessionKind'; sessionId: string; kind: SessionKind }
   | { type: 'setSessionTitle'; sessionId: string; title: string }
   | { type: 'clearAll' }
