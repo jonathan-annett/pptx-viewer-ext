@@ -292,7 +292,8 @@ async function undoRestore(
 }
 
 /**
- * Seed the workspace's read-only lock settings if they aren't already set.
+ * Seed the workspace's read-only lock settings if they aren't already set,
+ * and self-heal the exclude entry for the current writable folder.
  *
  * Convention: workspaceFolders[0] is the writable source/operator folder; all
  * other open folders are destinations (sync writes to them, the user does not
@@ -300,11 +301,16 @@ async function undoRestore(
  * that intent — `**` is read-only by default, with the source folder's path
  * excluded.
  *
- * Seed-if-missing only — once a workspace-scope value is present we leave it
- * alone, so a user who customises the lock keeps their customisation across
- * activations. The snapshot system captures these keys as part of
- * KNOWN_WORKSPACE_KEYS, so restored workspaces already arrive with the user's
- * chosen values and this function then becomes a no-op.
+ * `files.readonlyInclude` is seed-if-missing only — `**` is a coarse default
+ * and we don't want to wrestle with user customisation.
+ *
+ * `files.readonlyExclude` gets a stricter contract: if the entry for the
+ * current `workspaceFolders[0].name` is missing, we add it (preserving every
+ * other entry verbatim). This covers the workspace-folder-rename and
+ * folder-inserted-at-index-0 cases where the seed already ran with an older
+ * name; without the self-heal step the renamed folder stays read-only until
+ * the user hand-edits the snapshot. Stale entries for the previous name(s)
+ * remain — they're harmless globs that don't match anything.
  *
  * The pattern uses the workspace folder's display `name` because that's what
  * VS Code's `files.readonly*` glob matches against (matching the user's
@@ -325,15 +331,36 @@ export async function ensureWorkspaceLockSettings(): Promise<void> {
     log('snapshot: seeded files.readonlyInclude = { "**": true }');
   }
 
+  const writableKey = `/${folders[0].name}/**`;
   const excludeInspect = config.inspect('files.readonlyExclude');
-  if (excludeInspect?.workspaceValue === undefined) {
-    const writableFolder = folders[0].name;
+  const currentExclude = excludeInspect?.workspaceValue;
+  if (currentExclude === undefined) {
     await config.update(
       'files.readonlyExclude',
-      { [`/${writableFolder}/**`]: true },
+      { [writableKey]: true },
       vscode.ConfigurationTarget.Workspace,
     );
-    log(`snapshot: seeded files.readonlyExclude — writable: /${writableFolder}/**`);
+    log(`snapshot: seeded files.readonlyExclude — writable: ${writableKey}`);
+  } else if (
+    typeof currentExclude === 'object' &&
+    currentExclude !== null &&
+    !Array.isArray(currentExclude) &&
+    !(writableKey in (currentExclude as Record<string, unknown>))
+  ) {
+    // Self-heal: the exclude map is set but lacks the current writable
+    // folder's entry — typically because the folder was renamed or a new
+    // one was inserted at index 0 since the seed ran. Add the missing key,
+    // preserve everything else.
+    const next = {
+      ...(currentExclude as Record<string, unknown>),
+      [writableKey]: true,
+    };
+    await config.update(
+      'files.readonlyExclude',
+      next,
+      vscode.ConfigurationTarget.Workspace,
+    );
+    log(`snapshot: added writable rule to files.readonlyExclude: ${writableKey}`);
   }
 }
 
