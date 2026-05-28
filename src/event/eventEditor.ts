@@ -23,19 +23,27 @@ import {
   addRoom,
   addSession,
   addSpeaker,
+  addTimeslot,
+  clearAll,
   emptySchedule,
+  isValidTimeslotLabel,
   marshalSchedule,
   parseSchedule,
   regenerateFromConfig,
   removeRoom,
   removeSession,
   removeSpeaker,
+  removeTimeslot,
   renameRoom,
   renameSpeaker,
+  renameTimeslot,
+  reorderTimeslots,
   setDays,
   setEventName,
   setSessionKind,
   setSessionSpeakers,
+  setSessionTitle,
+  swapSessionsInRoom,
 } from './scheduleData';
 import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind } from './schedule';
@@ -190,6 +198,78 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'setSessionKind':
             await mutate((s) => setSessionKind(s, msg.sessionId, msg.kind));
             break;
+          case 'setSessionTitle':
+            await mutate((s) => setSessionTitle(s, msg.sessionId, msg.title));
+            break;
+          case 'clearAll': {
+            // Modal confirm matches the folderSync.clearSnapshot pattern.
+            // Refusing here keeps a stale-tab "Clear" out of the data path.
+            const confirmed = await vscode.window.showWarningMessage(
+              'Clear this event schedule?',
+              {
+                modal: true,
+                detail:
+                  'All speakers, rooms, sessions, and vacancies will be removed. ' +
+                  'The event name, days, and per-day timeslot labels will be preserved. ' +
+                  'This cannot be undone.',
+              },
+              'Clear',
+            );
+            if (confirmed === 'Clear') {
+              await mutate((s) => clearAll(s));
+            } else {
+              log('event-editor: clearAll declined by user');
+            }
+            break;
+          }
+          case 'addTimeslot':
+            await mutate((s) => addTimeslot(s, msg.day, msg.label));
+            break;
+          case 'removeTimeslot': {
+            // Count sessions about to be cascaded so the modal prompt names
+            // a real consequence. Computed against the on-disk schedule;
+            // mutate() re-parses inside the handler, but we need the count
+            // before showing the modal.
+            const parsed = parseSchedule(document.getText());
+            const affected = parsed.schedule.sessions.filter(
+              (s) => s.day === msg.day && s.timeslot === msg.label,
+            ).length;
+            const detail =
+              affected > 0
+                ? `Drops ${affected} session${affected === 1 ? '' : 's'} at ${msg.day} ${msg.label}. This cannot be undone.`
+                : `No sessions are scheduled at ${msg.day} ${msg.label}.`;
+            const confirmed = await vscode.window.showWarningMessage(
+              `Remove timeslot ${msg.label} from ${msg.day}?`,
+              { modal: true, detail },
+              'Remove',
+            );
+            if (confirmed === 'Remove') {
+              await mutate((s) => removeTimeslot(s, msg.day, msg.label));
+            } else {
+              log(`event-editor: removeTimeslot declined for ${msg.day}/${msg.label}`);
+            }
+            break;
+          }
+          case 'renameTimeslot':
+            // The mutator already enforces validity, but a guard here lets
+            // us log *why* a stale-tab message was refused.
+            if (!isValidTimeslotLabel(msg.newLabel)) {
+              log(
+                `event-editor: renameTimeslot refused — invalid label ` +
+                  `${JSON.stringify(msg.newLabel)}`,
+              );
+              break;
+            }
+            await mutate((s) => renameTimeslot(s, msg.day, msg.oldLabel, msg.newLabel));
+            break;
+          case 'reorderTimeslots':
+            await mutate((s) => reorderTimeslots(s, msg.day, msg.newOrder));
+            break;
+          case 'swapSessionsInRoom':
+            await mutate((s) =>
+              swapSessionsInRoom(s, msg.day, msg.roomId, msg.labelA, msg.labelB),
+            );
+            break;
           case 'regenerate':
             await this.handleRegenerate(document, msg.config, writeSchedule);
             break;
@@ -304,6 +384,19 @@ type WebviewMessage =
   | { type: 'removeSession'; sessionId: string }
   | { type: 'setSessionSpeakers'; sessionId: string; speakerIds: string[] }
   | { type: 'setSessionKind'; sessionId: string; kind: SessionKind }
+  | { type: 'setSessionTitle'; sessionId: string; title: string }
+  | { type: 'clearAll' }
+  | { type: 'addTimeslot'; day: string; label?: string }
+  | { type: 'removeTimeslot'; day: string; label: string }
+  | { type: 'renameTimeslot'; day: string; oldLabel: string; newLabel: string }
+  | { type: 'reorderTimeslots'; day: string; newOrder: string[] }
+  | {
+      type: 'swapSessionsInRoom';
+      day: string;
+      roomId: string;
+      labelA: string;
+      labelB: string;
+    }
   | { type: 'regenerate'; config: Partial<EventConfig> }
   | { type: 'openAsText' };
 

@@ -25,10 +25,12 @@ import type {
   EventSession,
   EventSpeaker,
   EventVacancy,
-  SessionKind,
 } from './schedule';
-import { allTimeslotLetters } from './schedule';
-import { eligibleSpeakersForSession } from './scheduleData';
+import {
+  displayTitleForSession,
+  eligibleSpeakersForSession,
+  timeslotsForDayResolved,
+} from './scheduleData';
 
 export function renderEventEditorHtml(
   vm: EventEditorViewModel,
@@ -150,7 +152,9 @@ function renderSessionsGrid(s: EventSchedule): string {
       <p class="hint">Add at least one room and one day to start scheduling sessions.</p>
     </section>`;
   }
-  const timeslots = s.timeslots.length > 0 ? s.timeslots : allTimeslotLetters(s.config);
+  // M1: each day reads its own ordered slot list via timeslotsForDayResolved.
+  // The grid renderer iterates per-day rather than over a single union — see
+  // M4 for the row-level UX (rename / reorder / add / delete affordances).
   // index sessions by (day, timeslot, roomId) → session
   const sessionAt = new Map<string, EventSession>();
   for (const sess of s.sessions) {
@@ -158,7 +162,7 @@ function renderSessionsGrid(s: EventSchedule): string {
   }
   const speakerById = new Map(s.speakers.map((sp) => [sp.id, sp]));
   const dayBlocks = s.config.days
-    .map((day) => renderDayBlock(s, day, timeslots, sessionAt, speakerById))
+    .map((day) => renderDayBlock(s, day, timeslotsForDayResolved(s, day), sessionAt, speakerById))
     .join('\n');
   return `<section class="evt-section">
     <h2>Sessions <span class="evt-count">${s.sessions.length}</span></h2>
@@ -177,24 +181,53 @@ function renderDayBlock(
   const headerCells = s.rooms
     .map((r) => `<th><span class="room-name">${escapeHtml(r.name)}</span> <span class="room-id">${escapeHtml(r.id)}</span></th>`)
     .join('');
+  // `data-row-first` / `data-row-last` are read by CSS to hide the up/down
+  // affordances at the edges of the day's row stack (a CSS-only edge guard
+  // is cleaner than asking the client script to inspect siblings before
+  // posting a swap).
   const rows = timeslots
-    .map((timeslot) => {
+    .map((timeslot, idx) => {
+      const isFirst = idx === 0;
+      const isLast = idx === timeslots.length - 1;
       const cells = s.rooms
         .map((room) => {
           const sess = sessionAt.get(`${day}::${timeslot}::${room.id}`);
           return renderCell(s, sess, day, timeslot, room, speakerById);
         })
         .join('');
-      return `<tr><th class="ts">${escapeHtml(timeslot)}</th>${cells}</tr>`;
+      const flags = `${isFirst ? ' data-row-first' : ''}${isLast ? ' data-row-last' : ''}`;
+      return `<tr class="ts-row" data-day="${escapeAttr(day)}" data-ts-label="${escapeAttr(timeslot)}"${flags}>${renderTimeslotHeader(day, timeslot)}${cells}</tr>`;
     })
     .join('');
+  // Spanning column count for the add-row: timeslot header + one column per
+  // room. The colspan keeps the cell at full-width regardless of room count.
+  const addRowSpan = s.rooms.length + 1;
+  const addRow = `<tr class="ts-add-row"><td colspan="${addRowSpan}">
+    <button type="button" class="btn-add-ts" data-add-ts="${escapeAttr(day)}" title="Append a new timeslot to ${escapeAttr(day)}">+ Add timeslot to ${escapeHtml(day)}</button>
+  </td></tr>`;
   return `<div class="day-block">
     <h3>${escapeHtml(day)}</h3>
     <table class="sessions-grid">
       <thead><tr><th class="ts">Time</th>${headerCells}</tr></thead>
-      <tbody>${rows}</tbody>
+      <tbody>${rows}${addRow}</tbody>
     </table>
   </div>`;
+}
+
+// Row-header cell for a timeslot. Surface includes:
+//   - inline rename input (looks borderless until focused — see CSS)
+//   - ▲ / ▼ to reorder the day's rows (hidden at edges via data-row-first /
+//     data-row-last on the <tr>; revealed on row-hover via CSS)
+//   - ✕ to remove the timeslot (hover-revealed)
+function renderTimeslotHeader(day: string, label: string): string {
+  return `<th class="ts">
+    <div class="ts-cell">
+      <button type="button" class="ts-up" data-reorder-ts-up="${escapeAttr(day)}::${escapeAttr(label)}" title="Move ${escapeAttr(label)} up" aria-label="Move ${escapeAttr(label)} up">▲</button>
+      <input type="text" class="ts-label" data-rename-ts-day="${escapeAttr(day)}" data-rename-ts-old="${escapeAttr(label)}" value="${escapeAttr(label)}" spellcheck="false" autocomplete="off" aria-label="Rename timeslot ${escapeAttr(label)}">
+      <button type="button" class="ts-down" data-reorder-ts-down="${escapeAttr(day)}::${escapeAttr(label)}" title="Move ${escapeAttr(label)} down" aria-label="Move ${escapeAttr(label)} down">▼</button>
+      <button type="button" class="ts-remove" data-remove-ts="${escapeAttr(day)}::${escapeAttr(label)}" title="Remove timeslot ${escapeAttr(label)} from ${escapeAttr(day)}" aria-label="Remove timeslot">✕</button>
+    </div>
+  </th>`;
 }
 
 function renderCell(
@@ -219,14 +252,22 @@ function renderCell(
           return `<li>${escapeHtml(name)} <span class="muted">(${escapeHtml(sl.speakerId)})</span></li>`;
         })
         .join('');
-  const relocBadge = sess.kind === 'breakout-relocated' && sess.relocatedFromRoomId
-    ? `<span class="badge badge-relocated" title="Relocated from ${escapeAttr(sess.relocatedFromRoomId)}">↳ from ${escapeHtml(sess.relocatedFromRoomId)}</span>`
-    : '';
+  // Title line: real authored title renders in normal weight; the
+  // `kind`-fallback renders muted-italic so the user can tell at a glance
+  // whether a session has been titled or is showing its placeholder.
+  const titleText = displayTitleForSession(sess);
+  const titleIsFallback = !sess.title?.trim();
+  const titleClass = titleIsFallback ? 'session-title session-title-default' : 'session-title session-title-set';
+  // Hover-revealed swap arrows: ▲ swaps this session with the prev
+  // timeslot in this same room, ▼ with the next. CSS hides the arrows
+  // entirely on rows tagged `data-row-first` / `data-row-last` (see
+  // renderDayBlock), so we don't need to gate them here.
   return `<td class="cell cell-filled" data-day="${escapeAttr(day)}" data-ts="${escapeAttr(timeslot)}" data-room="${escapeAttr(room.id)}" data-session-id="${escapeAttr(sess.id)}">
+    <button type="button" class="cell-swap-up" data-swap-up="${escapeAttr(sess.id)}" title="Swap with the session above in ${escapeAttr(room.name)}" aria-label="Swap up">▲</button>
+    <button type="button" class="cell-swap-down" data-swap-down="${escapeAttr(sess.id)}" title="Swap with the session below in ${escapeAttr(room.name)}" aria-label="Swap down">▼</button>
     <details class="session-edit">
       <summary>
-        <span class="kind-pill kind-${escapeAttr(sess.kind)}">${escapeHtml(sess.kind)}</span>
-        ${relocBadge}
+        <span class="${titleClass}">${escapeHtml(titleText)}</span>
         <ul class="speaker-pills">${speakerList}</ul>
       </summary>
       <div class="session-edit-body">
@@ -241,13 +282,6 @@ function renderSessionEditForm(
   sess: EventSession,
   speakerById: ReadonlyMap<string, EventSpeaker>,
 ): string {
-  const kindOptions: SessionKind[] = ['breakout', 'plenary-open', 'plenary-close', 'breakout-relocated'];
-  const kindSelect = kindOptions
-    .map(
-      (k) => `<option value="${k}"${k === sess.kind ? ' selected' : ''}>${k}</option>`,
-    )
-    .join('');
-
   // Chips for currently-assigned speakers. Each chip carries the speaker id
   // in `data-speaker-id`; the chip-row container carries the session id so
   // the delegated click + drag handlers can post `setSessionSpeakers` with
@@ -284,10 +318,14 @@ function renderSessionEditForm(
     .join('');
   const popoverEmpty = popoverOptions === '';
 
+  // Title input — free-form, optional. Placeholder shows the session
+  // `kind` so the user can see what the cell summary would fall back to
+  // when the title is empty. Empty input (post-trim) clears the field
+  // and the marshaler strips it from the file.
   return `<div class="evt-row">
     <label class="evt-field">
-      <span>Session kind</span>
-      <select data-session-kind="${escapeAttr(sess.id)}">${kindSelect}</select>
+      <span>Title <span class="muted">(optional)</span></span>
+      <input type="text" data-session-title="${escapeAttr(sess.id)}" value="${escapeAttr(sess.title ?? '')}" placeholder="${escapeAttr(sess.kind)}" autocomplete="off">
     </label>
   </div>
   <div class="evt-field">
@@ -326,21 +364,28 @@ function renderVacancies(s: EventSchedule): string {
 }
 
 function renderTools(vm: EventEditorViewModel): string {
-  // Hide the Regenerate Tools section entirely on authored files so a
-  // misclick can never wipe the user's data. The wired layer also enforces
-  // this on its side (sha-against-placeholder-registry check), so a stale
-  // tab can't bypass.
+  // Tools section. Clear sits at the top in BOTH branches — the user uses
+  // it to MAKE a file a placeholder, so gating it on placeholder status
+  // would make the action unreachable on the files that most need it.
+  // Regenerate stays gated (only safe on placeholder files; the wired
+  // layer also enforces via sha-against-placeholder-registry).
+  const clearBtn = `<button type="button" class="btn btn-danger" id="clear-all-btn" title="Wipe speakers, rooms, and sessions. Keeps the event name, days, and timeslot labels.">Clear</button>`;
+  const toolsHeader = `<div class="evt-tools-header">
+    <h2>Tools</h2>
+    ${clearBtn}
+  </div>`;
   if (!vm.isPlaceholder) {
     return `<section class="evt-section evt-tools">
-      <h2>Tools</h2>
-      <p class="hint">Regenerate is only available on placeholder schedules. This file has authored data.</p>
+      ${toolsHeader}
+      <p class="hint">Regenerate is only available on placeholder schedules. This file has authored data — Clear it first to enable Regenerate.</p>
       <p><button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button></p>
     </section>`;
   }
   const c = vm.schedule.config;
   return `<section class="evt-section evt-tools">
+    ${toolsHeader}
     <details>
-      <summary><h2>Tools — Regenerate from config</h2></summary>
+      <summary><span class="evt-tools-regen-label">Regenerate from config</span></summary>
       <p class="hint">
         Fill these and press Regenerate. The file is rebuilt from scratch — speakers, rooms, and sessions are replaced with a freshly generated set. Available only because this file is currently empty or matches a placeholder hash.
       </p>
@@ -457,6 +502,33 @@ function clientScript(): string {
       return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c){ return '\\\\' + c; });
     }
 
+    // Day's current ordered timeslot labels, read from the DOM. The
+    // renderer stamps each <tr class="ts-row"> with data-day + data-ts-label,
+    // in display order; reading from the DOM means we always operate on
+    // the current state without re-deriving the schedule client-side.
+    // Used by reorderTimeslots (compute new order from a swap-by-index)
+    // and by swapSessionsInRoom (find neighbour label).
+    function timeslotsForDay(day){
+      const rows = root.querySelectorAll('tr.ts-row[data-day="' + cssEscape(day) + '"]');
+      const out = [];
+      for (let i = 0; i < rows.length; i++) {
+        const lbl = rows[i].getAttribute('data-ts-label');
+        if (lbl) out.push(lbl);
+      }
+      return out;
+    }
+
+    // Local mirror of isValidTimeslotLabel — rejects the same set of
+    // filename-hostile characters so the user gets immediate red-border
+    // feedback as they type, rather than waiting for the wired layer to
+    // refuse silently. Keep in sync with src/event/scheduleData.ts.
+    function isValidLabel(s){
+      if (typeof s !== 'string') return false;
+      if (s.length === 0) return false;
+      if (s !== s.trim()) return false;
+      return !/[\\\\/:*?"<>|]/.test(s);
+    }
+
     // Event header
     root.addEventListener('change', function(e){
       const t = e.target;
@@ -469,7 +541,11 @@ function clientScript(): string {
       }
     });
 
-    // Speaker / room rename via blur
+    // Speaker / room / session-title rename + timeslot rename via blur.
+    // The timeslot rename has an extra step: local validation matches the
+    // wired-layer mirror, so an invalid label reverts in-place rather
+    // than firing a no-op round-trip. Live red-border feedback during
+    // typing comes from the input handler below.
     root.addEventListener('blur', function(e){
       const t = e.target;
       if (!t || !t.dataset) return;
@@ -477,31 +553,50 @@ function clientScript(): string {
         post({ type: 'renameSpeaker', speakerId: t.dataset.renameSpeaker, name: t.value });
       } else if (t.dataset.renameRoom) {
         post({ type: 'renameRoom', roomId: t.dataset.renameRoom, name: t.value });
+      } else if (t.dataset.sessionTitle) {
+        post({ type: 'setSessionTitle', sessionId: t.dataset.sessionTitle, title: t.value });
+      } else if (t.dataset.renameTsDay) {
+        const day = t.dataset.renameTsDay;
+        const oldLabel = t.dataset.renameTsOld;
+        const newLabel = t.value;
+        if (oldLabel === newLabel) return;
+        if (!isValidLabel(newLabel)) {
+          // Revert to the previous label and clear the red-border state
+          // — the user already saw it during typing.
+          t.value = oldLabel;
+          t.classList.remove('ts-label-invalid');
+          return;
+        }
+        t.classList.remove('ts-label-invalid');
+        post({ type: 'renameTimeslot', day: day, oldLabel: oldLabel, newLabel: newLabel });
       }
     }, true);
 
-    // Speaker-picker filter (server-rendered list, client-side filter on
-    // the cached lowercase name via data-search). Empty filter shows all.
+    // Speaker-picker filter + live timeslot-label validation.
     root.addEventListener('input', function(e){
       const t = e.target;
-      if (!t || !t.dataset || !t.dataset.pickerFilterFor) return;
-      const sessionId = t.dataset.pickerFilterFor;
-      const list = root.querySelector('.picker-list[data-picker-list-for="' + cssEscape(sessionId) + '"]');
-      if (!list) return;
-      const q = String(t.value || '').trim().toLowerCase();
-      const rows = list.querySelectorAll('.picker-row');
-      for (let i = 0; i < rows.length; i++) {
-        const search = rows[i].getAttribute('data-search') || '';
-        rows[i].hidden = q !== '' && search.indexOf(q) === -1;
-      }
-    });
-
-    // Session-kind dropdown (change fires on selection)
-    root.addEventListener('change', function(e){
-      const t = e.target;
       if (!t || !t.dataset) return;
-      if (t.dataset.sessionKind) {
-        post({ type: 'setSessionKind', sessionId: t.dataset.sessionKind, kind: t.value });
+      if (t.dataset.pickerFilterFor) {
+        const sessionId = t.dataset.pickerFilterFor;
+        const list = root.querySelector('.picker-list[data-picker-list-for="' + cssEscape(sessionId) + '"]');
+        if (!list) return;
+        const q = String(t.value || '').trim().toLowerCase();
+        const rows = list.querySelectorAll('.picker-row');
+        for (let i = 0; i < rows.length; i++) {
+          const search = rows[i].getAttribute('data-search') || '';
+          rows[i].hidden = q !== '' && search.indexOf(q) === -1;
+        }
+        return;
+      }
+      if (t.dataset.renameTsDay) {
+        // Live filename-safe validation. Allow an empty intermediate
+        // state without flagging — the user is mid-type. The blur path
+        // catches truly empty submissions and reverts.
+        if (t.value === '' || isValidLabel(t.value)) {
+          t.classList.remove('ts-label-invalid');
+        } else {
+          t.classList.add('ts-label-invalid');
+        }
       }
     });
 
@@ -542,6 +637,67 @@ function clientScript(): string {
       }
       if (t.id === 'open-text-btn') {
         post({ type: 'openAsText' });
+        return;
+      }
+      if (t.id === 'clear-all-btn') {
+        // Modal-confirm happens on the wired side. No client-side guard
+        // here — the wired layer is the source of truth.
+        post({ type: 'clearAll' });
+        return;
+      }
+
+      // Timeslot add / remove / reorder. All four work off the day's
+      // current row order read from the DOM via timeslotsForDay().
+      if (t.dataset && t.dataset.addTs) {
+        post({ type: 'addTimeslot', day: t.dataset.addTs });
+        return;
+      }
+      if (t.dataset && t.dataset.removeTs) {
+        const parts = t.dataset.removeTs.split('::');
+        if (parts.length !== 2) return;
+        post({ type: 'removeTimeslot', day: parts[0], label: parts[1] });
+        return;
+      }
+      if (t.dataset && (t.dataset.reorderTsUp || t.dataset.reorderTsDown)) {
+        const raw = t.dataset.reorderTsUp || t.dataset.reorderTsDown;
+        const parts = raw.split('::');
+        if (parts.length !== 2) return;
+        const day = parts[0];
+        const label = parts[1];
+        const order = timeslotsForDay(day);
+        const idx = order.indexOf(label);
+        if (idx === -1) return;
+        const targetIdx = t.dataset.reorderTsUp ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= order.length) return;
+        const newOrder = order.slice();
+        newOrder[idx] = order[targetIdx];
+        newOrder[targetIdx] = label;
+        post({ type: 'reorderTimeslots', day: day, newOrder: newOrder });
+        return;
+      }
+
+      // Per-room session swap. The neighbour label comes from the day's
+      // current row order — the cell carries data-ts so we can find its
+      // position in the day's list, then pick prev/next.
+      if (t.dataset && (t.dataset.swapUp || t.dataset.swapDown)) {
+        const cell = t.closest ? t.closest('td.cell-filled') : null;
+        if (!cell) return;
+        const day = cell.getAttribute('data-day');
+        const roomId = cell.getAttribute('data-room');
+        const labelA = cell.getAttribute('data-ts');
+        if (!day || !roomId || !labelA) return;
+        const order = timeslotsForDay(day);
+        const idx = order.indexOf(labelA);
+        if (idx === -1) return;
+        const targetIdx = t.dataset.swapUp ? idx - 1 : idx + 1;
+        if (targetIdx < 0 || targetIdx >= order.length) return;
+        post({
+          type: 'swapSessionsInRoom',
+          day: day,
+          roomId: roomId,
+          labelA: labelA,
+          labelB: order[targetIdx],
+        });
         return;
       }
 
@@ -1015,13 +1171,211 @@ function pageCss(): string {
       list-style: none;
     }
     .evt-tools details summary::-webkit-details-marker { display: none; }
-    .evt-tools details summary h2 { display: inline-flex; }
+    .evt-tools-regen-label {
+      /* Replaces the old <h2> inside the Regenerate <summary>. Span keeps
+         the heading semantics confined to the section title above; the
+         summary label is just a clickable disclosure handle. */
+      font-size: 1em;
+      font-weight: 600;
+    }
     .evt-config-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 10px;
       margin: 12px 0;
     }
+
+    /* ─── M4: session title line in cell summary ────────────────────────
+       The title row sits above the speaker pills. Two visual states:
+       authored title (regular) vs. kind-fallback (muted italic). The
+       different look lets the user see at a glance whether a session
+       has been titled or is showing its default. */
+    .session-title {
+      font-size: 0.85em;
+      display: block;
+      line-height: 1.3;
+    }
+    .session-title-default {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+    }
+
+    /* ─── M4: hover-revealed swap arrows on filled cells ──────────────
+       The arrows live in the right edge of each filled cell and let the
+       user swap a session up or down with its row-neighbour in the same
+       room. They're absolutely-positioned inside the cell so they don't
+       push the cell's <details> around when revealed.
+
+       For absolute positioning to anchor to a parent the parent needs
+       position:relative — otherwise an absolutely-positioned child walks
+       up the ancestor chain to the nearest positioned element (often
+       the <body>). Setting td.cell-filled {position:relative} keeps the
+       arrows pinned to their owning cell.
+
+       Default state: opacity 0 (invisible but still occupying space).
+       On cell hover: fade to opacity 0.85 via a 100ms transition so the
+       reveal feels deliberate rather than a flash. z-index:2 keeps the
+       arrows above the <details>'s focus outline. */
+    td.cell-filled { position: relative; }
+    .cell-swap-up, .cell-swap-down {
+      position: absolute;
+      right: 4px;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.7em;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 100ms ease-out;
+      z-index: 2;
+    }
+    .cell-swap-up { top: 4px; }
+    .cell-swap-down { bottom: 4px; }
+    td.cell-filled:hover .cell-swap-up,
+    td.cell-filled:hover .cell-swap-down { opacity: 0.85; }
+    .cell-swap-up:hover, .cell-swap-down:hover {
+      opacity: 1;
+      background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+      border-color: var(--vscode-panel-border, rgba(128,128,128,0.4));
+    }
+    /* Edge guards. The first row has no row above (so ▲ has no target),
+       the last row has no row below. data-row-first / data-row-last are
+       stamped on the <tr> by the renderer; CSS hides the relevant arrow
+       via visibility:hidden — which keeps the absolute layout intact
+       (using display:none would also work for absolute children, but
+       visibility is more predictable). */
+    tr.ts-row[data-row-first] .cell-swap-up,
+    tr.ts-row[data-row-first] .ts-up { visibility: hidden; }
+    tr.ts-row[data-row-last] .cell-swap-down,
+    tr.ts-row[data-row-last] .ts-down { visibility: hidden; }
+
+    /* ─── M4: row-header cell with rename + reorder + delete ───────────
+       The header cell is narrow (80px) and stacks four controls in a
+       flex column: ▲ reorder-up, the label input, ▼ reorder-down, ✕
+       delete. The input looks borderless at rest — the user sees just
+       the label text — and only acquires a normal input look on hover
+       or focus. This keeps the grid uncluttered while still being
+       directly editable.
+
+       box-sizing:border-box ensures the input's border and padding count
+       toward its declared width:100%, so it never overflows the column
+       when the focused border lands. */
+    th.ts { width: 80px; }
+    .ts-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 2px;
+      padding: 2px 0;
+    }
+    .ts-label {
+      width: 100%;
+      box-sizing: border-box;
+      text-align: center;
+      border: 1px solid transparent;
+      background: transparent;
+      color: inherit;
+      font-family: inherit;
+      font-size: inherit;
+      padding: 2px 4px;
+      border-radius: 2px;
+    }
+    .ts-label:hover {
+      border-color: var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+    }
+    .ts-label:focus {
+      border-color: var(--vscode-focusBorder, var(--vscode-input-border, #0e639c));
+      background: var(--vscode-input-background);
+      outline: none;
+    }
+    /* Invalid label feedback. The client script toggles
+       .ts-label-invalid when the user types a forbidden character or
+       the wired layer rejects a rename. The !important flags override
+       the hover/focus border colours so the red is unmistakable. */
+    .ts-label-invalid {
+      border-color: var(--vscode-errorForeground, #f14c4c) !important;
+      background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 8%, transparent) !important;
+    }
+    .ts-up, .ts-down, .ts-remove {
+      width: 100%;
+      padding: 0;
+      height: 16px;
+      line-height: 16px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 2px;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      font-size: 0.7em;
+      opacity: 0;
+      transition: opacity 100ms ease-out;
+    }
+    tr.ts-row:hover .ts-up,
+    tr.ts-row:hover .ts-down,
+    tr.ts-row:hover .ts-remove { opacity: 0.85; }
+    .ts-up:hover, .ts-down:hover {
+      opacity: 1;
+      background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent);
+    }
+    .ts-remove:hover {
+      opacity: 1;
+      background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 12%, transparent);
+      color: var(--vscode-errorForeground, #f14c4c);
+      border-color: var(--vscode-errorForeground, #f14c4c);
+    }
+
+    /* ─── M4: "+ Add timeslot" trailing row ─────────────────────────
+       Spans the entire grid width via colspan (set in the renderer);
+       the cell carries a dashed-border placeholder look so it reads as
+       "this is an empty slot waiting for input" rather than a real
+       data row. The !important flag on padding overrides the generic
+       .sessions-grid td {padding:4px} rule above — cascading
+       specificity is per-property, so without it the default padding
+       wins (same selector specificity, later declaration only wins if
+       same rule). */
+    .ts-add-row td {
+      padding: 4px 0 !important;
+      border-style: dashed !important;
+      background: transparent;
+    }
+    .btn-add-ts {
+      width: 100%;
+      padding: 4px 8px;
+      background: transparent;
+      border: 1px dashed transparent;
+      border-radius: 2px;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: inherit;
+    }
+    .btn-add-ts:hover {
+      background: color-mix(in srgb, var(--vscode-button-background, #0e639c) 12%, transparent);
+      color: var(--vscode-foreground);
+      border-color: var(--vscode-panel-border, rgba(128,128,128,0.4));
+    }
+
+    /* ─── M4: Tools-section header with inline Clear button ────────
+       Flexbox lays the heading and Clear button on one line.
+       align-items:baseline aligns the text baselines (so the button text
+       sits on the same line as the heading text, regardless of their
+       different font sizes). justify-content:space-between pushes the
+       two children to opposite ends of the row. */
+    .evt-tools-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .evt-tools-header h2 { margin: 0; }
   `;
 }
 

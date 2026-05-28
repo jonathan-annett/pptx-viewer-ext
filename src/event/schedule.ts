@@ -74,6 +74,12 @@ export interface EventSession {
   roomId: string;
   kind: SessionKind;
   /**
+   * Optional free-form meeting title. When empty / missing the editor
+   * displays `kind` in its place — see `displayTitleForSession` in
+   * scheduleData.ts. The field is preserved as-is on the file.
+   */
+  title?: string;
+  /**
    * For relocated breakouts, the original breakout room id this session
    * "belongs to" in the schedule. Lets the folder tool route by source
    * room (e.g. "Breakout 3's deck even though it played in the plenary").
@@ -92,8 +98,15 @@ export interface EventVacancy {
 export interface EventSchedule {
   generatedAt: string;
   config: EventConfig;
-  /** All days × timeslots, for tools that want to iterate the grid. */
-  timeslots: string[];
+  /**
+   * Per-day ordered timeslot labels. Authoritative for grid rendering and
+   * for downstream tools that need a day's actual slot order (which may
+   * diverge from `timeslotsForDay(config)` once the user adds / renames /
+   * reorders labels). Optional on the type for back-compat with files
+   * generated before this field existed; `ensureTimeslotsByDay` populates
+   * it at parse time so the editor never sees the undefined case.
+   */
+  timeslotsByDay?: Record<string, string[]>;
   speakers: EventSpeaker[];
   rooms: EventRoom[];
   sessions: EventSession[];
@@ -373,10 +386,19 @@ export function generateEventSchedule(input: Partial<EventConfig> = {}): EventSc
     return a.roomId < b.roomId ? -1 : a.roomId > b.roomId ? 1 : 0;
   });
 
+  // Per-day timeslot labels. Each day's list is the deterministic set the
+  // generator just used to lay out the sessions — the editor uses this same
+  // list as the row order for the grid, and the user can later add / rename
+  // / reorder per-day labels independently.
+  const timeslotsByDay: Record<string, string[]> = {};
+  for (let dayIdx = 0; dayIdx < config.days.length; dayIdx++) {
+    timeslotsByDay[config.days[dayIdx]] = timeslotsForDay(config, dayIdx);
+  }
+
   return {
     generatedAt: new Date().toISOString(),
     config,
-    timeslots: allTimeslotLetters(config),
+    timeslotsByDay,
     speakers,
     rooms,
     sessions,

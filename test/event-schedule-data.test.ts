@@ -9,19 +9,30 @@ import {
   addRoom,
   addSession,
   addSpeaker,
+  addTimeslot,
+  clearAll,
+  displayTitleForSession,
   eligibleSpeakersForSession,
   emptySchedule,
+  ensureTimeslotsByDay,
+  isValidTimeslotLabel,
   marshalSchedule,
   parseSchedule,
   removeRoom,
   removeSession,
   removeSpeaker,
+  removeTimeslot,
   renameRoom,
   renameSpeaker,
+  renameTimeslot,
+  reorderTimeslots,
   setDays,
   setEventName,
   setSessionKind,
   setSessionSpeakers,
+  setSessionTitle,
+  swapSessionsInRoom,
+  timeslotsForDayResolved,
 } from '../src/event/scheduleData';
 import { generateEventSchedule } from '../src/event/schedule';
 
@@ -321,6 +332,267 @@ test('marshal → parse round-trip preserves a hand-authored schedule', () => {
   assert.deepEqual(reparsed.schedule.config.days, ['MON', 'TUE']);
   assert.equal(reparsed.schedule.sessions.length, 2);
   assert.equal(reparsed.schedule.sessions[1].speakers[1].speakerName, 'Speaker B');
+});
+
+// ───── M1: titles, timeslotsByDay, clearAll, timeslot ops, swaps ─────
+
+test('parseSchedule + marshalSchedule round-trip preserves session titles', () => {
+  let s = emptySchedule();
+  s = addRoom(s, { name: 'Plenary Hall', kind: 'plenary' });
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'plenary', kind: 'plenary-open' });
+  s = setSessionTitle(s, 'MON-A-plenary', 'Welcome remarks');
+  const text = marshalSchedule(s);
+  const { schedule, errors } = parseSchedule(text);
+  assert.deepEqual(errors, []);
+  assert.equal(schedule.sessions[0].title, 'Welcome remarks');
+});
+
+test('marshalSchedule omits title when empty / undefined', () => {
+  let s = emptySchedule();
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  const text = marshalSchedule(s);
+  assert.ok(!/"title"/.test(text), 'no title key emitted when no session carries one');
+});
+
+test('marshalSchedule serialises timeslotsByDay; parse round-trips it', () => {
+  const s = ensureTimeslotsByDay(emptySchedule());
+  const text = marshalSchedule(s);
+  assert.ok(/"timeslotsByDay"/.test(text), 'timeslotsByDay present in serialised form');
+  const { schedule } = parseSchedule(text);
+  assert.ok(schedule.timeslotsByDay, 'parsed schedule has timeslotsByDay');
+  assert.deepEqual(
+    Object.keys(schedule.timeslotsByDay!).sort(),
+    [...s.config.days].sort(),
+    'one entry per configured day',
+  );
+});
+
+test('parseSchedule strips a legacy top-level timeslots field on input', () => {
+  // Hand-craft a file that carries the legacy field. After parse + marshal
+  // the field is gone — round-trip is one-way for the legacy shape.
+  const text = JSON.stringify({
+    generatedAt: '2026-01-01T00:00:00Z',
+    config: { name: 'X', days: ['MON'] },
+    timeslots: ['A', 'B', 'C', 'D'],
+    speakers: [],
+    rooms: [],
+    sessions: [],
+    vacancies: [],
+  });
+  const { errors } = parseSchedule(text);
+  // No diagnostic noise about the legacy field — silently dropped.
+  assert.ok(!errors.some((e) => /timeslots/.test(e)));
+  const reparsed = parseSchedule(marshalSchedule(parseSchedule(text).schedule));
+  assert.ok(!('timeslots' in (reparsed.schedule as unknown as Record<string, unknown>)));
+});
+
+test('clearAll empties speakers/rooms/sessions/vacancies, preserves config + days + timeslotsByDay', () => {
+  let s = ensureTimeslotsByDay(emptySchedule());
+  s = setEventName(s, 'Demo');
+  s = setDays(s, ['MON', 'TUE']);
+  s = ensureTimeslotsByDay(s);
+  s = addSpeaker(s, 'A');
+  s = addRoom(s, { name: 'Plenary', kind: 'plenary' });
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'plenary', kind: 'plenary-open', speakerIds: ['spk-01'] });
+  const beforeByDay = s.timeslotsByDay;
+  const next = clearAll(s);
+  assert.equal(next.speakers.length, 0);
+  assert.equal(next.rooms.length, 0);
+  assert.equal(next.sessions.length, 0);
+  assert.equal(next.vacancies.length, 0);
+  assert.equal(next.config.name, 'Demo');
+  assert.deepEqual(next.config.days, ['MON', 'TUE']);
+  assert.deepEqual(next.timeslotsByDay, beforeByDay);
+});
+
+test('addTimeslot appends next uppercase letter past the max', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = ensureTimeslotsByDay(s);
+  // Wipe MON's seeded labels so we start from empty.
+  s = { ...s, timeslotsByDay: { ...s.timeslotsByDay, MON: [] } };
+  s = addTimeslot(s, 'MON'); // [] → A
+  s = addTimeslot(s, 'MON'); // [A] → B
+  s = addTimeslot(s, 'MON'); // [A,B] → C
+  assert.deepEqual(s.timeslotsByDay!.MON, ['A', 'B', 'C']);
+});
+
+test('addTimeslot picks next-past-max even when there are gaps (no fill-the-gap)', () => {
+  // User chose "add to end" semantics — [A, C] should yield D, not B.
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'C'] } };
+  s = addTimeslot(s, 'MON');
+  assert.deepEqual(s.timeslotsByDay!.MON, ['A', 'C', 'D']);
+});
+
+test('addTimeslot accepts a custom valid label; refuses duplicates and unknown day', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A'] } };
+  s = addTimeslot(s, 'MON', '1030');
+  assert.deepEqual(s.timeslotsByDay!.MON, ['A', '1030']);
+  const beforeDup = s;
+  s = addTimeslot(s, 'MON', '1030');
+  assert.equal(s, beforeDup, 'duplicate is a no-op (same reference)');
+  const beforeUnknown = s;
+  s = addTimeslot(s, 'NOPE', 'X');
+  assert.equal(s, beforeUnknown, 'unknown day is a no-op');
+});
+
+test('removeTimeslot cascades into sessions and vacancies; no-op when absent', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = ensureTimeslotsByDay(s);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = addRoom(s, { name: 'Plenary', kind: 'plenary' });
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'plenary', kind: 'plenary-open' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  // Inject a vacancy at MON/B so the cascade can drop it.
+  s = { ...s, vacancies: [{ day: 'MON', timeslot: 'B', roomId: 'breakout-1', reason: 'relocated-to-plenary' }] };
+  s = removeTimeslot(s, 'MON', 'B');
+  assert.deepEqual(s.timeslotsByDay!.MON, ['A']);
+  assert.equal(s.sessions.length, 1);
+  assert.equal(s.sessions[0].timeslot, 'A');
+  assert.equal(s.vacancies.length, 0);
+  const before = s;
+  s = removeTimeslot(s, 'MON', 'never-existed');
+  assert.equal(s, before, 'absent label is a no-op');
+});
+
+test('renameTimeslot cascades into sessions and rebuilds ids', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  s = renameTimeslot(s, 'MON', 'B', '1030');
+  assert.deepEqual(s.timeslotsByDay!.MON, ['A', '1030']);
+  assert.equal(s.sessions[0].timeslot, '1030');
+  assert.equal(s.sessions[0].id, 'MON-1030-breakout-1');
+});
+
+test('renameTimeslot refuses invalid characters, duplicates, and self-rename', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  // Forbidden character → no-op.
+  let next = renameTimeslot(s, 'MON', 'A', 'A/B');
+  assert.equal(next, s);
+  // Duplicate within the day → no-op.
+  next = renameTimeslot(s, 'MON', 'A', 'B');
+  assert.equal(next, s);
+  // No-op when old == new.
+  next = renameTimeslot(s, 'MON', 'A', 'A');
+  assert.equal(next, s);
+  // Empty / whitespace-only → no-op.
+  next = renameTimeslot(s, 'MON', 'A', '');
+  assert.equal(next, s);
+  next = renameTimeslot(s, 'MON', 'A', '  ');
+  assert.equal(next, s);
+});
+
+test('setSessionTitle round-trips through marshal/parse; empty input clears', () => {
+  let s = emptySchedule();
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  s = setSessionTitle(s, 'MON-B-breakout-1', '  Strategy Review  ');
+  const reparsed = parseSchedule(marshalSchedule(s));
+  assert.equal(reparsed.schedule.sessions[0].title, 'Strategy Review', 'trimmed and persisted');
+  let cleared = setSessionTitle(reparsed.schedule, 'MON-B-breakout-1', '');
+  assert.equal(cleared.sessions[0].title, undefined, 'empty input clears the field');
+  cleared = setSessionTitle(reparsed.schedule, 'MON-B-breakout-1', '   ');
+  assert.equal(cleared.sessions[0].title, undefined, 'whitespace-only also clears');
+});
+
+test('displayTitleForSession returns title when set, falls back to kind otherwise', () => {
+  let s = emptySchedule();
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  assert.equal(displayTitleForSession(s.sessions[0]), 'breakout');
+  s = setSessionTitle(s, 'MON-B-breakout-1', 'Q4 Planning');
+  assert.equal(displayTitleForSession(s.sessions[0]), 'Q4 Planning');
+});
+
+test('isValidTimeslotLabel rejects forbidden chars and whitespace edges', () => {
+  for (const ch of ['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+    assert.ok(!isValidTimeslotLabel(`A${ch}B`), `should reject containing ${ch}`);
+  }
+  assert.ok(!isValidTimeslotLabel(''));
+  assert.ok(!isValidTimeslotLabel('   '));
+  assert.ok(!isValidTimeslotLabel(' A'));
+  assert.ok(!isValidTimeslotLabel('A '));
+  assert.ok(isValidTimeslotLabel('A'));
+  assert.ok(isValidTimeslotLabel('1030'));
+  assert.ok(isValidTimeslotLabel('Lunch'));
+});
+
+test('reorderTimeslots accepts a permutation, rejects anything else', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B', 'C'] } };
+  s = reorderTimeslots(s, 'MON', ['C', 'A', 'B']);
+  assert.deepEqual(s.timeslotsByDay!.MON, ['C', 'A', 'B']);
+  // Wrong length → no-op.
+  let next = reorderTimeslots(s, 'MON', ['C', 'A']);
+  assert.equal(next, s);
+  // Different set → no-op.
+  next = reorderTimeslots(s, 'MON', ['C', 'A', 'D']);
+  assert.equal(next, s);
+  // Duplicate → no-op.
+  next = reorderTimeslots(s, 'MON', ['C', 'A', 'A']);
+  assert.equal(next, s);
+});
+
+test('swapSessionsInRoom: both occupied → trade timeslots; ids rebuilt', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSpeaker(s, 'A'); // spk-01
+  s = addSpeaker(s, 'B'); // spk-02
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-02'] });
+  s = swapSessionsInRoom(s, 'MON', 'breakout-1', 'A', 'B');
+  const byTimeslot = new Map(s.sessions.map((sess) => [sess.timeslot, sess]));
+  // The session originally carrying spk-01 is now at timeslot B; the one
+  // carrying spk-02 is at A. Ids reflect the new positions.
+  assert.equal(byTimeslot.get('B')!.speakers[0].speakerId, 'spk-01');
+  assert.equal(byTimeslot.get('B')!.id, 'MON-B-breakout-1');
+  assert.equal(byTimeslot.get('A')!.speakers[0].speakerId, 'spk-02');
+  assert.equal(byTimeslot.get('A')!.id, 'MON-A-breakout-1');
+});
+
+test('swapSessionsInRoom: one occupied → move; both empty → no-op', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'breakout-1', kind: 'breakout' });
+  // Move from A to B (B is empty).
+  s = swapSessionsInRoom(s, 'MON', 'breakout-1', 'A', 'B');
+  assert.equal(s.sessions.length, 1);
+  assert.equal(s.sessions[0].timeslot, 'B');
+  assert.equal(s.sessions[0].id, 'MON-B-breakout-1');
+  // Now both A and somewhere-else are empty in this room → no-op.
+  const before = s;
+  s = swapSessionsInRoom(s, 'MON', 'breakout-1', 'A', 'NEVER');
+  assert.equal(s, before);
+});
+
+test('timeslotsForDayResolved reads timeslotsByDay when present, derives otherwise', () => {
+  let s = setDays(emptySchedule(), ['MON', 'TUE']);
+  s = { ...s, timeslotsByDay: { MON: ['X', 'Y'] } }; // TUE missing on purpose
+  assert.deepEqual(timeslotsForDayResolved(s, 'MON'), ['X', 'Y']);
+  // TUE not pinned → falls back to deterministic per-config list. We don't
+  // pin specific values (config-dependent) but it must be a non-empty array.
+  const tue = timeslotsForDayResolved(s, 'TUE');
+  assert.ok(Array.isArray(tue) && tue.length > 0);
+  // Unknown day → empty array (no row rendered).
+  assert.deepEqual(timeslotsForDayResolved(s, 'NOPE'), []);
+});
+
+test('ensureTimeslotsByDay is idempotent', () => {
+  const a = ensureTimeslotsByDay(emptySchedule());
+  const b = ensureTimeslotsByDay(a);
+  assert.equal(a, b, 'second call returns the same reference (no spurious copy)');
+  // Concretely: every configured day has a non-empty label list.
+  for (const day of a.config.days) {
+    assert.ok((a.timeslotsByDay![day] ?? []).length > 0);
+  }
 });
 
 // ───── run ────────────────────────────────────────────────────────────

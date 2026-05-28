@@ -28,9 +28,13 @@
         "relocations": { "type": "number" }
       }
     },
-    "timeslots": {
-      "type": "array",
-      "items": { "type": "string" }
+    "timeslotsByDay": {
+      "type": "object",
+      "description": "Per-day ordered timeslot labels. Authoritative for grid row order in the .eventSchedule editor. Each value is the day's labels in display order.",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
     },
     "speakers": {
       "type": "array",
@@ -68,6 +72,10 @@
           "kind": {
             "type": "string",
             "enum": ["plenary-open", "plenary-close", "breakout", "breakout-relocated"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Optional free-form meeting title. When empty / missing the editor displays `kind` in its place."
           },
           "relocatedFromRoomId": { "type": ["string", "null"] },
           "speakers": {

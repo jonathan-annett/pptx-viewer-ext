@@ -12,8 +12,8 @@
 
 import {
   DEFAULT_CONFIG,
-  allTimeslotLetters,
   generateEventSchedule,
+  timeslotsForDay,
   type EventConfig,
   type EventRoom,
   type EventSchedule,
@@ -61,28 +61,59 @@ export function parseSchedule(text: string): ScheduleParseResult {
   const rooms = parseRooms(obj.rooms, errors);
   const sessions = parseSessions(obj.sessions, errors);
   const vacancies = parseVacancies(obj.vacancies, errors);
+  const timeslotsByDay = parseTimeslotsByDay(obj.timeslotsByDay, errors);
   const generatedAt =
     typeof obj.generatedAt === 'string' ? obj.generatedAt : new Date().toISOString();
 
+  // Drop any legacy top-level `timeslots` field if the file carried one —
+  // the per-day list is authoritative now. The renderer never reads the
+  // legacy field, the marshaler never emits it. Old files round-trip with
+  // it silently stripped.
   return {
-    schedule: {
+    schedule: ensureTimeslotsByDay({
       generatedAt,
       config,
-      timeslots: Array.isArray(obj.timeslots)
-        ? (obj.timeslots as unknown[]).filter((t): t is string => typeof t === 'string')
-        : allTimeslotLetters(config),
+      timeslotsByDay,
       speakers,
       rooms,
       sessions,
       vacancies,
-    },
+    }),
     errors,
   };
 }
 
-/** Marshal a schedule back to pretty-printed JSON text with trailing newline. */
+/**
+ * Marshal a schedule back to pretty-printed JSON text with trailing newline.
+ *
+ * Sessions with an empty / undefined `title` are emitted without the field,
+ * so files generated before titles existed (and untouched files in the
+ * test corpus) keep their minimal shape. `timeslotsByDay` is always
+ * emitted once populated — `parseSchedule` populates it via
+ * `ensureTimeslotsByDay`, so the first save of a legacy file does write
+ * the per-day list out, and subsequent reads see it directly.
+ */
 export function marshalSchedule(schedule: EventSchedule): string {
-  return JSON.stringify(schedule, null, 2) + '\n';
+  // Filter undefined / empty-string titles out of session entries so the
+  // serialised form stays clean.
+  const sessions = schedule.sessions.map((sess) => {
+    const trimmed = sess.title?.trim();
+    if (!trimmed) {
+      const { title: _omit, ...rest } = sess;
+      return rest;
+    }
+    return { ...sess, title: trimmed };
+  });
+  const out: Record<string, unknown> = {
+    generatedAt: schedule.generatedAt,
+    config: schedule.config,
+  };
+  if (schedule.timeslotsByDay) out.timeslotsByDay = schedule.timeslotsByDay;
+  out.speakers = schedule.speakers;
+  out.rooms = schedule.rooms;
+  out.sessions = sessions;
+  out.vacancies = schedule.vacancies;
+  return JSON.stringify(out, null, 2) + '\n';
 }
 
 /**
@@ -92,15 +123,14 @@ export function marshalSchedule(schedule: EventSchedule): string {
  */
 export function emptySchedule(): EventSchedule {
   const config: EventConfig = { ...DEFAULT_CONFIG };
-  return {
+  return ensureTimeslotsByDay({
     generatedAt: new Date().toISOString(),
     config,
-    timeslots: allTimeslotLetters(config),
     speakers: [],
     rooms: [],
     sessions: [],
     vacancies: [],
-  };
+  });
 }
 
 // ───── Mutators ──────────────────────────────────────────────────────────
@@ -431,12 +461,14 @@ function parseSessions(raw: unknown, errors: string[]): EventSession[] {
           })
           .filter((x): x is SessionSpeakerSlot => x !== null)
       : [];
+    const title = typeof e.title === 'string' && e.title.trim() !== '' ? e.title : undefined;
     out.push({
       id: e.id,
       day: e.day,
       timeslot: e.timeslot,
       roomId: e.roomId,
       kind,
+      ...(title !== undefined ? { title } : {}),
       relocatedFromRoomId,
       speakers,
     });
@@ -476,4 +508,355 @@ function isSessionKind(v: unknown): v is SessionKind {
     v === 'breakout' ||
     v === 'breakout-relocated'
   );
+}
+
+function parseTimeslotsByDay(
+  raw: unknown,
+  errors: string[],
+): Record<string, string[]> | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    errors.push('timeslotsByDay must be an object mapping day → label list — ignoring');
+    return undefined;
+  }
+  const out: Record<string, string[]> = {};
+  for (const [day, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(list)) {
+      errors.push(`timeslotsByDay.${day} must be an array — ignoring`);
+      continue;
+    }
+    out[day] = list.filter((v): v is string => typeof v === 'string');
+  }
+  return out;
+}
+
+// ───── Timeslot / title helpers (M1: pure, called by renderer + mutators)─
+
+/**
+ * Characters that would make a label unusable as a folder segment on any
+ * of the platforms the sync engine writes to (Windows, macOS, Linux).
+ * Also catches the empty-string and whitespace-only cases — every label
+ * has to be a non-empty token the user typed.
+ */
+const FORBIDDEN_LABEL_CHARS = /[\\/:*?"<>|]/;
+
+export function isValidTimeslotLabel(label: unknown): boolean {
+  if (typeof label !== 'string') return false;
+  if (label.length === 0) return false;
+  if (label !== label.trim()) return false; // no leading/trailing whitespace
+  if (FORBIDDEN_LABEL_CHARS.test(label)) return false;
+  return true;
+}
+
+/**
+ * Display string for a session header. Falls back to `kind` when the
+ * authored `title` is empty / missing — the editor renders this in the
+ * cell summary and uses it as the placeholder hint on the edit form's
+ * title input.
+ */
+export function displayTitleForSession(session: EventSession): string {
+  const trimmed = session.title?.trim();
+  return trimmed || session.kind;
+}
+
+/**
+ * The ordered timeslot list for a single day. Reads from
+ * `schedule.timeslotsByDay[day]` when present; otherwise falls back to
+ * the deterministic list `timeslotsForDay(config, dayIndex)` produces.
+ * The renderer always calls this — never `schedule.timeslotsByDay[day]`
+ * directly — so a parse failure that drops the field doesn't leave the
+ * grid empty.
+ */
+export function timeslotsForDayResolved(
+  schedule: EventSchedule,
+  day: string,
+): string[] {
+  const list = schedule.timeslotsByDay?.[day];
+  if (Array.isArray(list)) return list;
+  const idx = schedule.config.days.indexOf(day);
+  if (idx === -1) return [];
+  return timeslotsForDay(schedule.config, idx);
+}
+
+/**
+ * Return a schedule whose `timeslotsByDay` has an entry for every
+ * configured day. Existing entries are preserved as-is; days the file
+ * didn't pin (the legacy case, before this field existed) get the
+ * deterministic generator-derived list. Idempotent — running on a
+ * schedule that already has every day filled returns an equivalent
+ * value with the same per-day arrays.
+ */
+export function ensureTimeslotsByDay(schedule: EventSchedule): EventSchedule {
+  const current = schedule.timeslotsByDay ?? {};
+  const next: Record<string, string[]> = {};
+  let changed = false;
+  for (let i = 0; i < schedule.config.days.length; i++) {
+    const day = schedule.config.days[i];
+    if (Array.isArray(current[day])) {
+      next[day] = current[day];
+    } else {
+      next[day] = timeslotsForDay(schedule.config, i);
+      changed = true;
+    }
+  }
+  // Preserve any user-pinned days that aren't in config.days (e.g. the
+  // user removed a day from config but the per-day list hasn't been
+  // cleaned up yet). Cheap, and avoids losing user intent.
+  for (const [day, list] of Object.entries(current)) {
+    if (!(day in next) && Array.isArray(list)) {
+      next[day] = list;
+    }
+  }
+  if (!changed && schedule.timeslotsByDay && sameKeys(schedule.timeslotsByDay, next)) {
+    return schedule;
+  }
+  return { ...schedule, timeslotsByDay: next };
+}
+
+function sameKeys(a: Record<string, string[]>, b: Record<string, string[]>): boolean {
+  const ak = Object.keys(a);
+  if (ak.length !== Object.keys(b).length) return false;
+  for (const k of ak) if (!(k in b)) return false;
+  return true;
+}
+
+// ───── M1 mutators (pure, return new EventSchedule) ─────────────────────
+
+/**
+ * Wipe authored content. Preserves config (so the user keeps their event
+ * name + day list + generator knobs) and per-day timeslot labels (the
+ * user's authored structure of the schedule grid stays). Speakers, rooms,
+ * sessions, and the vacancies derived from session relocations all go.
+ *
+ * After a Clear the file becomes a placeholder-shaped document the
+ * Regenerate tool can fill back in.
+ */
+export function clearAll(schedule: EventSchedule): EventSchedule {
+  return {
+    ...schedule,
+    speakers: [],
+    rooms: [],
+    sessions: [],
+    vacancies: [],
+  };
+}
+
+/**
+ * Append a timeslot to a day's list.
+ *
+ *  - `label` provided: validated via `isValidTimeslotLabel`; refused
+ *    silently if invalid or already present in the day.
+ *  - `label` omitted: picks the next uppercase letter *after* the highest
+ *    letter currently used in that day's list (so [A, C] → D, matching
+ *    the "add to end" UX you specified). Falls back to `slot-N` when the
+ *    alphabet runs out.
+ *
+ * No-op if the day isn't in `config.days` — adding labels to a
+ * non-existent day would create orphan grid rows.
+ */
+export function addTimeslot(
+  schedule: EventSchedule,
+  day: string,
+  label?: string,
+): EventSchedule {
+  if (!schedule.config.days.includes(day)) return schedule;
+  const withByDay = ensureTimeslotsByDay(schedule);
+  const current = withByDay.timeslotsByDay![day] ?? [];
+  let chosen: string;
+  if (label !== undefined) {
+    if (!isValidTimeslotLabel(label)) return schedule;
+    if (current.includes(label)) return schedule;
+    chosen = label;
+  } else {
+    chosen = nextDefaultTimeslotLabel(current);
+    if (current.includes(chosen)) return schedule; // defensive: nextDefault should never collide
+  }
+  return {
+    ...withByDay,
+    timeslotsByDay: { ...withByDay.timeslotsByDay, [day]: [...current, chosen] },
+  };
+}
+
+/**
+ * Drop a timeslot from a day's list. Cascades into sessions and vacancies
+ * that referenced the (day, label) pair so the grid stays consistent.
+ * No-op if the label isn't present.
+ */
+export function removeTimeslot(
+  schedule: EventSchedule,
+  day: string,
+  label: string,
+): EventSchedule {
+  const withByDay = ensureTimeslotsByDay(schedule);
+  const current = withByDay.timeslotsByDay![day];
+  if (!Array.isArray(current) || !current.includes(label)) return schedule;
+  const nextList = current.filter((l) => l !== label);
+  const sessions = withByDay.sessions.filter(
+    (s) => !(s.day === day && s.timeslot === label),
+  );
+  const vacancies = withByDay.vacancies.filter(
+    (v) => !(v.day === day && v.timeslot === label),
+  );
+  return {
+    ...withByDay,
+    timeslotsByDay: { ...withByDay.timeslotsByDay, [day]: nextList },
+    sessions,
+    vacancies,
+  };
+}
+
+/**
+ * Replace a timeslot's label within one day. Refused silently if the new
+ * label is invalid (`isValidTimeslotLabel`), unchanged, or already used
+ * within the day. Cascades into sessions + vacancies at (day, oldLabel) —
+ * their `timeslot` field is rewritten and their canonical id rebuilt.
+ */
+export function renameTimeslot(
+  schedule: EventSchedule,
+  day: string,
+  oldLabel: string,
+  newLabel: string,
+): EventSchedule {
+  if (!isValidTimeslotLabel(newLabel)) return schedule;
+  if (oldLabel === newLabel) return schedule;
+  const withByDay = ensureTimeslotsByDay(schedule);
+  const current = withByDay.timeslotsByDay![day];
+  if (!Array.isArray(current) || !current.includes(oldLabel)) return schedule;
+  if (current.includes(newLabel)) return schedule;
+  const nextList = current.map((l) => (l === oldLabel ? newLabel : l));
+  const sessions = withByDay.sessions.map((s) =>
+    s.day === day && s.timeslot === oldLabel
+      ? { ...s, timeslot: newLabel, id: `${s.day}-${newLabel}-${s.roomId}` }
+      : s,
+  );
+  const vacancies = withByDay.vacancies.map((v) =>
+    v.day === day && v.timeslot === oldLabel ? { ...v, timeslot: newLabel } : v,
+  );
+  return {
+    ...withByDay,
+    timeslotsByDay: { ...withByDay.timeslotsByDay, [day]: nextList },
+    sessions,
+    vacancies,
+  };
+}
+
+/**
+ * Set or clear a session's free-form title. Empty / whitespace-only input
+ * clears the field (stored as undefined so the marshaler omits it from
+ * the file).
+ */
+export function setSessionTitle(
+  schedule: EventSchedule,
+  sessionId: string,
+  title: string,
+): EventSchedule {
+  const trimmed = title.trim();
+  const sessions = schedule.sessions.map((s) => {
+    if (s.id !== sessionId) return s;
+    if (trimmed === '') {
+      const { title: _omit, ...rest } = s;
+      return rest;
+    }
+    return { ...s, title: trimmed };
+  });
+  return { ...schedule, sessions };
+}
+
+/**
+ * Replace a day's timeslot order. `newOrder` must be a permutation of
+ * the day's existing list — same set of labels, possibly reshuffled.
+ * Sessions stay at their (day, label) coordinates; only the grid's row
+ * order changes, which the renderer picks up via `timeslotsForDayResolved`.
+ *
+ * Refused silently when `newOrder` isn't a permutation. The wired layer
+ * should compute `newOrder` from a swap-by-index — the constraint is
+ * defensive against a stale-tab message.
+ */
+export function reorderTimeslots(
+  schedule: EventSchedule,
+  day: string,
+  newOrder: string[],
+): EventSchedule {
+  const withByDay = ensureTimeslotsByDay(schedule);
+  const current = withByDay.timeslotsByDay![day];
+  if (!Array.isArray(current)) return schedule;
+  if (newOrder.length !== current.length) return schedule;
+  const currentSet = new Set(current);
+  const newSet = new Set(newOrder);
+  if (newSet.size !== newOrder.length) return schedule; // duplicates
+  for (const label of newOrder) {
+    if (!currentSet.has(label)) return schedule;
+  }
+  return {
+    ...withByDay,
+    timeslotsByDay: { ...withByDay.timeslotsByDay, [day]: [...newOrder] },
+  };
+}
+
+/**
+ * Trade the session contents of two timeslots within one room on one day.
+ * Three cases:
+ *
+ *   - Both filled: the two sessions swap timeslots. Each session's `id`
+ *     is rebuilt from its new (day, timeslot, roomId) triple.
+ *   - One filled, one empty: the filled session moves to the empty slot.
+ *   - Both empty: no-op.
+ *
+ * The mutator does not enforce speaker-double-booking constraints — a
+ * swap can in principle place a speaker in two rooms at the same
+ * timeslot. The UI is expected to surface that out-of-band (out of scope
+ * for v2; the existing eligibility filter only gates additions).
+ */
+export function swapSessionsInRoom(
+  schedule: EventSchedule,
+  day: string,
+  roomId: string,
+  labelA: string,
+  labelB: string,
+): EventSchedule {
+  if (labelA === labelB) return schedule;
+  const sessionA = schedule.sessions.find(
+    (s) => s.day === day && s.roomId === roomId && s.timeslot === labelA,
+  );
+  const sessionB = schedule.sessions.find(
+    (s) => s.day === day && s.roomId === roomId && s.timeslot === labelB,
+  );
+  if (!sessionA && !sessionB) return schedule;
+  const sessions = schedule.sessions.map((s) => {
+    if (sessionA && s.id === sessionA.id) {
+      return { ...s, timeslot: labelB, id: `${day}-${labelB}-${roomId}` };
+    }
+    if (sessionB && s.id === sessionB.id) {
+      return { ...s, timeslot: labelA, id: `${day}-${labelA}-${roomId}` };
+    }
+    return s;
+  });
+  return { ...schedule, sessions: sortSessions(schedule, sessions) };
+}
+
+// ───── default-label picker ─────────────────────────────────────────────
+
+/**
+ * Pick the next uppercase letter past the highest letter already in
+ * `current`. Empty list → 'A'. [A, C] → 'D' (one past max, not the gap),
+ * matching the "add to end" choice. Falls back to `slot-N` once the
+ * alphabet runs out — N starts at the current list length + 1 and
+ * advances until a free name is found, so the suffix is stable for the
+ * common-case append-twice-in-a-row flow.
+ */
+function nextDefaultTimeslotLabel(current: readonly string[]): string {
+  let maxCode = 64; // one less than 'A' (65) so empty → A
+  for (const label of current) {
+    if (label.length === 1) {
+      const code = label.charCodeAt(0);
+      if (code >= 65 && code <= 90 && code > maxCode) maxCode = code;
+    }
+  }
+  if (maxCode < 90) {
+    const candidate = String.fromCharCode(maxCode + 1);
+    if (!current.includes(candidate)) return candidate;
+  }
+  let n = current.length + 1;
+  while (current.includes(`slot-${n}`)) n++;
+  return `slot-${n}`;
 }
