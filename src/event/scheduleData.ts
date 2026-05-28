@@ -153,6 +153,17 @@ export function addSpeaker(schedule: EventSchedule, name: string): EventSchedule
   return { ...schedule, speakers: [...schedule.speakers, next] };
 }
 
+/**
+ * Bulk-add speakers — typically driven by a multi-line paste into the
+ * "add speaker" input. Each name flows through `addSpeaker` so trimming,
+ * empty-skip, and sequential id assignment all carry through in a single
+ * round-trip. The caller doesn't pay the per-line write+refresh cost,
+ * which avoids a parse→mutate→write race against the in-memory document.
+ */
+export function addSpeakers(schedule: EventSchedule, names: readonly string[]): EventSchedule {
+  return names.reduce((acc, name) => addSpeaker(acc, name), schedule);
+}
+
 export function renameSpeaker(
   schedule: EventSchedule,
   speakerId: string,
@@ -195,6 +206,20 @@ export function addRoom(
   const id = nextRoomId(schedule.rooms, kind);
   const next: EventRoom = { id, name: trimmed, kind };
   return { ...schedule, rooms: [...schedule.rooms, next] };
+}
+
+/**
+ * Bulk-add rooms — same shape as addSpeakers. All entries share the
+ * given `kind` (the "add room" UI surfaces one dropdown per paste).
+ * Each name flows through `addRoom`, so trimming + empty-skip +
+ * sequential id assignment carry through.
+ */
+export function addRooms(
+  schedule: EventSchedule,
+  args: { names: readonly string[]; kind?: 'breakout' | 'plenary' },
+): EventSchedule {
+  const kind = args.kind ?? 'breakout';
+  return args.names.reduce((acc, name) => addRoom(acc, { name, kind }), schedule);
 }
 
 export function renameRoom(

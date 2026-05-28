@@ -600,6 +600,73 @@ function clientScript(): string {
       }
     });
 
+    // Enter-to-submit on the speaker / room "add" inputs. Pressing
+    // Enter is equivalent to clicking the + Add button — lets the user
+    // type "Alice"⏎"Bob"⏎"Carol"⏎ without touching the mouse.
+    root.addEventListener('keydown', function(e){
+      if (e.key !== 'Enter') return;
+      const t = e.target;
+      if (!t || !t.id) return;
+      if (t.id === 'add-speaker-name') {
+        e.preventDefault();
+        const name = (t.value || '').trim();
+        if (!name) return;
+        post({ type: 'addSpeaker', name: name });
+        t.value = '';
+        return;
+      }
+      if (t.id === 'add-room-name') {
+        e.preventDefault();
+        const name = (t.value || '').trim();
+        if (!name) return;
+        const kindEl = document.getElementById('add-room-kind');
+        const kind = (kindEl && (kindEl.value === 'plenary' || kindEl.value === 'breakout')) ? kindEl.value : 'breakout';
+        post({ type: 'addRoom', name: name, kind: kind });
+        t.value = '';
+        return;
+      }
+    });
+
+    // Paste-multiline into the "add" inputs. A clipboard payload with
+    // newlines (e.g. an Excel column or a list pasted from a text
+    // editor) gets split into one entry per line and shipped as a
+    // single bulk message — addSpeakers / addRooms. Bulk avoids racing
+    // the wired layer's parse→write→refresh cycle, which N back-to-
+    // back single-add posts would lose entries to.
+    //
+    // Single-line pastes (no newline in the clipboard) fall through to
+    // the browser's default — the text fills the input as usual and
+    // the user presses Enter / clicks Add to commit.
+    root.addEventListener('paste', function(e){
+      const t = e.target;
+      if (!t || !t.id) return;
+      const isSpeakerInput = t.id === 'add-speaker-name';
+      const isRoomInput = t.id === 'add-room-name';
+      if (!isSpeakerInput && !isRoomInput) return;
+      const clipboard = e.clipboardData;
+      if (!clipboard) return;
+      const text = clipboard.getData('text/plain');
+      if (!text) return;
+      // Only intercept multi-line content. CRLF, LF, and bare CR all
+      // get treated as line breaks (Excel-on-Windows and macOS text
+      // editors disagree about which one to emit).
+      if (text.indexOf('\n') === -1 && text.indexOf('\r') === -1) return;
+      e.preventDefault();
+      const lines = text
+        .split(/\r\n|\n|\r/)
+        .map(function(l){ return l.trim(); })
+        .filter(function(l){ return l.length > 0; });
+      if (lines.length === 0) return;
+      if (isSpeakerInput) {
+        post({ type: 'addSpeakers', names: lines });
+      } else {
+        const kindEl = document.getElementById('add-room-kind');
+        const kind = (kindEl && (kindEl.value === 'plenary' || kindEl.value === 'breakout')) ? kindEl.value : 'breakout';
+        post({ type: 'addRooms', names: lines, kind: kind });
+      }
+      t.value = '';
+    });
+
     // Button clicks — single delegated listener
     root.addEventListener('click', function(e){
       const t = e.target;

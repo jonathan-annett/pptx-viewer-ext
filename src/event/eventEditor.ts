@@ -21,8 +21,10 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import {
   addRoom,
+  addRooms,
   addSession,
   addSpeaker,
+  addSpeakers,
   addTimeslot,
   clearAll,
   emptySchedule,
@@ -163,6 +165,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'addSpeaker':
             await mutate((s) => addSpeaker(s, msg.name));
             break;
+          case 'addSpeakers':
+            await mutate((s) => addSpeakers(s, msg.names));
+            break;
           case 'renameSpeaker':
             await mutate((s) => renameSpeaker(s, msg.speakerId, msg.name));
             break;
@@ -171,6 +176,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
             break;
           case 'addRoom':
             await mutate((s) => addRoom(s, { name: msg.name, kind: msg.kind }));
+            break;
+          case 'addRooms':
+            await mutate((s) => addRooms(s, { names: msg.names, kind: msg.kind }));
             break;
           case 'renameRoom':
             await mutate((s) => renameRoom(s, msg.roomId, msg.name));
@@ -368,9 +376,11 @@ type WebviewMessage =
   | { type: 'setEventName'; name: string }
   | { type: 'setDays'; days: string[] }
   | { type: 'addSpeaker'; name: string }
+  | { type: 'addSpeakers'; names: string[] }
   | { type: 'renameSpeaker'; speakerId: string; name: string }
   | { type: 'removeSpeaker'; speakerId: string }
   | { type: 'addRoom'; name: string; kind: 'plenary' | 'breakout' }
+  | { type: 'addRooms'; names: string[]; kind: 'plenary' | 'breakout' }
   | { type: 'renameRoom'; roomId: string; name: string }
   | { type: 'removeRoom'; roomId: string }
   | {

@@ -7,8 +7,10 @@
 import { strict as assert } from 'node:assert';
 import {
   addRoom,
+  addRooms,
   addSession,
   addSpeaker,
+  addSpeakers,
   addTimeslot,
   clearAll,
   displayTitleForSession,
@@ -593,6 +595,58 @@ test('ensureTimeslotsByDay is idempotent', () => {
   for (const day of a.config.days) {
     assert.ok((a.timeslotsByDay![day] ?? []).length > 0);
   }
+});
+
+// ───── bulk add (paste-multiline support) ────────────────────────────
+
+test('addSpeakers folds names through addSpeaker, assigning sequential ids', () => {
+  const s = addSpeakers(emptySchedule(), ['Alice', 'Bob', 'Carol']);
+  assert.deepEqual(
+    s.speakers.map((sp) => sp.id),
+    ['spk-01', 'spk-02', 'spk-03'],
+  );
+  assert.deepEqual(
+    s.speakers.map((sp) => sp.name),
+    ['Alice', 'Bob', 'Carol'],
+  );
+});
+
+test('addSpeakers skips empty / whitespace-only entries; trims the rest', () => {
+  const s = addSpeakers(emptySchedule(), ['  Alice  ', '', '   ', 'Bob']);
+  assert.equal(s.speakers.length, 2);
+  assert.equal(s.speakers[0].name, 'Alice');
+  assert.equal(s.speakers[1].name, 'Bob');
+});
+
+test('addSpeakers appends past existing speakers without renumbering', () => {
+  let s = addSpeaker(emptySchedule(), 'Original');
+  s = addSpeakers(s, ['Two', 'Three']);
+  assert.deepEqual(
+    s.speakers.map((sp) => sp.id),
+    ['spk-01', 'spk-02', 'spk-03'],
+  );
+});
+
+test('addRooms folds entries through addRoom with the shared kind', () => {
+  const s = addRooms(emptySchedule(), { names: ['Hall A', 'Hall B', 'Hall C'] });
+  assert.deepEqual(
+    s.rooms.map((r) => r.id),
+    ['breakout-1', 'breakout-2', 'breakout-3'],
+  );
+  for (const r of s.rooms) assert.equal(r.kind, 'breakout');
+});
+
+test('addRooms with kind=plenary mints singleton then numbered fallbacks', () => {
+  const s = addRooms(emptySchedule(), { names: ['Main', 'Annex'], kind: 'plenary' });
+  assert.equal(s.rooms[0].id, 'plenary');
+  assert.equal(s.rooms[1].id, 'plenary-2');
+});
+
+test('addRooms skips empty entries', () => {
+  const s = addRooms(emptySchedule(), { names: ['Hall A', '  ', '', 'Hall B'] });
+  assert.equal(s.rooms.length, 2);
+  assert.equal(s.rooms[0].name, 'Hall A');
+  assert.equal(s.rooms[1].name, 'Hall B');
 });
 
 // ───── run ────────────────────────────────────────────────────────────
