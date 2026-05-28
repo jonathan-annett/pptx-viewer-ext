@@ -9,8 +9,7 @@
   "properties": {
     "destinations": {
       "type": "array",
-      "description": "One or more destinations to sync this folder into. Each `uri` must match the URI of a workspace folder open in vscode.dev (see .admin-sync.jsonc for the canonical list).",
-      "minItems": 1,
+      "description": "Destinations to sync this folder into. Each `uri` must match the URI of a workspace folder open in vscode.dev (see .admin-sync.jsonc for the canonical list). Empty array is allowed — represents a not-yet-wired template (generator output). Add destinations via the form editor or by editing the URIs directly.",
       "items": {
         "type": "object",
         "required": ["uri"],

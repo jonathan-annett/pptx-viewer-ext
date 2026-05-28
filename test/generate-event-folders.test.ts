@@ -9,14 +9,35 @@ import { strict as assert } from 'node:assert';
 import { generateEventSchedule } from '../scripts/generate-event-schedule';
 import {
   planEventFolders,
+  roomSyncTemplate,
   sessionSpeakerFilename,
   type FolderGenInput,
 } from '../scripts/generate-event-folders';
+import { expandRoomSyncVariable, parseSyncConfigText } from '../src/sync/configParse';
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
   tests.push([name, fn]);
 };
+
+/**
+ * The plan's `files[]` now mixes per-speaker placeholders and per-room
+ * .roomSync templates. Existing assertions that wanted "every placeholder"
+ * go through this filter so they aren't surprised by the new entries; the
+ * placeholder extension is always provided (default `.pptx`).
+ */
+function placeholdersOnly(
+  files: ReadonlyArray<{ path: string; bytes: Uint8Array }>,
+  extension: string,
+): Array<{ path: string; bytes: Uint8Array }> {
+  return files.filter((f) => f.path.endsWith(extension));
+}
+
+function roomSyncFilesOnly(
+  files: ReadonlyArray<{ path: string; bytes: Uint8Array }>,
+): Array<{ path: string; bytes: Uint8Array }> {
+  return files.filter((f) => f.path.endsWith('.roomSync'));
+}
 
 function planFor(
   layout: 'room-major' | 'day-major',
@@ -60,26 +81,34 @@ test('day-major: every dir starts with eventRoot/<day>/<room>/<timeslot>', () =>
   }
 });
 
-test('one file per speaker slot across all sessions', () => {
+test('one placeholder per speaker slot across all sessions', () => {
   const { schedule, plan } = planFor('room-major');
   const expected = schedule.sessions.reduce((acc, s) => acc + s.speakers.length, 0);
-  assert.equal(plan.files.length, expected);
+  // plan.files now also includes per-room .roomSync templates appended
+  // after the placeholders — filter to placeholder extension before the
+  // count compare.
+  assert.equal(placeholdersOnly(plan.files, '.pptx').length, expected);
 });
 
 test('filenames carry day / room-upper / timeslot / slot / speaker name + extension', () => {
   const { plan } = planFor('room-major');
-  // Pull one filename and sanity-check the shape.
-  const sample = plan.files[0].path.split('/').pop()!;
+  // Pull one placeholder filename and sanity-check the shape — the first
+  // entry may now be a .roomSync template or a placeholder depending on
+  // ordering, so we filter explicitly.
+  const placeholders = placeholdersOnly(plan.files, '.pptx');
+  const sample = placeholders[0].path.split('/').pop()!;
   // e.g. "MON BREAKOUT1 B 1 Alice Smith.pptx" or "MON PLENARY A 1 ...".
   assert.match(sample, /^(MON|TUE|WED) (PLENARY|BREAKOUT\d+) [A-Z] \d+ .+\.pptx$/);
 });
 
 test('filenames in a directory alpha-sort by slot order', () => {
   const { plan } = planFor('room-major');
-  // Group files by directory; for any dir with 2+ entries the sorted order
-  // must match the original speaker slot sequence (1, 2, 3, …).
+  // Group placeholder files by directory; for any dir with 2+ entries the
+  // sorted order must match the original speaker slot sequence (1, 2, 3, …).
+  // .roomSync templates live at the event root, so filtering by extension
+  // also keeps them out of this grouping.
   const byDir = new Map<string, string[]>();
-  for (const f of plan.files) {
+  for (const f of placeholdersOnly(plan.files, '.pptx')) {
     const lastSlash = f.path.lastIndexOf('/');
     const dir = f.path.slice(0, lastSlash);
     const name = f.path.slice(lastSlash + 1);
@@ -124,16 +153,18 @@ test('relocated breakouts land under the plenary folder (post-move room)', () =>
 
 test('zero-byte placeholders when no template is supplied', () => {
   const { plan } = planFor('room-major');
-  for (const f of plan.files) {
+  // Only the speaker-slot placeholders should be zero-byte; .roomSync
+  // templates always carry their JSONC body, so they're filtered out here.
+  for (const f of placeholdersOnly(plan.files, '.pptx')) {
     assert.equal(f.bytes.length, 0, `expected zero-byte placeholder, got ${f.bytes.length}`);
   }
 });
 
-test('custom placeholder bytes are reused for every file', () => {
+test('custom placeholder bytes are reused for every placeholder file', () => {
   const placeholderBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]); // PK\x03\x04
   const { plan } = planFor('room-major', { placeholderBytes });
-  for (const f of plan.files) {
-    assert.equal(f.bytes, placeholderBytes, 'every file should reference the same buffer');
+  for (const f of placeholdersOnly(plan.files, '.pptx')) {
+    assert.equal(f.bytes, placeholderBytes, 'every placeholder should reference the same buffer');
   }
 });
 
@@ -144,15 +175,124 @@ test('eventName override wins over the schedule config name', () => {
 
 test('extension flag drives the filename suffix', () => {
   const { plan } = planFor('room-major', { extension: '.bin' });
-  for (const f of plan.files) {
+  for (const f of placeholdersOnly(plan.files, '.bin')) {
     assert.ok(f.path.endsWith('.bin'), `expected .bin suffix, got ${f.path}`);
   }
+  // Sanity: there ARE placeholders (the filter didn't accidentally
+  // remove everything).
+  assert.ok(placeholdersOnly(plan.files, '.bin').length > 0);
 });
 
 test('extension without leading dot is normalised', () => {
   const { plan } = planFor('room-major', { extension: 'pdf' });
-  for (const f of plan.files) {
+  const placeholders = placeholdersOnly(plan.files, '.pdf');
+  assert.ok(placeholders.length > 0);
+  for (const f of placeholders) {
     assert.ok(f.path.endsWith('.pdf'));
+  }
+});
+
+// ───── .roomSync template emission (workspace-root variant) ──────────────
+
+test('emits one <roomId>.roomSync template per unique room in the schedule', () => {
+  const { schedule, plan } = planFor('room-major');
+  // The schedule should list plenary + at least one breakout — every
+  // room that hosts a session needs its own template.
+  const expectedRoomIds = new Set(schedule.sessions.map((s) => s.roomId));
+  const roomSyncFiles = roomSyncFilesOnly(plan.files);
+  const emittedRoomIds = new Set(
+    roomSyncFiles.map((f) => {
+      const base = f.path.split('/').pop()!;
+      return base.replace(/\.roomSync$/, '');
+    }),
+  );
+  assert.deepEqual(
+    [...emittedRoomIds].sort(),
+    [...expectedRoomIds].sort(),
+    'every roomId appearing in sessions should get a .roomSync template',
+  );
+});
+
+test('.roomSync templates land at the event root, not nested under rooms', () => {
+  // Workspace-root variant per M3 of room-sync-format-v1-plan.md: the
+  // operator opens <eventRoot> as a workspace folder, and ${roomSync}
+  // resolves to the filename prefix. Nested files would break that.
+  const { plan } = planFor('room-major');
+  for (const f of roomSyncFilesOnly(plan.files)) {
+    const tail = f.path.slice(plan.eventRoot.length);
+    // Expected shape: "/<roomId>.roomSync" — exactly one path segment.
+    assert.match(tail, /^\/[^/]+\.roomSync$/, `unexpected nesting for ${f.path}`);
+  }
+});
+
+test('.roomSync template parses cleanly with the relaxed empty-destinations rule', () => {
+  // The generator emits `destinations: []` — the parser relaxation in
+  // configParse.ts must accept this (it's the same parser the editor +
+  // loader use). Round-tripping the bytes verifies the surface contract.
+  const { plan } = planFor('room-major');
+  const sample = roomSyncFilesOnly(plan.files)[0];
+  const text = new TextDecoder().decode(sample.bytes);
+  const parsed = parseSyncConfigText(text);
+  assert.equal(parsed.kind, 'ok', `expected ok parse, got ${parsed.kind === 'error' ? parsed.error : '?'}`);
+  if (parsed.kind === 'ok') {
+    assert.deepEqual(parsed.config.destinations, []);
+  }
+});
+
+test('.roomSync template preserves the ${roomSync} variable literally', () => {
+  // The form editor reads the document text literally — the generator
+  // must NOT pre-substitute ${roomSync}, otherwise the template would be
+  // baked per-file and the operator couldn't see the variable in context.
+  const { plan } = planFor('room-major');
+  const sample = roomSyncFilesOnly(plan.files)[0];
+  const text = new TextDecoder().decode(sample.bytes);
+  assert.match(text, /\$\{roomSync\}/, 'template must contain a literal ${roomSync} token');
+});
+
+test('.roomSync template path-aliases resolve to **/<roomId> via expandRoomSyncVariable', () => {
+  // End-to-end shape: pre-parse expansion (which is what the wired
+  // loader does) replaces ${roomSync} with the roomId, producing the
+  // resolved alias map the planner ultimately sees.
+  const { plan } = planFor('room-major');
+  for (const f of roomSyncFilesOnly(plan.files)) {
+    const roomId = f.path.split('/').pop()!.replace(/\.roomSync$/, '');
+    const rawText = new TextDecoder().decode(f.bytes);
+    const expanded = expandRoomSyncVariable(rawText, roomId);
+    const parsed = parseSyncConfigText(expanded);
+    assert.equal(parsed.kind, 'ok');
+    if (parsed.kind === 'ok') {
+      assert.deepEqual(parsed.config.pathAliases, { [`**/${roomId}`]: '**' });
+    }
+  }
+});
+
+test('.roomSync emission is the same shape regardless of layout', () => {
+  // Workspace-root templates aren't layout-dependent: they describe the
+  // *destination*, not the source tree. Both room-major and day-major
+  // runs should produce the same set of .roomSync files.
+  const roomMajor = planFor('room-major');
+  const dayMajor = planFor('day-major');
+  const names = (p: typeof roomMajor.plan) =>
+    roomSyncFilesOnly(p.files).map((f) => f.path.split('/').pop()!).sort();
+  assert.deepEqual(names(roomMajor.plan), names(dayMajor.plan));
+});
+
+test('roomSyncTemplate body has empty destinations and the **/${roomSync} alias', () => {
+  // Direct test of the helper — covers the case where someone needs the
+  // template body outside the planEventFolders flow (e.g. a future CLI
+  // that prints the template stdout-side).
+  const body = roomSyncTemplate('breakout-7');
+  // The string should mention the roomId in the operator-facing comment
+  // (the variable resolution happens at load time, not in the template).
+  assert.match(body, /breakout-7/);
+  // Parser round-trip confirms the JSONC is valid and empty.
+  const parsed = parseSyncConfigText(body);
+  assert.equal(parsed.kind, 'ok');
+  if (parsed.kind === 'ok') {
+    assert.deepEqual(parsed.config.destinations, []);
+    // Literal alias key is preserved (no pre-substitution).
+    assert.ok('**/${roomSync}' in parsed.config.pathAliases);
+    assert.equal(parsed.config.pathAliases['**/${roomSync}'], '**');
   }
 });
 

@@ -133,8 +133,19 @@ test('missing destinations is rejected', () => {
   err(`{}`, /`destinations` is required/);
 });
 
-test('empty destinations array is rejected', () => {
-  err(`{ "destinations": [] }`, /`destinations` is required/);
+test('empty destinations array is accepted as a not-yet-wired template', () => {
+  // Generator-emitted templates (see scripts/generate-event-folders.ts)
+  // ship with `destinations: []` so the operator can wire them up via the
+  // form editor — the file should parse cleanly so the editor renders the
+  // form without a scary parse-error banner.
+  const got = ok(`{ "destinations": [] }`);
+  assert.deepEqual(got.config.destinations, []);
+});
+
+test('non-array destinations is still rejected', () => {
+  // Defensive: a shape error (e.g. `destinations: "foo"`) is a real
+  // problem, not a not-yet-wired state. Keep the type check strict.
+  err(`{ "destinations": "nope" }`, /`destinations` is required and must be an array/);
 });
 
 test('destination without uri is rejected', () => {

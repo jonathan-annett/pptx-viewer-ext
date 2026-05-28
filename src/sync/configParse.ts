@@ -115,12 +115,19 @@ function validateSchema(raw: unknown): ParseResult {
   const obj = raw as Record<string, unknown>;
 
   const destinationsRaw = obj.destinations;
-  if (!Array.isArray(destinationsRaw) || destinationsRaw.length === 0) {
+  if (!Array.isArray(destinationsRaw)) {
     return {
       kind: 'error',
-      error: '`destinations` is required and must be a non-empty array',
+      error: '`destinations` is required and must be an array',
     };
   }
+  // Empty `destinations: []` is allowed — represents a "not yet wired up"
+  // config. Common for generator-emitted templates (see
+  // `scripts/generate-event-folders.ts`): the file is authored ahead of
+  // time, the operator drags the destination folder(s) into the workspace
+  // and uses the form editor to add the URIs. The topology resolver
+  // tolerates zero destinations (the loop is a no-op) and the planner
+  // emits no per-destination entries for such a source.
 
   const destinations: SyncDestination[] = [];
   for (let i = 0; i < destinationsRaw.length; i++) {
