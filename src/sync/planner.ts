@@ -20,9 +20,10 @@ import { walkTree, type WalkEntry } from './walker';
 import { hashFileAtUri } from './hash';
 import {
   aliasesFromRecord,
+  compileAliases,
   detectAliasCollisions,
   resolveAlias,
-  type PathAlias,
+  type CompiledAlias,
 } from './aliasResolve';
 import {
   getHashCacheSingleton,
@@ -199,15 +200,31 @@ async function planForSource(
   const destExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
   const destInclude = new GlobSet([]); // include filter only meaningful on source
 
-  // Path-aliases (M2 of room-sync-format-v1-plan.md): when present, every
-  // source file's source-relative path goes through `resolveAlias` to derive
-  // its destination-relative path. Files outside every LHS are dropped
-  // (no implicit catch-all — opting into aliases is opting into explicit
-  // sub-tree mapping). Empty record = legacy behaviour, file relpaths flow
-  // through unchanged.
-  const aliasList: PathAlias[] = yamlConfig?.pathAliases
-    ? aliasesFromRecord(yamlConfig.pathAliases)
-    : [];
+  // Path-aliases (M2 + M4 of room-sync-format-v1-plan.md): when present,
+  // every source file's source-relative path goes through `resolveAlias` to
+  // derive its destination-relative path. Files outside every LHS are
+  // dropped (no implicit catch-all — opting into aliases is opting into
+  // explicit sub-tree mapping). Empty record = legacy behaviour, file
+  // relpaths flow through unchanged.
+  //
+  // M4: glob LHS patterns get compiled to anchored regexes with capture
+  // groups; per-alias compile errors (e.g. RHS references more captures
+  // than LHS provides) are logged and the offending alias is skipped —
+  // other aliases in the same config keep working.
+  let compiledAliases: CompiledAlias[] = [];
+  if (yamlConfig?.pathAliases) {
+    const rawAliases = aliasesFromRecord(yamlConfig.pathAliases);
+    if (rawAliases.length > 0) {
+      const { compiled, errors } = compileAliases(rawAliases);
+      compiledAliases = compiled;
+      for (const err of errors) {
+        log(
+          `sync: [alias-compile-error] ${displayConfigUri(source.configUri)}: ` +
+            `"${err.alias.from}" → "${err.alias.to}" — ${err.message}`,
+        );
+      }
+    }
+  }
 
   // One cache instance shared across source + destination walks — the
   // singleton is initialised at activation; tests / no-cache contexts get
@@ -256,7 +273,7 @@ async function planForSource(
         // for hashing — one read per source file, validators see the same content
         // we will (or won't) sync.
         validate: true,
-        aliases: aliasList,
+        aliases: compiledAliases,
       },
       cache,
       sourceStats,
@@ -272,7 +289,7 @@ async function planForSource(
   // Logged once per source walk (the rewrite is paid once, before fanning
   // out to destinations) — collisions are a config-level issue, not a
   // per-destination one. The user fixes them in `.roomSync`'s `path-aliases`.
-  if (aliasList.length > 0) {
+  if (compiledAliases.length > 0) {
     const aliasCollisions = detectAliasCollisions(
       sourceFiles.map((f) => ({
         sourceRelPath: f.aliasOrigin?.sourceRelPath ?? f.relPath,
@@ -461,13 +478,18 @@ interface WalkAndHashOpts {
    */
   validate?: boolean;
   /**
-   * Source-rewrite aliases. When non-empty, each walked entry's relpath is
-   * resolved through the alias list: matches are rewritten with the alias
-   * provenance attached as `aliasOrigin`; non-matches are dropped before
-   * hashing (no I/O cost for files outside every LHS). Only meaningful on
-   * the source walk; the destination walk leaves this empty.
+   * Source-rewrite aliases, pre-compiled. When non-empty, each walked
+   * entry's relpath is resolved through the alias list: matches are
+   * rewritten with the alias provenance attached as `aliasOrigin`;
+   * non-matches are dropped before hashing (no I/O cost for files outside
+   * every LHS). Only meaningful on the source walk; the destination walk
+   * leaves this empty.
+   *
+   * Compiled once per source by the planner (literal aliases stay on a
+   * fast-path string compare; glob aliases use anchored regexes) and
+   * reused for every walked file.
    */
-  aliases?: readonly PathAlias[];
+  aliases?: readonly CompiledAlias[];
 }
 
 /** A walked entry, optionally with its source-rewrite provenance attached. */
@@ -480,7 +502,7 @@ interface WalkAlias extends WalkEntry {
  * passthrough (legacy behaviour); non-empty list → drop entries with no match
  * and rewrite the surviving entries' relpath + aliasOrigin.
  */
-function applyAliases(entries: readonly WalkEntry[], aliases: readonly PathAlias[]): WalkAlias[] {
+function applyAliases(entries: readonly WalkEntry[], aliases: readonly CompiledAlias[]): WalkAlias[] {
   if (aliases.length === 0) return entries.slice();
   const out: WalkAlias[] = [];
   for (const e of entries) {

@@ -47,16 +47,19 @@
     },
     "path-aliases": {
       "type": "object",
-      "description": "Source-rewrite layer. Each entry maps a source-relative directory (LHS) to a destination-relative directory (RHS). When non-empty, the walker emits one stream per LHS — files outside every LHS are not synced. Aliases combine additively; precedence is the order of the entries (first match wins). Useful for unifying day-major source layouts (MON/room1, TUE/room1, …) into a single room-major destination tree.",
+      "description": "Source-rewrite layer. Each entry maps a source-relative directory (LHS) to a destination-relative directory (RHS). When non-empty, only files inside one of the listed LHS directories sync — files outside every LHS are dropped (no implicit catch-all). Aliases combine additively; precedence is the order of the entries (first match wins). Wildcards are supported: `*` matches one path segment and captures its value; `**` matches multiple segments. The n-th wildcard on the LHS feeds the n-th wildcard on the RHS, so `{ \"*/room1\": \"*\" }` unifies MON/room1, TUE/room1, WED/room1 under a single destination keyed by the captured day. Useful for unifying day-major source layouts into a single room-major destination tree.",
       "additionalProperties": {
         "type": "string",
-        "description": "Destination-relative directory. Leave empty to strip the LHS prefix and write files at the destination root."
+        "description": "Destination-relative directory. Leave empty to strip the LHS prefix and write files at the destination root. `*` / `**` wildcards on this side are substitution markers — they're replaced with the n-th captured value from the LHS."
       },
       "examples": [
         {
           "MON/room1": "MON",
           "TUE/room1": "TUE",
           "WED/room1": "WED"
+        },
+        {
+          "*/room1": "*"
         }
       ]
     }

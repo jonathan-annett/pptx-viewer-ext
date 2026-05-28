@@ -153,7 +153,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 
   <section class="card">
     <h2>Path aliases</h2>
-    <p class="hint">Rewrite source-relative directories into destination-relative directories. When non-empty, only files inside one of the listed <em>From</em> directories sync — the destination relpath is <em>To</em> + the sub-path inside <em>From</em>. Useful for unifying day-major layouts (<code>MON/room1</code>, <code>TUE/room1</code>, …) into a room-major destination tree. Precedence is the row order (first match wins) — use the arrow buttons to reorder.</p>
+    <p class="hint">Rewrite source-relative directories into destination-relative directories. When non-empty, only files inside one of the listed <em>From</em> directories sync — the destination relpath is <em>To</em> + the sub-path inside <em>From</em>. Useful for unifying day-major layouts (<code>MON/room1</code>, <code>TUE/room1</code>, …) into a room-major destination tree. Precedence is the row order (first match wins) — use the arrow buttons to reorder. Wildcards are supported: <code>*</code> matches one segment, <code>**</code> matches many, and the n-th wildcard on the <em>From</em> side feeds the n-th wildcard on <em>To</em> — so <code>*/room1</code> → <code>*</code> handles every day with one rule.</p>
     <ul id="alias-list" class="alias-list"></ul>
     <button id="add-alias" class="btn btn-secondary" type="button">+ Add path alias</button>
   </section>
