@@ -246,35 +246,39 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         }
         if (msg.type === 'setConfig') {
           const newText = serialiseConfig(document.getText(), msg.config);
-          if (newText === document.getText()) return;
+          if (newText === document.getText()) {
+            log('sync-config-editor: setConfig produced identical text — skipping write');
+            return;
+          }
+          // Bypass `workspace.applyEdit + document.save()` here because that
+          // pattern reliably dirties the in-memory TextDocument on vscode.dev
+          // but does NOT always flush through to the FSA-backed file — the
+          // dirty flag clears, the bytes never reach disk. Symptom on the
+          // workspace-root .roomSync editor was "form edits survive a tab
+          // round-trip in memory but the file on disk stays unchanged".
+          //
+          // Direct `vscode.workspace.fs.writeFile` to the same URI updates
+          // the file in place (no tmp+rename), so the open TextDocument
+          // reloads from disk via the file watcher rather than being
+          // disposed (see the atomic-write dead-end in CLAUDE.md — that
+          // failure mode is rename-specific). The reload fires
+          // onDidChangeTextDocument, which our docSub suppresses with the
+          // flag below so the form's state isn't clobbered.
           suppressNextDocChange = true;
-          const edit = new vscode.WorkspaceEdit();
-          const fullRange = new vscode.Range(
-            document.positionAt(0),
-            document.positionAt(document.getText().length),
-          );
-          edit.replace(document.uri, fullRange, newText);
-          const applied = await vscode.workspace.applyEdit(edit);
-          if (!applied) {
+          const bytes = new TextEncoder().encode(newText);
+          try {
+            await vscode.workspace.fs.writeFile(document.uri, bytes);
+            log(
+              `sync-config-editor: wrote ${bytes.length} bytes to ` +
+                document.uri.toString(),
+            );
+          } catch (err) {
             suppressNextDocChange = false;
-            log('sync-config-editor: applyEdit rejected');
-          } else {
-            // Persist to disk immediately — the form is a settings-style UI
-            // and the user expects edits to be saved without an explicit
-            // Ctrl-S. In vscode.dev the dirty in-memory buffer can be
-            // discarded when the custom-editor panel is hidden + replaced
-            // (especially for workspace-root .roomSync files), which
-            // manifests as "edits revert on tab navigation" — see
-            // snapshotStore.ts:writeSnapshot for the same applyEdit+save
-            // pattern. Save errors are logged but don't unwind the edit:
-            // the in-memory state is still correct, only persistence
-            // failed (read-only file, FSA permission revoked, etc.).
-            try {
-              await document.save();
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              log(`sync-config-editor: save after applyEdit failed — ${message}`);
-            }
+            const message = err instanceof Error ? err.message : String(err);
+            log(`sync-config-editor: fs.writeFile failed — ${message}`);
+            void vscode.window.showErrorMessage(
+              `Folder Sync: could not save config — ${message}`,
+            );
           }
         } else if (msg.type === 'openWorkspacePlan') {
           // Open the workspace-wide plan in a separate panel — the embedded
