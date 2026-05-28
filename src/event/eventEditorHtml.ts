@@ -649,11 +649,15 @@ function clientScript(): string {
       if (!text) return;
       // Only intercept multi-line content. CRLF, LF, and bare CR all
       // get treated as line breaks (Excel-on-Windows and macOS text
-      // editors disagree about which one to emit).
-      if (text.indexOf('\n') === -1 && text.indexOf('\r') === -1) return;
+      // editors disagree about which one to emit). The \\n / \\r in
+      // this template-literal source emit as the JS escape sequence
+      // \\n / \\r in the output script — writing a literal \\n here
+      // would interpolate to a raw newline character, which would
+      // then break the emitted string / regex literal at runtime.
+      if (text.indexOf('\\n') === -1 && text.indexOf('\\r') === -1) return;
       e.preventDefault();
       const lines = text
-        .split(/\r\n|\n|\r/)
+        .split(/\\r\\n|\\n|\\r/)
         .map(function(l){ return l.trim(); })
         .filter(function(l){ return l.length > 0; });
       if (lines.length === 0) return;
