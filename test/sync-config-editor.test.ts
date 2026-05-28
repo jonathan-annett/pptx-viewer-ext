@@ -23,6 +23,8 @@ function baseVm(overrides: Partial<ConfigEditorViewModel> = {}): ConfigEditorVie
     sourceFolderUri: null,
     claimedElsewhere: [],
     parseError: null,
+    isWorkspaceRoot: false,
+    workspaceRootHandle: '',
     ...overrides,
   };
 }
@@ -138,6 +140,51 @@ test('hint text explains the source + claimed-elsewhere filters', () => {
   // expectation that the dropdown is filtered.
   const html = renderConfigEditorHtml(baseVm(), 'n');
   assert.match(html, /source folder.*filtered out automatically/);
+});
+
+test('default (folder-level) header banner is rendered when isWorkspaceRoot is false', () => {
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.match(html, /<h1>Folder Sync configuration<\/h1>/);
+  // Workspace-root copy must NOT appear in the folder-level case.
+  assert.ok(!/Logical destination:/.test(html), 'workspace-root heading leaked into folder-level render');
+  assert.ok(!/Path aliases are mandatory/.test(html), 'workspace-root mandatory-aliases copy leaked into folder-level render');
+});
+
+test('workspace-root header banner replaces the folder-level intro (M3)', () => {
+  // M3 of room-sync-format-v1-plan.md: a workspace-root named `<dest>.roomSync`
+  // surfaces a distinct intro banner — the prefix is shown as the logical
+  // destination handle, and the mandatory-path-aliases requirement is called
+  // out so the user knows why the aliases section can't be empty.
+  const html = renderConfigEditorHtml(
+    baseVm({ isWorkspaceRoot: true, workspaceRootHandle: 'Room 1' }),
+    'n',
+  );
+  assert.match(html, /<h1>Logical destination: Room 1<\/h1>/);
+  // The folder-level heading must NOT also appear — the banners are
+  // alternatives, not appended together.
+  assert.ok(!/<h1>Folder Sync configuration<\/h1>/.test(html), 'folder-level h1 leaked alongside the workspace-root h1');
+  // Mandatory-aliases copy is the load-bearing piece of UX for the variant.
+  assert.match(html, /Path aliases are mandatory at this location/);
+});
+
+test('workspace-root payload threads isWorkspaceRoot + handle into the data island', () => {
+  const html = renderConfigEditorHtml(
+    baseVm({ isWorkspaceRoot: true, workspaceRootHandle: 'Stage Left' }),
+    'n',
+  );
+  assert.match(html, /"isWorkspaceRoot":true/);
+  assert.match(html, /"workspaceRootHandle":"Stage Left"/);
+});
+
+test('workspace-root handle is HTML-escaped in the heading', () => {
+  // Defensive — workspace folders / filenames are user-controlled inputs in
+  // a sense (the user picks them). Make sure no breakout via the prefix.
+  const html = renderConfigEditorHtml(
+    baseVm({ isWorkspaceRoot: true, workspaceRootHandle: '<img src=x>' }),
+    'n',
+  );
+  assert.ok(!html.includes('<h1>Logical destination: <img'), 'unescaped HTML leaked into the heading');
+  assert.match(html, /<h1>Logical destination: &lt;img src=x&gt;<\/h1>/);
 });
 
 test('renders the Path aliases section + add button', () => {

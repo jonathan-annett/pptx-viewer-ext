@@ -20,6 +20,9 @@ import {
 } from './topology';
 import {
   SYNC_CONFIG_GLOB,
+  configFilenameFromUri,
+  isNamedRoomSyncFilename,
+  isWorkspaceRootNamedConfig,
   partitionConfigUris,
 } from './configFilenames';
 import { log } from '../log';
@@ -95,9 +98,28 @@ export class SyncManager implements vscode.Disposable {
 
     // Find every recognised source-config file. `findFiles` respects the
     // user's files.exclude settings but ignores .gitignore by default —
-    // fine for our purposes. The glob honours both `.sync.jsonc` and
-    // `.roomSync`; conflict detection below resolves the same-folder pair.
-    const configUris = await vscode.workspace.findFiles(CONFIG_GLOB);
+    // fine for our purposes. The glob honours `.sync.jsonc`, `.roomSync`,
+    // and named `<dest>.roomSync` (M3). Named variants are workspace-root
+    // only; the post-discovery filter below drops nested ones with a log
+    // line so a stray file deep in the tree doesn't silently become a
+    // ghost source.
+    const allConfigUris = await vscode.workspace.findFiles(CONFIG_GLOB);
+    const configUris: vscode.Uri[] = [];
+    for (const u of allConfigUris) {
+      const filename = configFilenameFromUri(u);
+      if (isNamedRoomSyncFilename(filename)) {
+        const owner = workspaceFolderOf(u, folders);
+        if (!owner || !isWorkspaceRootNamedConfig(u.path, owner.uri.path)) {
+          log(
+            `sync: ignoring named .roomSync outside a workspace folder root: ` +
+              u.toString() +
+              ` (M3 logical-destination handles only apply at the workspace root)`,
+          );
+          continue;
+        }
+      }
+      configUris.push(u);
+    }
     const { keep, conflicts: rawConflicts } = partitionConfigUris(configUris);
     // Marshal the pure-helper output into vscode.Uri-shaped conflict
     // records that the rest of the extension consumes.

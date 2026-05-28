@@ -57,6 +57,9 @@
           },
           {
             "filenamePattern": ".roomSync"
+          },
+          {
+            "filenamePattern": "*.roomSync"
           }
         ],
         "priority": "default"
@@ -89,6 +92,10 @@
       },
       {
         "fileMatch": "**/.roomSync",
+        "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/*.roomSync",
         "url": "./schemas/sync.schema.json"
       }
     ],

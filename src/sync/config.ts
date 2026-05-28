@@ -10,7 +10,15 @@
 // via the Output Channel.
 
 import * as vscode from 'vscode';
-import { parseSyncConfigText, type SyncConfig } from './configParse';
+import {
+  parseSyncConfigText,
+  validateWorkspaceRootConfig,
+  type SyncConfig,
+} from './configParse';
+import {
+  configFilenameFromUri,
+  isWorkspaceRootNamedConfig,
+} from './configFilenames';
 
 export type { SyncConfig, SyncDestination } from './configParse';
 export { parseSyncConfigText } from './configParse';
@@ -73,6 +81,25 @@ export async function loadSyncConfig(
       config: null,
       error: parsed.error,
     };
+  }
+
+  // M3 (room-sync-format-v1-plan.md): workspace-root named `.roomSync`
+  // configs require a non-empty `path-aliases` field. The bare `.roomSync`
+  // and `.sync.jsonc` at any depth — including workspace root — keep the
+  // legacy "this folder is the source" semantics where aliases are
+  // optional, so the validator is gated by name + location.
+  if (isWorkspaceRootNamedConfig(configUri.path, workspaceFolderUri.path)) {
+    const filename = configFilenameFromUri(configUri);
+    const validation = validateWorkspaceRootConfig(parsed.config, filename);
+    if (validation) {
+      return {
+        configUri,
+        sourceFolderUri,
+        workspaceFolderUri,
+        config: null,
+        error: validation.error,
+      };
+    }
   }
 
   return {

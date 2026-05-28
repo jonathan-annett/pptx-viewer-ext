@@ -6,7 +6,11 @@
 // Run with: npm run test:sync-jsonc
 
 import { strict as assert } from 'node:assert';
-import { parseSyncConfigText, type SyncConfig } from '../src/sync/configParse';
+import {
+  parseSyncConfigText,
+  validateWorkspaceRootConfig,
+  type SyncConfig,
+} from '../src/sync/configParse';
 
 const tests: Array<[string, () => void]> = [];
 const test = (name: string, fn: () => void): void => {
@@ -265,6 +269,33 @@ test('path-aliases with a non-string value is rejected', () => {
     `{ "destinations": [{ "uri": "${URI_A}" }], "path-aliases": { "a": 42 } }`,
     /`path-aliases`\["a"\] must be a string/,
   );
+});
+
+// ───── workspace-root validation (M3 of room-sync-format-v1-plan) ────────
+
+test('validateWorkspaceRootConfig accepts a config with non-empty path-aliases', () => {
+  const config: SyncConfig = {
+    destinations: [{ uri: URI_A }],
+    include: [],
+    exclude: [],
+    pathAliases: { 'MON/room1': 'MON' },
+  };
+  assert.equal(validateWorkspaceRootConfig(config, 'Room1.roomSync'), null);
+});
+
+test('validateWorkspaceRootConfig rejects an empty path-aliases record', () => {
+  const config: SyncConfig = {
+    destinations: [{ uri: URI_A }],
+    include: [],
+    exclude: [],
+    pathAliases: {},
+  };
+  const got = validateWorkspaceRootConfig(config, 'Room1.roomSync');
+  assert.ok(got, 'expected an error for missing path-aliases');
+  // The error message names the file (so the user can find the offending
+  // config in a workspace with several) and explains the mandatory field.
+  assert.match(got!.error, /Room1\.roomSync/);
+  assert.match(got!.error, /path-aliases/);
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

@@ -145,6 +145,38 @@ function validateSchema(raw: unknown): ParseResult {
   };
 }
 
+/**
+ * Validation pass that runs after the generic schema parse for configs at
+ * the workspace-root location (`<dest>.roomSync`, M3 of
+ * [[room-sync-format-v1-plan]]). The on-disk shape is the same as a
+ * folder-level config — same parser — but the workspace-root variant has
+ * tighter requirements: `path-aliases` is mandatory, because the source
+ * folder is the workspace root and without aliases the engine would have
+ * no signal for what to walk under it.
+ *
+ * Pure function: takes a parsed config + the filename (for the error
+ * message's UX context) and returns an error sentinel or null on success.
+ * Caller decides how to surface — the wired loader converts to a
+ * SourceLoad error string.
+ */
+export function validateWorkspaceRootConfig(
+  config: SyncConfig,
+  filename: string,
+): { error: string } | null {
+  if (Object.keys(config.pathAliases).length === 0) {
+    return {
+      error:
+        `${filename} sits at the workspace folder root and must declare a ` +
+        `non-empty \`path-aliases\` field — without aliases the sync engine ` +
+        `has no signal for which sub-trees to walk under the workspace root. ` +
+        `Add at least one "<source-dir>": "<dest-dir>" pair, or move this ` +
+        `file into a sub-folder to use the legacy "this folder is the source" ` +
+        `semantics.`,
+    };
+  }
+  return null;
+}
+
 function toAliasRecord(
   raw: unknown,
 ): { kind: 'ok'; value: Record<string, string> } | { kind: 'error'; error: string } {

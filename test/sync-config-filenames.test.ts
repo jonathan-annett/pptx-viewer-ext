@@ -9,7 +9,9 @@ import {
   SYNC_CONFIG_FILENAMES,
   SYNC_CONFIG_GLOB,
   configFilenameFromUri,
+  isNamedRoomSyncFilename,
   isSyncConfigFilename,
+  isWorkspaceRootNamedConfig,
   parentPathOf,
   partitionConfigUris,
 } from '../src/sync/configFilenames';
@@ -28,11 +30,13 @@ test('SYNC_CONFIG_FILENAMES lists both honoured names', () => {
   assert.deepEqual(Array.from(SYNC_CONFIG_FILENAMES), ['.sync.jsonc', '.roomSync']);
 });
 
-test('SYNC_CONFIG_GLOB matches both filenames via brace expansion', () => {
-  // Lock the literal — schema registration, watcher, and findFiles all
-  // share this glob. A regression that drops one name would silently
-  // hide configs from discovery.
-  assert.equal(SYNC_CONFIG_GLOB, '**/{.sync.jsonc,.roomSync}');
+test('SYNC_CONFIG_GLOB matches every honoured filename via brace expansion', () => {
+  // Lock the literal — schema registration, watcher, findFiles, and the
+  // source-intent probes all share this glob. A regression that drops
+  // one alternative would silently hide configs from discovery. The
+  // M3-named `*.roomSync` files are matched here too; the workspace-root
+  // requirement is enforced post-discovery in the manager.
+  assert.equal(SYNC_CONFIG_GLOB, '**/{.sync.jsonc,.roomSync,*.roomSync}');
 });
 
 test('isSyncConfigFilename recognises both names, rejects others', () => {
@@ -138,6 +142,49 @@ test('empty input → empty output', () => {
   const { keep, conflicts } = partitionConfigUris([]);
   assert.equal(keep.length, 0);
   assert.equal(conflicts.length, 0);
+});
+
+// ───── workspace-root named configs (M3) ──────────────────────────────
+
+test('isNamedRoomSyncFilename identifies the named variant only', () => {
+  assert.ok(isNamedRoomSyncFilename('Room1.roomSync'));
+  assert.ok(isNamedRoomSyncFilename('Stage Left.roomSync'));
+  // Bare `.roomSync` is the folder-level variant — not "named".
+  assert.ok(!isNamedRoomSyncFilename('.roomSync'));
+  // Legacy and unrelated names must not match.
+  assert.ok(!isNamedRoomSyncFilename('.sync.jsonc'));
+  assert.ok(!isNamedRoomSyncFilename('roomSync'));
+  assert.ok(!isNamedRoomSyncFilename('Room1.roomsync')); // case-sensitive
+  // Suffix-only-but-not-extension shouldn't match — defensive.
+  assert.ok(!isNamedRoomSyncFilename('something.roomSync.bak'));
+});
+
+test('isWorkspaceRootNamedConfig accepts a named config directly under the ws folder', () => {
+  // Trailing-slash and no-trailing-slash workspace folder paths should
+  // both resolve correctly — vscode.Uri may carry either shape depending
+  // on the source URI scheme.
+  assert.ok(isWorkspaceRootNamedConfig('/ws/Room1.roomSync', '/ws'));
+  assert.ok(isWorkspaceRootNamedConfig('/ws/Room1.roomSync', '/ws/'));
+});
+
+test('isWorkspaceRootNamedConfig rejects the bare .roomSync at ws root', () => {
+  // The bare .roomSync at workspace root is the legacy "this folder is the
+  // source" semantics — path-aliases is optional there, so the M3
+  // mandatory-aliases validation must NOT fire on it.
+  assert.ok(!isWorkspaceRootNamedConfig('/ws/.roomSync', '/ws'));
+});
+
+test('isWorkspaceRootNamedConfig rejects a named .roomSync in a sub-folder', () => {
+  // Nested below the workspace root → legacy folder-level semantics, even
+  // though the filename looks named. The mandatory-aliases rule only
+  // applies at the workspace folder root.
+  assert.ok(!isWorkspaceRootNamedConfig('/ws/sub/Room1.roomSync', '/ws'));
+});
+
+test('isWorkspaceRootNamedConfig rejects .sync.jsonc at ws root', () => {
+  // The named-variant rule only applies to .roomSync — the legacy
+  // .sync.jsonc filename never carries M3 semantics.
+  assert.ok(!isWorkspaceRootNamedConfig('/ws/.sync.jsonc', '/ws'));
 });
 
 let failed = 0;

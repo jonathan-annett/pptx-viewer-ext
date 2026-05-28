@@ -13,15 +13,72 @@ export const SYNC_CONFIG_FILENAMES = ['.sync.jsonc', '.roomSync'] as const;
 export type SyncConfigFilename = (typeof SYNC_CONFIG_FILENAMES)[number];
 
 /**
- * Glob matching every recognised source-config filename, anywhere in the
- * tree. Brace expansion is part of vscode's glob dialect (and minimatch's),
- * so this works in both `workspace.findFiles` and `createFileSystemWatcher`.
+ * Discovery glob — matches every honoured source-config filename anywhere
+ * in the tree:
+ *  - `.sync.jsonc`         (legacy folder-level)
+ *  - `.roomSync`           (forward folder-level alias, M1)
+ *  - `<dest>.roomSync`     (workspace-root logical-destination handle, M3)
+ *
+ * Minimatch's `*` doesn't cross a leading dot, so `*.roomSync` matches
+ * `Room1.roomSync` etc. but not the bare `.roomSync` (which the explicit
+ * alternative covers). The M3 *workspace-root-only* semantics for named
+ * `.roomSync` files are enforced in the manager's post-discovery filter,
+ * not at the glob layer — a named `.roomSync` deep in a sub-folder is
+ * still matched here, then logged + dropped before it reaches the loader.
+ *
+ * Used by `workspace.findFiles`, `createFileSystemWatcher`, the
+ * source-intent probes in destinationOnlyWired/restoreFlow, and the
+ * schema-registration `fileMatch` (which gets a tree-rooted form so the
+ * IntelliSense surface is identical for both variants).
  */
-export const SYNC_CONFIG_GLOB = '**/{.sync.jsonc,.roomSync}';
+export const SYNC_CONFIG_GLOB = '**/{.sync.jsonc,.roomSync,*.roomSync}';
 
 /** True when the given filename (no path) is a recognised source-config name. */
 export function isSyncConfigFilename(name: string): name is SyncConfigFilename {
   return (SYNC_CONFIG_FILENAMES as readonly string[]).includes(name);
+}
+
+/**
+ * True iff `filename` is a workspace-root **named** `.roomSync` config —
+ * i.e. ends with `.roomSync` AND has a non-empty prefix. The bare
+ * `.roomSync` (a folder-level config that happens to sit at the workspace
+ * root) returns false: its semantics are the legacy "this folder is a
+ * source", not the M3 "logical destination handle".
+ *
+ * `Room1.roomSync` → true; `.roomSync` → false; `.sync.jsonc` → false;
+ * `roomSync` (no dot prefix) → false.
+ */
+export function isNamedRoomSyncFilename(filename: string): boolean {
+  const idx = filename.lastIndexOf('.roomSync');
+  // Must end with `.roomSync` AND have at least one prefix char.
+  return idx > 0 && filename.slice(idx) === '.roomSync';
+}
+
+/**
+ * True iff the config at `configPath` is a workspace-root named-`.roomSync`
+ * config: it sits directly under `workspaceFolderPath` AND its filename is
+ * a named variant ({@link isNamedRoomSyncFilename}).
+ *
+ * Both arguments are `.path`-style strings — caller passes `vscode.Uri.path`
+ * fields. Keeping the helper string-typed (vs. taking `vscode.Uri`) is what
+ * makes this module testable under plain Node.
+ *
+ * Returns false for folder-level configs at the workspace root (`.roomSync`,
+ * `.sync.jsonc`) and for any config nested below the root — those use the
+ * legacy semantics, where `path-aliases` is optional and the source folder
+ * is the file's containing directory.
+ */
+export function isWorkspaceRootNamedConfig(
+  configPath: string,
+  workspaceFolderPath: string,
+): boolean {
+  const parent = parentPathOf({ path: configPath });
+  const wsf = workspaceFolderPath.endsWith('/') && workspaceFolderPath.length > 1
+    ? workspaceFolderPath.slice(0, -1)
+    : workspaceFolderPath;
+  if (parent !== wsf) return false;
+  const filename = configFilenameFromUri({ path: configPath });
+  return isNamedRoomSyncFilename(filename);
 }
 
 /**

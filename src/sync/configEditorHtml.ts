@@ -11,6 +11,19 @@
 import type { SyncConfig } from './configParse';
 import { decisionWiringScript, planContentStyles } from './planHtml';
 
+/**
+ * Minimal HTML-escape — only the four characters that change meaning inside
+ * an HTML element or unquoted attribute. The workspace-root handle goes into
+ * an `<h1>` and a `<code>`, both contexts where this set suffices.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export interface WorkspaceFolderEntry {
   /** URI string — the stable identifier persisted in `.sync.jsonc`. */
   uri: string;
@@ -45,6 +58,26 @@ export interface ConfigEditorViewModel {
   claimedElsewhere: string[];
   /** If the document failed to parse, the error to surface in the banner. */
   parseError: string | null;
+  /**
+   * True when this config file is a workspace-root named `.roomSync` (M3 of
+   * room-sync-format-v1-plan.md). The editor surfaces a distinct intro
+   * banner explaining the "logical destination handle" semantics, and the
+   * Path aliases section becomes mandatory (the loader rejects saves with
+   * an empty record at this location).
+   *
+   * Detected from the document URI: it sits directly under a workspace
+   * folder root AND the filename has a non-empty prefix before `.roomSync`.
+   * The bare `.roomSync` (folder-level config at the workspace root) keeps
+   * the legacy semantics — this flag is false for it.
+   */
+  isWorkspaceRoot: boolean;
+  /**
+   * Human-readable filename prefix when {@link isWorkspaceRoot} is true —
+   * e.g. `Room 1` for a file named `Room 1.roomSync`. Used as the editor's
+   * heading line so the operator recognises which logical destination they
+   * are configuring. Empty string when not at workspace root.
+   */
+  workspaceRootHandle: string;
 }
 
 /**
@@ -66,7 +99,25 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     sourceFolderUri: vm.sourceFolderUri,
     claimedElsewhere: vm.claimedElsewhere,
     parseError: vm.parseError,
+    isWorkspaceRoot: vm.isWorkspaceRoot,
+    workspaceRootHandle: vm.workspaceRootHandle,
   }).replace(/</g, '\\u003c');
+
+  // Workspace-root variant banner — only rendered for named `<dest>.roomSync`
+  // configs at a workspace folder root. Explains the M3 semantics: the
+  // filename prefix is a UX handle (not parsed), path-aliases is mandatory,
+  // and the source folder is the entire workspace. The folder-level intro
+  // banner is replaced — not appended — so the user sees the right framing
+  // up top.
+  const headerBlock = vm.isWorkspaceRoot
+    ? `<header class="page-header">
+    <h1>Logical destination: ${escapeHtml(vm.workspaceRootHandle || '(unnamed)')}</h1>
+    <p class="subtle">This <code>${escapeHtml(vm.workspaceRootHandle)}.roomSync</code> file lives at the workspace folder root. The filename prefix is a human-readable handle for the destination group — it is not parsed, and <code>destinations[]</code> below stays authoritative. <strong>Path aliases are mandatory at this location</strong>: without them the sync engine has no signal for which sub-trees to walk under the workspace root.</p>
+  </header>`
+    : `<header class="page-header">
+    <h1>Folder Sync configuration</h1>
+    <p class="subtle">Edits here are written back to <code>.sync.jsonc</code> with comments preserved. Use <em>Reopen with…</em> to edit as raw text.</p>
+  </header>`;
 
   return `<!doctype html>
 <html>
@@ -77,10 +128,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 <style>${STYLE}${planContentStyles()}${EMBEDDED_PLAN_STYLE}</style>
 </head>
 <body>
-  <header class="page-header">
-    <h1>Folder Sync configuration</h1>
-    <p class="subtle">Edits here are written back to <code>.sync.jsonc</code> with comments preserved. Use <em>Reopen with…</em> to edit as raw text.</p>
-  </header>
+  ${headerBlock}
 
   <div id="parse-error" class="banner warn" hidden></div>
 

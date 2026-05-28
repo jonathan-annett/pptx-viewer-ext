@@ -20,6 +20,10 @@ import { applyEdits, modify, type FormattingOptions } from 'jsonc-parser';
 import { parseSyncConfigText, type SyncConfig } from './configParse';
 import { renderConfigEditorHtml } from './configEditorHtml';
 import {
+  configFilenameFromUri,
+  isWorkspaceRootNamedConfig,
+} from './configFilenames';
+import {
   renderPlanChips,
   renderPlanPairs,
   toViewModel,
@@ -316,6 +320,7 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
     const parsed = parseSyncConfigText(document.getText());
     const config = parsed.kind === 'ok' ? parsed.config : emptyConfig();
     const parseError = parsed.kind === 'error' ? parsed.error : null;
+    const { isWorkspaceRoot, workspaceRootHandle } = workspaceRootFlagsFor(document.uri);
     return renderConfigEditorHtml(
       {
         initialConfig: config,
@@ -323,10 +328,42 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         sourceFolderUri: sourceFolderUriFor(document.uri),
         claimedElsewhere: claimedByOtherSources(this.manager, document.uri),
         parseError,
+        isWorkspaceRoot,
+        workspaceRootHandle,
       },
       makeNonce(),
     );
   }
+}
+
+/**
+ * Compute the M3 workspace-root flags for a given document URI:
+ *  - `isWorkspaceRoot` — true iff the file is a named `<dest>.roomSync` at a
+ *    workspace folder root.
+ *  - `workspaceRootHandle` — the filename prefix (e.g. `Room 1` for
+ *    `Room 1.roomSync`) when the flag is true; empty string otherwise.
+ *
+ * The handle is informational only — the loader doesn't parse it, the
+ * planner doesn't consume it. It exists so the editor's heading reflects
+ * which logical destination the operator is configuring.
+ */
+function workspaceRootFlagsFor(documentUri: vscode.Uri): {
+  isWorkspaceRoot: boolean;
+  workspaceRootHandle: string;
+} {
+  const folder = vscode.workspace.getWorkspaceFolder(documentUri);
+  if (!folder) return { isWorkspaceRoot: false, workspaceRootHandle: '' };
+  const isWorkspaceRoot = isWorkspaceRootNamedConfig(
+    documentUri.path,
+    folder.uri.path,
+  );
+  if (!isWorkspaceRoot) return { isWorkspaceRoot: false, workspaceRootHandle: '' };
+  const filename = configFilenameFromUri(documentUri);
+  // The handle is everything before `.roomSync` — empty extension means the
+  // bare `.roomSync` case, which `isWorkspaceRootNamedConfig` would have
+  // rejected, so we're guaranteed a non-empty prefix here.
+  const handle = filename.slice(0, filename.lastIndexOf('.roomSync'));
+  return { isWorkspaceRoot: true, workspaceRootHandle: handle };
 }
 
 // ───── helpers ─────────────────────────────────────────────────────────
