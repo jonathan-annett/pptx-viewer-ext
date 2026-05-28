@@ -145,6 +145,36 @@ export function setDays(schedule: EventSchedule, days: string[]): EventSchedule 
   return { ...schedule, config: { ...schedule.config, days: [...days] } };
 }
 
+/**
+ * Set the default timeslot labels used when ensureTimeslotsByDay seeds a
+ * newly-added day. Each label is trimmed; empties + duplicates dropped;
+ * invalid labels (filename-hostile chars) silently no-op the whole call
+ * to keep a stale-tab post from corrupting the field. Empty cleaned list
+ * clears the field (so the helper falls back to config-derived seeding).
+ */
+export function setDefaultTimeslots(
+  schedule: EventSchedule,
+  labels: string[],
+): EventSchedule {
+  const cleaned = labels.map((l) => l.trim()).filter((l) => l.length > 0);
+  for (const l of cleaned) {
+    if (!isValidTimeslotLabel(l)) return schedule;
+  }
+  const seen = new Set<string>();
+  const unique = cleaned.filter((l) => {
+    if (seen.has(l)) return false;
+    seen.add(l);
+    return true;
+  });
+  return {
+    ...schedule,
+    config: {
+      ...schedule.config,
+      defaultTimeslots: unique.length > 0 ? unique : undefined,
+    },
+  };
+}
+
 export function addSpeaker(schedule: EventSchedule, name: string): EventSchedule {
   const trimmed = name.trim();
   if (!trimmed) return schedule;
@@ -419,6 +449,15 @@ function parseConfig(raw: unknown, errors: string[]): EventConfig {
       (result as unknown as Record<string, unknown>)[k] = v;
     }
   }
+  // `defaultTimeslots` is optional → not in DEFAULT_CONFIG, so the loop
+  // above doesn't see it. Pick it up separately. Only adopt the value
+  // when it's a non-empty array of strings; empty / malformed leaves
+  // the field undefined so ensureTimeslotsByDay falls through to the
+  // config-derived list.
+  if (Array.isArray(c.defaultTimeslots)) {
+    const arr = c.defaultTimeslots.filter((v): v is string => typeof v === 'string');
+    if (arr.length > 0) result.defaultTimeslots = arr;
+  }
   return result;
 }
 
@@ -640,7 +679,16 @@ export function ensureTimeslotsByDay(schedule: EventSchedule): EventSchedule {
     if (Array.isArray(current[day])) {
       next[day] = current[day];
     } else {
-      next[day] = timeslotsForDay(schedule.config, i);
+      // Seed a missing day from config.defaultTimeslots if the user has
+      // set one (lets them name the slots once and have new days inherit
+      // those labels); otherwise fall through to the deterministic
+      // per-config list timeslotsForDay produces from the breakout knobs.
+      const defaults = schedule.config.defaultTimeslots;
+      if (Array.isArray(defaults) && defaults.length > 0) {
+        next[day] = [...defaults];
+      } else {
+        next[day] = timeslotsForDay(schedule.config, i);
+      }
       changed = true;
     }
   }

@@ -25,7 +25,12 @@
         "speakerPoolSize": { "type": "number" },
         "speakersPerBreakoutMin": { "type": "number" },
         "speakersPerBreakoutMax": { "type": "number" },
-        "relocations": { "type": "number" }
+        "relocations": { "type": "number" },
+        "defaultTimeslots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Default timeslot labels used to seed newly-added days. Absent/empty falls through to the deterministic config-derived list (timeslotsForDay)."
+        }
       }
     },
     "timeslotsByDay": {

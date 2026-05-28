@@ -77,6 +77,8 @@ function renderParseBanner(errors: readonly string[]): string {
 }
 
 function renderHeader(s: EventSchedule): string {
+  const defaults = s.config.defaultTimeslots;
+  const defaultsValue = Array.isArray(defaults) ? defaults.join(', ') : '';
   return `<header class="evt-head">
     <h1>Event schedule</h1>
     <div class="evt-row">
@@ -89,6 +91,12 @@ function renderHeader(s: EventSchedule): string {
       <label class="evt-field">
         <span>Days (comma-separated, in order)</span>
         <input type="text" id="event-days" value="${escapeAttr(s.config.days.join(', '))}" autocomplete="off" placeholder="MON, TUE, WED">
+      </label>
+    </div>
+    <div class="evt-row">
+      <label class="evt-field">
+        <span>Default timeslot labels for new days <span class="muted">(comma-separated, optional)</span></span>
+        <input type="text" id="event-default-timeslots" value="${escapeAttr(defaultsValue)}" autocomplete="off" placeholder="A, B, C, D">
       </label>
     </div>
   </header>`;
@@ -556,6 +564,9 @@ function clientScript(): string {
       } else if (t.id === 'event-days') {
         const days = t.value.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
         post({ type: 'setDays', days: days });
+      } else if (t.id === 'event-default-timeslots') {
+        const labels = t.value.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+        post({ type: 'setDefaultTimeslots', labels: labels });
       }
     });
 

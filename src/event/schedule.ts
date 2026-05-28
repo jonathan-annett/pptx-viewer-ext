@@ -41,6 +41,17 @@ export interface EventConfig {
    * available.
    */
   relocations: number;
+  /**
+   * Optional default timeslot labels for newly-added days. When the user
+   * adds a day to `days` (via the comma-separated input or a hand-edit),
+   * the new day's `timeslotsByDay` entry is seeded with this list.
+   * Absent / empty → fall through to the deterministic per-day list
+   * `timeslotsForDay(config, dayIndex)` computes from the breakout knobs.
+   *
+   * Does NOT affect the generator's behaviour — `generateEventSchedule`
+   * still produces its A-onward sequence based on the slot count.
+   */
+  defaultTimeslots?: string[];
 }
 
 export interface EventSpeaker {

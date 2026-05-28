@@ -30,6 +30,7 @@ import {
   renameTimeslot,
   reorderTimeslots,
   setDays,
+  setDefaultTimeslots,
   setEventName,
   setSessionKind,
   setSessionSpeakers,
@@ -648,6 +649,53 @@ test('addRooms skips empty entries', () => {
   assert.equal(s.rooms.length, 2);
   assert.equal(s.rooms[0].name, 'Hall A');
   assert.equal(s.rooms[1].name, 'Hall B');
+});
+
+test('setDefaultTimeslots: trims, dedupes, validates, and clears on empty', () => {
+  let s = emptySchedule();
+  s = setDefaultTimeslots(s, ['  A ', 'B', 'A', 'C']);
+  assert.deepEqual(s.config.defaultTimeslots, ['A', 'B', 'C'], 'trim + dedupe');
+  // Invalid char → no-op (whole call refused defensively).
+  const before = s;
+  s = setDefaultTimeslots(s, ['X', 'Y/Z', 'W']);
+  assert.equal(s, before);
+  // Empty cleaned list → clears the field.
+  s = setDefaultTimeslots(s, ['', '   ']);
+  assert.equal(s.config.defaultTimeslots, undefined);
+});
+
+test('ensureTimeslotsByDay seeds new days from defaultTimeslots when set', () => {
+  let s = emptySchedule();
+  s = setDefaultTimeslots(s, ['Morning', 'Lunch', 'Afternoon']);
+  s = setDays(s, ['FRI', 'SAT', 'SUN']);
+  s = ensureTimeslotsByDay(s);
+  assert.deepEqual(s.timeslotsByDay!.FRI, ['Morning', 'Lunch', 'Afternoon']);
+  assert.deepEqual(s.timeslotsByDay!.SAT, ['Morning', 'Lunch', 'Afternoon']);
+  assert.deepEqual(s.timeslotsByDay!.SUN, ['Morning', 'Lunch', 'Afternoon']);
+});
+
+test('ensureTimeslotsByDay preserves existing per-day lists when defaults are set', () => {
+  let s = emptySchedule();
+  s = setDefaultTimeslots(s, ['Morning', 'Lunch']);
+  s = setDays(s, ['MON', 'TUE']);
+  s = { ...s, timeslotsByDay: { MON: ['Custom-A', 'Custom-B'] } };
+  s = ensureTimeslotsByDay(s);
+  // MON keeps its custom list; TUE gets the default seed.
+  assert.deepEqual(s.timeslotsByDay!.MON, ['Custom-A', 'Custom-B']);
+  assert.deepEqual(s.timeslotsByDay!.TUE, ['Morning', 'Lunch']);
+});
+
+test('defaultTimeslots round-trips through marshal/parse; absent when empty', () => {
+  let s = emptySchedule();
+  s = setDefaultTimeslots(s, ['A', 'B', 'C']);
+  const text = marshalSchedule(s);
+  assert.ok(/"defaultTimeslots"/.test(text));
+  const { schedule } = parseSchedule(text);
+  assert.deepEqual(schedule.config.defaultTimeslots, ['A', 'B', 'C']);
+  // Clear + marshal → field omitted.
+  const cleared = setDefaultTimeslots(s, []);
+  const text2 = marshalSchedule(cleared);
+  assert.ok(!/"defaultTimeslots"/.test(text2));
 });
 
 test('isStructurallyEmpty: empty + cleared schedules count; populated does not', () => {

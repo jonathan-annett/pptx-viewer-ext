@@ -42,6 +42,7 @@ import {
   renameTimeslot,
   reorderTimeslots,
   setDays,
+  setDefaultTimeslots,
   setEventName,
   setSessionKind,
   setSessionSpeakers,
@@ -162,6 +163,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
             break;
           case 'setDays':
             await mutate((s) => setDays(s, msg.days));
+            break;
+          case 'setDefaultTimeslots':
+            await mutate((s) => setDefaultTimeslots(s, msg.labels));
             break;
           case 'addSpeaker':
             await mutate((s) => addSpeaker(s, msg.name));
@@ -387,6 +391,7 @@ export interface EventEditorViewModel {
 type WebviewMessage =
   | { type: 'setEventName'; name: string }
   | { type: 'setDays'; days: string[] }
+  | { type: 'setDefaultTimeslots'; labels: string[] }
   | { type: 'addSpeaker'; name: string }
   | { type: 'addSpeakers'; names: string[] }
   | { type: 'renameSpeaker'; speakerId: string; name: string }
