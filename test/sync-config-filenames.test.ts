@@ -14,6 +14,7 @@ import {
   isWorkspaceRootNamedConfig,
   parentPathOf,
   partitionConfigUris,
+  roomSyncHandle,
 } from '../src/sync/configFilenames';
 
 const tests: Array<[string, () => void]> = [];
@@ -185,6 +186,57 @@ test('isWorkspaceRootNamedConfig rejects .sync.jsonc at ws root', () => {
   // The named-variant rule only applies to .roomSync — the legacy
   // .sync.jsonc filename never carries M3 semantics.
   assert.ok(!isWorkspaceRootNamedConfig('/ws/.sync.jsonc', '/ws'));
+});
+
+// ───── roomSyncHandle (v1 follow-up: ${roomSync} template variable) ──────
+
+test('roomSyncHandle: workspace-root named .roomSync → filename prefix', () => {
+  // The M3 logical-destination case: the prefix is the handle that the
+  // generator embeds into the template, so the resolved handle exactly
+  // matches the prefix used to name the file.
+  assert.equal(roomSyncHandle('/ws/breakout-1.roomSync', '/ws'), 'breakout-1');
+  assert.equal(roomSyncHandle('/ws/Room 1.roomSync', '/ws'), 'Room 1');
+});
+
+test('roomSyncHandle: handles trailing slash on workspace folder path', () => {
+  // vscode.Uri.path may or may not carry a trailing slash depending on the
+  // URI scheme — the helper must normalise.
+  assert.equal(roomSyncHandle('/ws/breakout-1.roomSync', '/ws/'), 'breakout-1');
+});
+
+test('roomSyncHandle: folder-level .sync.jsonc → enclosing folder basename', () => {
+  // The most common authoring case: the folder *is* the source, named
+  // after the room. The variable resolves to the room name.
+  assert.equal(
+    roomSyncHandle('/ws/Events/Room 1/.sync.jsonc', '/ws'),
+    'Room 1',
+  );
+});
+
+test('roomSyncHandle: folder-level .roomSync → enclosing folder basename', () => {
+  // Same as above but with the forward alias filename.
+  assert.equal(
+    roomSyncHandle('/ws/Mon-Stage/.roomSync', '/ws'),
+    'Mon-Stage',
+  );
+});
+
+test('roomSyncHandle: bare .sync.jsonc at workspace root → workspace folder name', () => {
+  // Edge case: workspace folder *is* the source. The handle is the
+  // workspace folder's basename — predictable, even if rarely used.
+  assert.equal(roomSyncHandle('/ws/.sync.jsonc', '/ws'), 'ws');
+});
+
+test('roomSyncHandle: bare .roomSync at workspace root → workspace folder name', () => {
+  assert.equal(roomSyncHandle('/work/projects/.roomSync', '/work/projects'), 'projects');
+});
+
+test('roomSyncHandle: deeply nested folder-level config', () => {
+  // Doesn't matter how deep — the enclosing folder's basename is the handle.
+  assert.equal(
+    roomSyncHandle('/ws/a/b/c/Room-7/.sync.jsonc', '/ws'),
+    'Room-7',
+  );
 });
 
 let failed = 0;

@@ -13,6 +13,29 @@
 import { parse as parseJsonc, type ParseError, printParseErrorCode } from 'jsonc-parser';
 import { normaliseAliasPath } from './aliasResolve';
 
+/**
+ * Replace `${roomSync}` tokens in raw JSONC text with the supplied handle.
+ * Pure pre-parse pass — the substituted text is then fed to
+ * `parseSyncConfigText`. Used by the wired loaders (`config.ts` /
+ * `planner.ts`) so the planner + executor see resolved values; the editor
+ * skips this pass so users author the template literally and the form
+ * surfaces a separate "resolves to" preview.
+ *
+ * v1 follow-up of [[room-sync-format-v1-plan]]: lets a generator emit one
+ * verbatim template per logical destination (e.g. `breakout-1.roomSync` +
+ * `breakout-2.roomSync` both shipping identical bytes) and have the
+ * handle resolve from the filename at load time.
+ *
+ * An empty handle (no meaningful identifier available — defensive only;
+ * `roomSyncHandle` covers every layout) means "leave tokens literal"; the
+ * parser then surfaces the unresolved token as a path-resolution miss
+ * downstream, giving a clear signal rather than silently substituting empty.
+ */
+export function expandRoomSyncVariable(text: string, handle: string): string {
+  if (handle === '') return text;
+  return text.replace(/\$\{roomSync\}/g, handle);
+}
+
 export interface SyncDestination {
   /**
    * URI of the destination workspace folder, exactly as it appears in

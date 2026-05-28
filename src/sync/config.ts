@@ -11,6 +11,7 @@
 
 import * as vscode from 'vscode';
 import {
+  expandRoomSyncVariable,
   parseSyncConfigText,
   validateWorkspaceRootConfig,
   type SyncConfig,
@@ -18,6 +19,7 @@ import {
 import {
   configFilenameFromUri,
   isWorkspaceRootNamedConfig,
+  roomSyncHandle,
 } from './configFilenames';
 
 export type { SyncConfig, SyncDestination } from './configParse';
@@ -71,6 +73,14 @@ export async function loadSyncConfig(
       error: `not valid utf-8: ${errMsg(err)}`,
     };
   }
+
+  // Expand `${roomSync}` template tokens (v1 follow-up). Handle resolution:
+  // workspace-root named .roomSync → filename prefix; folder-level config →
+  // enclosing folder basename. Lets a generator emit one verbatim template
+  // per logical destination; the editor still sees the raw text via the
+  // form's own renderFor path (which bypasses this expansion on purpose).
+  const handle = roomSyncHandle(configUri.path, workspaceFolderUri.path);
+  text = expandRoomSyncVariable(text, handle);
 
   const parsed = parseSyncConfigText(text);
   if (parsed.kind === 'error') {

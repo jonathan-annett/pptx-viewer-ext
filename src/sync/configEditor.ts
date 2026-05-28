@@ -22,6 +22,7 @@ import { renderConfigEditorHtml } from './configEditorHtml';
 import {
   configFilenameFromUri,
   isWorkspaceRootNamedConfig,
+  roomSyncHandle,
 } from './configFilenames';
 import {
   renderPlanChips,
@@ -317,6 +318,11 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
   }
 
   private renderFor(document: vscode.TextDocument): string {
+    // Parse the document text LITERALLY — no `${roomSync}` substitution
+    // here. The form should show the raw template so users can edit it as
+    // a template; the resolved value is surfaced separately as a helper
+    // line under the Path aliases section. Substitution happens only in
+    // the wired loaders (config.ts / planner.ts) at runtime.
     const parsed = parseSyncConfigText(document.getText());
     const config = parsed.kind === 'ok' ? parsed.config : emptyConfig();
     const parseError = parsed.kind === 'error' ? parsed.error : null;
@@ -330,10 +336,22 @@ export class SyncConfigEditorProvider implements vscode.CustomTextEditorProvider
         parseError,
         isWorkspaceRoot,
         workspaceRootHandle,
+        roomSyncHandle: roomSyncHandleFor(document.uri),
       },
       makeNonce(),
     );
   }
+}
+
+/**
+ * Resolve the `${roomSync}` helper value for the editor's view model.
+ * Returns the same string the wired loader will substitute at runtime, so
+ * the form's helper line reflects exactly what the planner will see.
+ */
+function roomSyncHandleFor(documentUri: vscode.Uri): string {
+  const folder = vscode.workspace.getWorkspaceFolder(documentUri);
+  if (!folder) return '';
+  return roomSyncHandle(documentUri.path, folder.uri.path);
 }
 
 /**

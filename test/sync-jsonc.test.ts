@@ -7,6 +7,7 @@
 
 import { strict as assert } from 'node:assert';
 import {
+  expandRoomSyncVariable,
   parseSyncConfigText,
   validateWorkspaceRootConfig,
   type SyncConfig,
@@ -281,6 +282,38 @@ test('validateWorkspaceRootConfig accepts a config with non-empty path-aliases',
     pathAliases: { 'MON/room1': 'MON' },
   };
   assert.equal(validateWorkspaceRootConfig(config, 'Room1.roomSync'), null);
+});
+
+// ───── expandRoomSyncVariable (v1 follow-up: ${roomSync} template) ──────
+
+test('expandRoomSyncVariable replaces every occurrence with the handle', () => {
+  const text = '{ "path-aliases": { "${roomSync}/foo": "${roomSync}" } }';
+  const got = expandRoomSyncVariable(text, 'breakout-1');
+  assert.equal(got, '{ "path-aliases": { "breakout-1/foo": "breakout-1" } }');
+});
+
+test('expandRoomSyncVariable leaves text untouched when handle is empty', () => {
+  // Defensive: no meaningful handle means "leave literal" so downstream
+  // surfaces a clear error rather than silently substituting empty.
+  const text = '{ "path-aliases": { "${roomSync}/foo": "x" } }';
+  assert.equal(expandRoomSyncVariable(text, ''), text);
+});
+
+test('expandRoomSyncVariable is a passthrough when there are no tokens', () => {
+  const text = '{ "destinations": [] }';
+  assert.equal(expandRoomSyncVariable(text, 'breakout-1'), text);
+});
+
+test('expandRoomSyncVariable substitutes the handle through to parsing', () => {
+  // End-to-end shape — substitution + parse produces a config whose
+  // alias keys reflect the resolved handle, not the template.
+  const text = `{
+  "destinations": [{ "uri": "${URI_A}" }],
+  "path-aliases": { "\${roomSync}/talks": "\${roomSync}" }
+}`;
+  const expanded = expandRoomSyncVariable(text, 'breakout-1');
+  const got = ok(expanded);
+  assert.deepEqual(got.config.pathAliases, { 'breakout-1/talks': 'breakout-1' });
 });
 
 test('validateWorkspaceRootConfig rejects an empty path-aliases record', () => {

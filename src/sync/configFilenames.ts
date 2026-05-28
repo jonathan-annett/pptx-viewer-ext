@@ -55,6 +55,48 @@ export function isNamedRoomSyncFilename(filename: string): boolean {
 }
 
 /**
+ * Derive the `${roomSync}` template-variable value for a config file
+ * (v1 follow-up — see room-sync-format-v1-plan.md). The variable lets a
+ * generator emit one verbatim template that resolves at load time:
+ *
+ *   "path-aliases": { "${roomSync}/foo": "${roomSync}" }
+ *
+ * Resolution rules:
+ *  - Workspace-root named `<handle>.roomSync` → `<handle>` (filename prefix
+ *    minus the extension; M3 logical-destination handle case).
+ *  - Folder-level config (`.sync.jsonc` or bare `.roomSync` anywhere below
+ *    the workspace folder root) → enclosing folder's basename.
+ *  - Bare workspace-root config (`.sync.jsonc` or `.roomSync` directly at
+ *    the workspace folder root) → workspace folder's basename.
+ *
+ * Returns an empty string when nothing meaningful is available (defensive;
+ * the rules above cover every path supplied by the discovery + loader).
+ * The wired loader passes the empty string to `expandRoomSyncVariable`,
+ * which then leaves `${roomSync}` literal — surfaces as a clear error
+ * downstream rather than silently substituting empty.
+ */
+export function roomSyncHandle(configPath: string, workspaceFolderPath: string): string {
+  const wsf = workspaceFolderPath.endsWith('/') && workspaceFolderPath.length > 1
+    ? workspaceFolderPath.slice(0, -1)
+    : workspaceFolderPath;
+  const filename = configFilenameFromUri({ path: configPath });
+  const parent = parentPathOf({ path: configPath });
+
+  // Workspace-root named: filename prefix is the handle.
+  if (parent === wsf && isNamedRoomSyncFilename(filename)) {
+    return filename.slice(0, filename.lastIndexOf('.roomSync'));
+  }
+
+  // Otherwise: enclosing folder's basename. Falls through to the workspace
+  // folder name when the config sits directly at the workspace root with a
+  // bare-name filename (`.sync.jsonc` / `.roomSync`).
+  const enclosingBasename = parent === '/' || parent === ''
+    ? ''
+    : parent.slice(parent.lastIndexOf('/') + 1);
+  return enclosingBasename;
+}
+
+/**
  * True iff the config at `configPath` is a workspace-root named-`.roomSync`
  * config: it sits directly under `workspaceFolderPath` AND its filename is
  * a named variant ({@link isNamedRoomSyncFilename}).

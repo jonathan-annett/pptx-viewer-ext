@@ -78,6 +78,20 @@ export interface ConfigEditorViewModel {
    * are configuring. Empty string when not at workspace root.
    */
   workspaceRootHandle: string;
+  /**
+   * Resolved value of the `${roomSync}` template variable for this config
+   * file (v1 follow-up). The editor reads the document text *literally*
+   * (no pre-parse substitution) so form inputs show the raw template; this
+   * value is shown alongside as a helper line so the user can see what the
+   * variable resolves to in context without losing the template on form
+   * save. Empty string when no meaningful handle is available.
+   *
+   * Resolution rules (per `roomSyncHandle` in configFilenames.ts):
+   *  - Workspace-root `<handle>.roomSync` → filename prefix
+   *  - Folder-level config → enclosing folder basename
+   *  - Bare workspace-root config → workspace folder name
+   */
+  roomSyncHandle: string;
 }
 
 /**
@@ -154,6 +168,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
   <section class="card">
     <h2>Path aliases</h2>
     <p class="hint">Rewrite source-relative directories into destination-relative directories. When non-empty, only files inside one of the listed <em>From</em> directories sync — the destination relpath is <em>To</em> + the sub-path inside <em>From</em>. Useful for unifying day-major layouts (<code>MON/room1</code>, <code>TUE/room1</code>, …) into a room-major destination tree. Precedence is the row order (first match wins) — use the arrow buttons to reorder. Wildcards are supported: <code>*</code> matches one segment, <code>**</code> matches many, and the n-th wildcard on the <em>From</em> side feeds the n-th wildcard on <em>To</em> — so <code>*/room1</code> → <code>*</code> handles every day with one rule.</p>
+    ${vm.roomSyncHandle ? `<p class="hint room-sync-var">Template variable: <code>\${roomSync}</code> resolves to <code>${escapeHtml(vm.roomSyncHandle)}</code> for this config file. Useful in generator-emitted templates — write <code>\${roomSync}/foo</code> in <em>From</em> or <em>To</em> and the loader substitutes the handle at runtime.</p>` : ''}
     <ul id="alias-list" class="alias-list"></ul>
     <button id="add-alias" class="btn btn-secondary" type="button">+ Add path alias</button>
   </section>
@@ -274,6 +289,21 @@ code {
 }
 .alias-move:disabled { opacity: 0.4; cursor: not-allowed; }
 .alias-move-group { display: inline-flex; gap: 2px; }
+/* Template-variable helper line — surfaces the resolved roomSync handle
+   under the Path aliases section's main hint. Subdued background so it
+   reads as a side-note, not the primary instruction. v1 follow-up. */
+.room-sync-var {
+  margin-top: 2px;
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  background: var(--vscode-textBlockQuote-background, rgba(127,127,127,0.08));
+  border-left: 2px solid var(--vscode-textLink-foreground, rgba(127,127,127,0.4));
+  border-radius: 2px;
+}
+.room-sync-var code {
+  background: transparent;
+  padding: 0;
+}
 .dest-uri {
   grid-column: 1 / -1;
   margin: 0;

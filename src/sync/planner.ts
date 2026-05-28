@@ -39,6 +39,8 @@ import { vscodeFs } from './vscodeFs';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
 import { parseSyncConfigText } from './config';
+import { expandRoomSyncVariable } from './configParse';
+import { roomSyncHandle } from './configFilenames';
 import {
   type Scope,
   filterFilesToScope,
@@ -455,7 +457,12 @@ async function loadConfigForSource(
 ): Promise<{ include: string[]; exclude: string[]; pathAliases: Record<string, string> } | null> {
   try {
     const bytes = await vscode.workspace.fs.readFile(source.configUri);
-    const text = new TextDecoder().decode(bytes);
+    let text = new TextDecoder().decode(bytes);
+    // Resolve `${roomSync}` template tokens before parsing — same pre-parse
+    // pass the manager-side loader applies. Keeps the planner's view
+    // consistent with the topology already in scope.
+    const handle = roomSyncHandle(source.configUri.path, source.workspaceFolderUri.path);
+    text = expandRoomSyncVariable(text, handle);
     const parsed = parseSyncConfigText(text);
     if (parsed.kind !== 'ok') return null;
     return {

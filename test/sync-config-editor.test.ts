@@ -25,6 +25,7 @@ function baseVm(overrides: Partial<ConfigEditorViewModel> = {}): ConfigEditorVie
     parseError: null,
     isWorkspaceRoot: false,
     workspaceRootHandle: '',
+    roomSyncHandle: '',
     ...overrides,
   };
 }
@@ -210,6 +211,37 @@ test('payload carries pathAliases verbatim from initial config', () => {
     'n',
   );
   assert.match(html, /"pathAliases":\{"MON\/room1":"MON","TUE\/room1":"TUE"\}/);
+});
+
+test('Path aliases section omits the ${roomSync} helper line when no handle resolved', () => {
+  // Defensive: when roomSyncHandle is empty (no meaningful identifier),
+  // the helper line should NOT appear at all — surfacing an empty value
+  // would be misleading.
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.ok(!/Template variable:/.test(html), 'helper line leaked into render with empty handle');
+});
+
+test('Path aliases section shows the ${roomSync} helper line when a handle is resolved', () => {
+  // v1 follow-up: the editor reads the document text literally (no
+  // substitution) so the form preserves the template, and the resolved
+  // value appears alongside as helper text so the user sees the runtime
+  // value in context.
+  const html = renderConfigEditorHtml(
+    baseVm({ roomSyncHandle: 'breakout-1' }),
+    'n',
+  );
+  assert.match(html, /Template variable: <code>\$\{roomSync\}<\/code> resolves to <code>breakout-1<\/code>/);
+});
+
+test('${roomSync} helper line escapes a user-controlled handle', () => {
+  // The handle is derived from a filename or folder name — both
+  // user-controlled. Defensive HTML escaping prevents tag breakout.
+  const html = renderConfigEditorHtml(
+    baseVm({ roomSyncHandle: '<img src=x>' }),
+    'n',
+  );
+  assert.ok(!html.includes('resolves to <code><img'), 'unescaped handle leaked into helper line');
+  assert.match(html, /resolves to <code>&lt;img src=x&gt;<\/code>/);
 });
 
 test('payload escapes </ to prevent script-tag breakout', () => {
