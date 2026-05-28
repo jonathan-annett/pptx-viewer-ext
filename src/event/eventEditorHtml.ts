@@ -463,6 +463,14 @@ function clientScript(): string {
         // Tools / regenerate section is a top-level <details> too.
         const toolsOpen = !!root.querySelector('section.evt-tools details[open]');
 
+        // Snapshot the focused element's id so rapid-fire data entry
+        // (type Alice⏎Bob⏎Carol⏎ into #add-speaker-name) stays in the
+        // input across the post→re-render round-trip. Any input with a
+        // stable id auto-restores; the speaker / room "add" inputs are
+        // the ones that matter for rapid entry, and both carry an id.
+        const ae = document.activeElement;
+        const activeId = ae && ae.id && root.contains(ae) ? ae.id : null;
+
         root.innerHTML = m.html;
 
         // Re-open. closest() can't traverse from a fragment we just dropped
@@ -477,6 +485,16 @@ function clientScript(): string {
         if (toolsOpen) {
           const toolsDetails = root.querySelector('section.evt-tools details');
           if (toolsDetails) toolsDetails.open = true;
+        }
+
+        // Restore focus. The new element with the captured id is a
+        // freshly-rendered DOM node, so we query the post-swap root
+        // rather than retaining the pre-swap reference.
+        if (activeId) {
+          const el = document.getElementById(activeId);
+          if (el && typeof el.focus === 'function') {
+            try { el.focus(); } catch (_) {}
+          }
         }
       }
     });
