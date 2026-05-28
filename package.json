@@ -1,8 +1,8 @@
 {
   "name": "pptx-sync",
   "displayName": "Presentation Folder Sync",
-  "description": "Inspect, search, and one-way folder sync for PowerPoint decks. Built for vscode.dev; runs in desktop VS Code too.",
-  "version": "0.1.3",
+  "description": "Inspect, search, and one-way folder sync for PowerPoint decks — plus an event scheduler for the rooms, days, and speakers behind a conference. Built for vscode.dev; runs in desktop VS Code too.",
+  "version": "0.1.4",
   "publisher": "sophtwhere",
   "license": "MIT",
   "repository": {

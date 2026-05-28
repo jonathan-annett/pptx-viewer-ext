@@ -19,7 +19,7 @@ desktop VS Code.
 
 ---
 
-## Three features, useable independently
+## Four features, useable independently
 
 ### 1. Presentation viewer
 
@@ -125,6 +125,77 @@ automatically.
 
 Sync destinations are excluded from indexing — the search shows you
 *sources* and other workspace folders, not their mirrors.
+
+### 4. Event schedule editor
+
+For conference / event organisers: a form-driven planner for
+`*.eventSchedule` files. Lay out an event as **days × timeslots × rooms**
+and assign speakers to each session, then generate a folder tree ready
+to wire up with the sync feature.
+
+**Event header.**
+
+- **Event name** + **days** (comma-separated, e.g. `MON, TUE, WED`)
+- **Default timeslots** — comma-separated labels (e.g. `A, B, C`) seeded
+  into any newly-added day. An **Apply to all** button next to it
+  positionally renames every existing day's slots to match — a pure
+  rename that cascades into sessions, never drops one.
+
+**Speaker pool + rooms.**
+
+- Add / remove speakers (chips). The speaker pool also grows
+  automatically when you paste a roster (see below).
+- Add / remove rooms; each room has a kind (plenary, breakout, etc.)
+  used by the folder generator.
+
+**Day × timeslot × room grid.**
+
+- Click any cell to open a session edit panel. Edit session title
+  (optional free-form), and add / remove / reorder speakers via the
+  inline **speaker picker** — the picker filters out anyone already
+  assigned to another session at the same `(day, timeslot)` so a single
+  click can never double-book. Drag chips to reorder.
+- Hover a row's leftmost cell for the timeslot affordances: **▲ / ▼**
+  reorder the slot up or down within the day, an inline rename input
+  (filename-safe), and **✕** to delete (modal confirms with affected-
+  session count). Per-day independent — renaming MON's "B" doesn't
+  touch TUE's.
+- Hover a filled session cell for **▲ / ▼** at the right edge: swap
+  this session with the row neighbour *in the same room*.
+- A trailing **+ Add timeslot to `<day>`** row appears under every
+  day-block; new labels default to the next letter past the day's max.
+- Session edit panels are **mutually exclusive** — opening one
+  auto-closes any other.
+
+**Bulk paste workflows.**
+
+- Paste a multi-line clipboard payload (e.g. an Excel column) into the
+  speaker or room **Add** input and the whole list ships as one bulk
+  add. Pressing Enter on a single name still works as expected.
+- Paste a roster into a session's **speaker picker** filter to replace
+  that session's roster with the pasted names. Unknown names auto-add
+  to the pool (so you can build a schedule from a list of rosters
+  without a separate speaker-adding step). Same-timeslot conflicts
+  resolve automatically — anyone displaced from another session is
+  surfaced in a modal.
+
+**Tools section** (collapsible).
+
+- **Generate sample schedule** — fills an empty file with random
+  example data using the breakout/plenary knobs (room count, breakout
+  count, etc.). Visible *only* when the file is empty or structurally
+  empty so authored data can never be wiped.
+- **Clear** — wipes speakers + rooms + sessions (modal confirm), but
+  keeps your config + days + timeslot labels. Turns the file back into
+  a placeholder that **Generate sample schedule** can refill.
+- **Generate folders…** — materialises a folder tree from the schedule
+  into a destination of your choice. Layout chooser
+  (**room-major** vs **day-major**); writes one empty-`.pptx` placeholder
+  per (session, speaker) plus one **`<roomId>.roomSync`** template per
+  unique room ready to wire up with the sync feature. Re-runs preserve
+  any `.roomSync` you've hand-wired.
+
+JSON-Schema IntelliSense lights up if the file is reopened as text.
 
 ---
 

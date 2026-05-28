@@ -12,6 +12,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); sub-sections use
 
 ## [Unreleased]
 
+---
+
+## [0.1.4] — 2026-05-29
+
 ### Added
 - **`.roomSync` filename alias.** A source folder can be flagged for sync with either `.sync.jsonc` (legacy) or `.roomSync` (forward-compatible alias) — same JSONC format, same semantics. A folder carrying both files surfaces a one-shot warning toast with a **Resolve…** action that opens a quick-pick to delete one. The custom form editor + JSON-Schema IntelliSense work on either filename.
 - **`path-aliases` source-rewrite layer.** A new optional field in `.sync.jsonc` / `.roomSync` maps source-relative directories to destination-relative directories — useful for unifying day-major source layouts (`MON/breakout-1/…`, `TUE/breakout-1/…`) into a room-major destination tree without naming every day. Supports glob wildcards: `{ "*/room1": "*" }` captures the day prefix and reuses it on the destination side; `**` captures multi-segment prefixes. The plan view shows the rewrite provenance on each row as a subdued `← <source-path>` badge with the full alias pair in the tooltip.
