@@ -28,6 +28,7 @@ import type {
   SessionKind,
 } from './schedule';
 import { allTimeslotLetters } from './schedule';
+import { eligibleSpeakersForSession } from './scheduleData';
 
 export function renderEventEditorHtml(
   vm: EventEditorViewModel,
@@ -156,7 +157,9 @@ function renderSessionsGrid(s: EventSchedule): string {
     sessionAt.set(`${sess.day}::${sess.timeslot}::${sess.roomId}`, sess);
   }
   const speakerById = new Map(s.speakers.map((sp) => [sp.id, sp]));
-  const dayBlocks = s.config.days.map((day) => renderDayBlock(s, day, timeslots, sessionAt, speakerById)).join('\n');
+  const dayBlocks = s.config.days
+    .map((day) => renderDayBlock(s, day, timeslots, sessionAt, speakerById))
+    .join('\n');
   return `<section class="evt-section">
     <h2>Sessions <span class="evt-count">${s.sessions.length}</span></h2>
     <p class="hint">Click a cell to edit. Empty cells show <code>+</code> — click to schedule a session there.</p>
@@ -179,7 +182,7 @@ function renderDayBlock(
       const cells = s.rooms
         .map((room) => {
           const sess = sessionAt.get(`${day}::${timeslot}::${room.id}`);
-          return renderCell(sess, day, timeslot, room, speakerById);
+          return renderCell(s, sess, day, timeslot, room, speakerById);
         })
         .join('');
       return `<tr><th class="ts">${escapeHtml(timeslot)}</th>${cells}</tr>`;
@@ -195,6 +198,7 @@ function renderDayBlock(
 }
 
 function renderCell(
+  s: EventSchedule,
   sess: EventSession | undefined,
   day: string,
   timeslot: string,
@@ -226,33 +230,78 @@ function renderCell(
         <ul class="speaker-pills">${speakerList}</ul>
       </summary>
       <div class="session-edit-body">
-        ${renderSessionEditForm(sess)}
+        ${renderSessionEditForm(s, sess, speakerById)}
       </div>
     </details>
   </td>`;
 }
 
-function renderSessionEditForm(sess: EventSession): string {
+function renderSessionEditForm(
+  s: EventSchedule,
+  sess: EventSession,
+  speakerById: ReadonlyMap<string, EventSpeaker>,
+): string {
   const kindOptions: SessionKind[] = ['breakout', 'plenary-open', 'plenary-close', 'breakout-relocated'];
   const kindSelect = kindOptions
     .map(
       (k) => `<option value="${k}"${k === sess.kind ? ' selected' : ''}>${k}</option>`,
     )
     .join('');
-  // Speaker assignment: comma-separated speaker ids (or names). Editing
-  // inline keeps the v1 surface small; a richer multi-select can land later.
-  const ids = sess.speakers.map((sl) => sl.speakerId).join(', ');
+
+  // Chips for currently-assigned speakers. Each chip carries the speaker id
+  // in `data-speaker-id`; the chip-row container carries the session id so
+  // the delegated click + drag handlers can post `setSessionSpeakers` with
+  // the right session. Empty roster shows a muted hint.
+  const chips = sess.speakers.length === 0
+    ? '<span class="chip-row-empty">No speakers — click + to add.</span>'
+    : sess.speakers
+        .map((sl) => {
+          const sp = speakerById.get(sl.speakerId);
+          const name = sp ? sp.name : sl.speakerName;
+          return `<span class="chip" draggable="true" data-speaker-id="${escapeAttr(sl.speakerId)}" title="Drag to reorder">
+            <span class="chip-name">${escapeHtml(name)}</span>
+            <button type="button" class="chip-remove" data-chip-remove="${escapeAttr(sl.speakerId)}" title="Remove ${escapeAttr(name)} from this session" aria-label="Remove ${escapeAttr(name)}">×</button>
+          </span>`;
+        })
+        .join('');
+
+  // Eligible speakers — those not in any other session sharing (day, timeslot).
+  // The current session's own speakers stay eligible by design, but we filter
+  // them out for the Add popover (no point offering an already-added speaker).
+  const eligibleIds = eligibleSpeakersForSession(s, sess.day, sess.timeslot, sess.id);
+  const assigned = new Set(sess.speakers.map((sl) => sl.speakerId));
+  const popoverOptions = eligibleIds
+    .filter((id) => !assigned.has(id))
+    .map((id) => {
+      const sp = speakerById.get(id);
+      if (!sp) return '';
+      return `<li class="picker-row" data-picker-speaker-id="${escapeAttr(sp.id)}" data-search="${escapeAttr(sp.name.toLowerCase())}">
+        <span class="picker-name">${escapeHtml(sp.name)}</span>
+        <span class="picker-id">${escapeHtml(sp.id)}</span>
+      </li>`;
+    })
+    .filter((s2) => s2 !== '')
+    .join('');
+  const popoverEmpty = popoverOptions === '';
+
   return `<div class="evt-row">
     <label class="evt-field">
       <span>Session kind</span>
       <select data-session-kind="${escapeAttr(sess.id)}">${kindSelect}</select>
     </label>
   </div>
-  <div class="evt-row">
-    <label class="evt-field">
-      <span>Speaker IDs (comma-separated, in order)</span>
-      <input type="text" data-session-speakers="${escapeAttr(sess.id)}" value="${escapeAttr(ids)}" autocomplete="off">
-    </label>
+  <div class="evt-field">
+    <span class="evt-field-label">Speakers <span class="muted">(drag to reorder)</span></span>
+    <div class="chip-row" data-session-id="${escapeAttr(sess.id)}">
+      ${chips}
+      <button type="button" class="chip-add" data-chip-add-for="${escapeAttr(sess.id)}" title="Add a speaker">+</button>
+    </div>
+    <div class="speaker-picker" data-speaker-picker-for="${escapeAttr(sess.id)}" hidden>
+      <input type="text" class="picker-filter" data-picker-filter-for="${escapeAttr(sess.id)}" placeholder="Type to filter…" autocomplete="off">
+      <ul class="picker-list" data-picker-list-for="${escapeAttr(sess.id)}">
+        ${popoverEmpty ? '<li class="picker-empty">All eligible speakers are already assigned, or every speaker is busy in this timeslot.</li>' : popoverOptions}
+      </ul>
+    </div>
   </div>
   <div class="evt-row">
     <button type="button" class="btn btn-sm btn-danger" data-remove-session="${escapeAttr(sess.id)}">Remove session</button>
@@ -353,9 +402,25 @@ function clientScript(): string {
       }
     });
 
-    function speakerIdsFromString(raw){
-      if (typeof raw !== 'string') return [];
-      return raw.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+    // Read the current speaker order out of a chip-row's DOM. Used after
+    // a remove or a drag-drop to compute the new order to post.
+    function chipRowOrder(sessionId){
+      const row = root.querySelector('.chip-row[data-session-id="' + cssEscape(sessionId) + '"]');
+      if (!row) return [];
+      const chips = row.querySelectorAll('.chip[data-speaker-id]');
+      const out = [];
+      for (let i = 0; i < chips.length; i++) {
+        const id = chips[i].getAttribute('data-speaker-id');
+        if (id) out.push(id);
+      }
+      return out;
+    }
+
+    // CSS.escape isn't on older webview surfaces — minimal shim that
+    // handles the speaker / session id shapes we actually emit (alnum +
+    // dashes + hyphens). Anything more exotic isn't expected here.
+    function cssEscape(s){
+      return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c){ return '\\\\' + c; });
     }
 
     // Event header
@@ -378,10 +443,24 @@ function clientScript(): string {
         post({ type: 'renameSpeaker', speakerId: t.dataset.renameSpeaker, name: t.value });
       } else if (t.dataset.renameRoom) {
         post({ type: 'renameRoom', roomId: t.dataset.renameRoom, name: t.value });
-      } else if (t.dataset.sessionSpeakers) {
-        post({ type: 'setSessionSpeakers', sessionId: t.dataset.sessionSpeakers, speakerIds: speakerIdsFromString(t.value) });
       }
     }, true);
+
+    // Speaker-picker filter (server-rendered list, client-side filter on
+    // the cached lowercase name via data-search). Empty filter shows all.
+    root.addEventListener('input', function(e){
+      const t = e.target;
+      if (!t || !t.dataset || !t.dataset.pickerFilterFor) return;
+      const sessionId = t.dataset.pickerFilterFor;
+      const list = root.querySelector('.picker-list[data-picker-list-for="' + cssEscape(sessionId) + '"]');
+      if (!list) return;
+      const q = String(t.value || '').trim().toLowerCase();
+      const rows = list.querySelectorAll('.picker-row');
+      for (let i = 0; i < rows.length; i++) {
+        const search = rows[i].getAttribute('data-search') || '';
+        rows[i].hidden = q !== '' && search.indexOf(q) === -1;
+      }
+    });
 
     // Session-kind dropdown (change fires on selection)
     root.addEventListener('change', function(e){
@@ -451,6 +530,140 @@ function clientScript(): string {
         post({ type: 'addSession', day: parts[0], timeslot: parts[1], roomId: parts[2], kind: kind, speakerIds: [] });
         return;
       }
+
+      // Chip × — remove the speaker. Compute the new order from the DOM
+      // (minus the removed chip) and post setSessionSpeakers. The re-render
+      // confirms.
+      if (t.dataset && t.dataset.chipRemove) {
+        const chip = t.closest ? t.closest('.chip') : null;
+        const row = chip ? chip.closest('.chip-row') : null;
+        if (!row) return;
+        const sessionId = row.getAttribute('data-session-id');
+        if (!sessionId) return;
+        const removeId = t.dataset.chipRemove;
+        const next = chipRowOrder(sessionId).filter(function(id){ return id !== removeId; });
+        post({ type: 'setSessionSpeakers', sessionId: sessionId, speakerIds: next });
+        return;
+      }
+
+      // Chip + — open the speaker picker for this session. Picker state
+      // lives entirely in the DOM (hidden attribute + filter input). Re-
+      // renders after a mutation reset it.
+      if (t.dataset && t.dataset.chipAddFor) {
+        const sessionId = t.dataset.chipAddFor;
+        const picker = root.querySelector('.speaker-picker[data-speaker-picker-for="' + cssEscape(sessionId) + '"]');
+        if (!picker) return;
+        const willOpen = picker.hidden;
+        // Close any other open pickers first — single-active rule.
+        const openPickers = root.querySelectorAll('.speaker-picker:not([hidden])');
+        for (let i = 0; i < openPickers.length; i++) openPickers[i].hidden = true;
+        picker.hidden = !willOpen;
+        if (willOpen) {
+          const filter = picker.querySelector('.picker-filter');
+          if (filter) {
+            filter.value = '';
+            // Show all rows after reopening — filter starts empty.
+            const rows = picker.querySelectorAll('.picker-row');
+            for (let i = 0; i < rows.length; i++) rows[i].hidden = false;
+            try { filter.focus(); } catch (_) {}
+          }
+        }
+        return;
+      }
+
+      // Picker row click — append speaker to session, close picker, post.
+      const pickerRow = t.closest ? t.closest('.picker-row[data-picker-speaker-id]') : null;
+      if (pickerRow) {
+        const speakerId = pickerRow.getAttribute('data-picker-speaker-id');
+        const picker = pickerRow.closest('.speaker-picker');
+        const sessionId = picker ? picker.getAttribute('data-speaker-picker-for') : null;
+        if (!sessionId || !speakerId) return;
+        const next = chipRowOrder(sessionId).concat([speakerId]);
+        if (picker) picker.hidden = true;
+        post({ type: 'setSessionSpeakers', sessionId: sessionId, speakerIds: next });
+        return;
+      }
+    });
+
+    // Drag-to-reorder. Native HTML5 DnD. The drag source is a chip; the
+    // drop target is another chip in the same row. We swap-by-insertion:
+    // dropping onto the right half of a chip places the dragged one after
+    // it; left half places it before. On drop, read the new order from the
+    // DOM and post.
+    let dragSourceId = null;
+    let dragSourceRow = null;
+
+    root.addEventListener('dragstart', function(e){
+      const chip = e.target && e.target.closest ? e.target.closest('.chip[data-speaker-id]') : null;
+      if (!chip) return;
+      dragSourceId = chip.getAttribute('data-speaker-id');
+      dragSourceRow = chip.closest('.chip-row');
+      chip.classList.add('chip-dragging');
+      // Firefox / Chromium both require setData to make the drag start.
+      try { e.dataTransfer.setData('text/plain', dragSourceId || ''); } catch (_) {}
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    });
+
+    root.addEventListener('dragend', function(e){
+      const chip = e.target && e.target.closest ? e.target.closest('.chip[data-speaker-id]') : null;
+      if (chip) chip.classList.remove('chip-dragging');
+      // Clear any drop-indicator artifacts in case the user cancelled.
+      const indicators = root.querySelectorAll('.chip-drop-before, .chip-drop-after');
+      for (let i = 0; i < indicators.length; i++) {
+        indicators[i].classList.remove('chip-drop-before');
+        indicators[i].classList.remove('chip-drop-after');
+      }
+      dragSourceId = null;
+      dragSourceRow = null;
+    });
+
+    root.addEventListener('dragover', function(e){
+      if (!dragSourceId || !dragSourceRow) return;
+      const targetChip = e.target && e.target.closest ? e.target.closest('.chip[data-speaker-id]') : null;
+      if (!targetChip) return;
+      const targetRow = targetChip.closest('.chip-row');
+      if (targetRow !== dragSourceRow) return; // only reorder within the same session
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      // Clear sibling indicators, mark this one.
+      const siblings = targetRow.querySelectorAll('.chip');
+      for (let i = 0; i < siblings.length; i++) {
+        siblings[i].classList.remove('chip-drop-before');
+        siblings[i].classList.remove('chip-drop-after');
+      }
+      const rect = targetChip.getBoundingClientRect();
+      const midpoint = rect.left + rect.width / 2;
+      if (e.clientX < midpoint) {
+        targetChip.classList.add('chip-drop-before');
+      } else {
+        targetChip.classList.add('chip-drop-after');
+      }
+    });
+
+    root.addEventListener('drop', function(e){
+      if (!dragSourceId || !dragSourceRow) return;
+      const targetChip = e.target && e.target.closest ? e.target.closest('.chip[data-speaker-id]') : null;
+      if (!targetChip) return;
+      const targetRow = targetChip.closest('.chip-row');
+      if (targetRow !== dragSourceRow) return;
+      e.preventDefault();
+      const targetId = targetChip.getAttribute('data-speaker-id');
+      if (!targetId || targetId === dragSourceId) return;
+      const sessionId = targetRow.getAttribute('data-session-id');
+      if (!sessionId) return;
+
+      // Compute the new order: take the current row order, drop the source
+      // id, re-insert before or after the target depending on which half
+      // of the target the drop landed on.
+      const rect = targetChip.getBoundingClientRect();
+      const dropAfter = e.clientX >= rect.left + rect.width / 2;
+      const current = chipRowOrder(sessionId);
+      const withoutSource = current.filter(function(id){ return id !== dragSourceId; });
+      const idx = withoutSource.indexOf(targetId);
+      if (idx === -1) return;
+      const insertAt = dropAfter ? idx + 1 : idx;
+      const next = withoutSource.slice(0, insertAt).concat([dragSourceId]).concat(withoutSource.slice(insertAt));
+      post({ type: 'setSessionSpeakers', sessionId: sessionId, speakerIds: next });
     });
   })();`;
 }
@@ -632,6 +845,135 @@ function pageCss(): string {
       display: flex;
       flex-direction: column;
       gap: 6px;
+    }
+    .evt-field-label {
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      display: block;
+      margin-bottom: 4px;
+    }
+    /* Speaker chip row — drag-to-reorder lives here */
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
+      padding: 4px;
+      min-height: 32px;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--vscode-foreground) 3%, transparent);
+    }
+    .chip-row-empty {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      font-size: 0.9em;
+      padding: 0 4px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 4px 2px 8px;
+      border-radius: 9999px;
+      background: var(--vscode-badge-background, color-mix(in srgb, var(--vscode-button-background, #0e639c) 25%, transparent));
+      color: var(--vscode-badge-foreground, var(--vscode-foreground));
+      font-size: 0.9em;
+      cursor: grab;
+      user-select: none;
+      transition: transform 100ms ease-out, opacity 100ms ease-out;
+    }
+    .chip:active { cursor: grabbing; }
+    .chip-dragging { opacity: 0.4; }
+    /* Drop-target indicators: a coloured edge on the side the dragged
+       chip would land. Pure visual feedback; doesn't change layout. */
+    .chip-drop-before { box-shadow: -3px 0 0 0 var(--vscode-focusBorder, #0e639c); }
+    .chip-drop-after { box-shadow: 3px 0 0 0 var(--vscode-focusBorder, #0e639c); }
+    .chip-name { line-height: 1.2; }
+    .chip-remove {
+      font-family: inherit;
+      font-size: 1em;
+      line-height: 1;
+      padding: 0;
+      width: 18px;
+      height: 18px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      border-radius: 9999px;
+      background: transparent;
+      color: inherit;
+      opacity: 0.75;
+      cursor: pointer;
+    }
+    .chip-remove:hover {
+      background: color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+      opacity: 1;
+    }
+    .chip-add {
+      font-family: inherit;
+      font-size: 1.1em;
+      line-height: 1;
+      padding: 0;
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px dashed var(--vscode-panel-border, rgba(128,128,128,0.4));
+      border-radius: 9999px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      cursor: pointer;
+    }
+    .chip-add:hover {
+      background: color-mix(in srgb, var(--vscode-button-background, #0e639c) 12%, transparent);
+      color: var(--vscode-foreground);
+      border-style: solid;
+    }
+    /* Speaker picker — inline popover-style below the chip row */
+    .speaker-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 6px;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
+      border-radius: 4px;
+      background: var(--vscode-editorWidget-background, transparent);
+    }
+    .speaker-picker[hidden] { display: none; }
+    .picker-filter { width: 100%; }
+    .picker-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 180px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .picker-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 6px;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+    .picker-row[hidden] { display: none; }
+    .picker-row:hover {
+      background: color-mix(in srgb, var(--vscode-button-background, #0e639c) 18%, transparent);
+    }
+    .picker-name { color: var(--vscode-foreground); }
+    .picker-id { color: var(--vscode-descriptionForeground); font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85em; }
+    .picker-empty {
+      padding: 6px 8px;
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
     }
     /* Tools (regenerate) */
     .evt-tools details summary {

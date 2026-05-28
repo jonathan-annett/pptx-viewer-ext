@@ -236,9 +236,18 @@ export function setSessionSpeakers(
   speakerIds: string[],
 ): EventSchedule {
   const speakerById = new Map(schedule.speakers.map((s) => [s.id, s]));
+  // Drop duplicates defensively — the chip UI prevents this, but a hand-edit
+  // or a stale postMessage could land an id twice. First occurrence wins so
+  // a user-visible reorder is honoured.
+  const seen = new Set<string>();
+  const unique = speakerIds.filter((id) => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
   const sessions = schedule.sessions.map((s) => {
     if (s.id !== sessionId) return s;
-    const speakers: SessionSpeakerSlot[] = speakerIds.map((speakerId, i) => ({
+    const speakers: SessionSpeakerSlot[] = unique.map((speakerId, i) => ({
       slot: i + 1,
       speakerId,
       speakerName: speakerById.get(speakerId)?.name ?? speakerId,
@@ -246,6 +255,33 @@ export function setSessionSpeakers(
     return { ...s, speakers };
   });
   return { ...schedule, sessions };
+}
+
+/**
+ * Speaker IDs that may be added to the session at `(day, timeslot)` without
+ * double-booking. A speaker is *eligible* iff they're not already assigned
+ * to any OTHER session sharing the same (day, timeslot). The current
+ * session's existing speakers are still eligible — they're already there,
+ * and we don't want to filter them out of their own roster.
+ *
+ * Returns speaker IDs (not names) in pool order, so the renderer can decide
+ * how to display them.
+ */
+export function eligibleSpeakersForSession(
+  schedule: EventSchedule,
+  day: string,
+  timeslot: string,
+  currentSessionId?: string,
+): string[] {
+  const blocked = new Set<string>();
+  for (const sess of schedule.sessions) {
+    if (sess.day !== day || sess.timeslot !== timeslot) continue;
+    if (currentSessionId && sess.id === currentSessionId) continue;
+    for (const slot of sess.speakers) blocked.add(slot.speakerId);
+  }
+  return schedule.speakers
+    .filter((sp) => !blocked.has(sp.id))
+    .map((sp) => sp.id);
 }
 
 export function setSessionKind(

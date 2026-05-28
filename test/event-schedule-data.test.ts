@@ -9,6 +9,7 @@ import {
   addRoom,
   addSession,
   addSpeaker,
+  eligibleSpeakersForSession,
   emptySchedule,
   marshalSchedule,
   parseSchedule,
@@ -242,6 +243,63 @@ test('removeSession drops it without touching speakers or rooms', () => {
   assert.equal(s.sessions.length, 0);
   assert.equal(s.speakers.length, 1);
   assert.equal(s.rooms.length, 1);
+});
+
+// ───── eligibleSpeakersForSession ────────────────────────────────────
+
+test('eligibleSpeakersForSession excludes speakers in OTHER sessions in the same (day, timeslot)', () => {
+  let s = emptySchedule();
+  s = addSpeaker(s, 'A'); // spk-01
+  s = addSpeaker(s, 'B'); // spk-02
+  s = addSpeaker(s, 'C'); // spk-03
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addRoom(s, { name: 'Breakout 2' });
+  // Two concurrent sessions in different rooms at MON/B.
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-2', kind: 'breakout', speakerIds: ['spk-02'] });
+
+  // Editing breakout-1: spk-01 (already in this session) is still
+  // eligible; spk-02 (in the concurrent room) is NOT; spk-03 is.
+  const eligible = eligibleSpeakersForSession(s, 'MON', 'B', 'MON-B-breakout-1');
+  assert.deepEqual(eligible.sort(), ['spk-01', 'spk-03']);
+});
+
+test('eligibleSpeakersForSession returns all speakers when no other session in the timeslot', () => {
+  let s = emptySchedule();
+  s = addSpeaker(s, 'A');
+  s = addSpeaker(s, 'B');
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  const eligible = eligibleSpeakersForSession(s, 'MON', 'B', 'MON-B-breakout-1');
+  assert.deepEqual(eligible.sort(), ['spk-01', 'spk-02']);
+});
+
+test('eligibleSpeakersForSession with no currentSessionId excludes the in-session speakers too', () => {
+  // Used when adding a NEW session at (day, timeslot) — every speaker
+  // currently busy in that slot is blocked, including the candidate
+  // sessions at that slot.
+  let s = emptySchedule();
+  s = addSpeaker(s, 'A');
+  s = addSpeaker(s, 'B');
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout', speakerIds: ['spk-01'] });
+  const eligible = eligibleSpeakersForSession(s, 'MON', 'B');
+  assert.deepEqual(eligible, ['spk-02']);
+});
+
+// ───── setSessionSpeakers dedup ──────────────────────────────────────
+
+test('setSessionSpeakers drops duplicate ids, preserving first-seen order', () => {
+  let s = emptySchedule();
+  s = addSpeaker(s, 'A');
+  s = addSpeaker(s, 'B');
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  s = setSessionSpeakers(s, 'MON-B-breakout-1', ['spk-01', 'spk-02', 'spk-01']);
+  const slots = s.sessions[0].speakers;
+  assert.equal(slots.length, 2);
+  assert.equal(slots[0].speakerId, 'spk-01');
+  assert.equal(slots[1].speakerId, 'spk-02');
 });
 
 // ───── round-trip after mutation ─────────────────────────────────────
