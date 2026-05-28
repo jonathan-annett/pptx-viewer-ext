@@ -385,8 +385,18 @@ function renderTools(vm: EventEditorViewModel): string {
   if (!vm.isPlaceholder) {
     return `<section class="evt-section evt-tools">
       ${toolsHeader}
-      <p class="hint">Generate sample schedule is only available on placeholder schedules. This file has authored data — Clear it first to enable.</p>
-      <p><button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button></p>
+      <p class="hint">
+        Generate folders writes a directory tree mirroring this schedule —
+        one folder per (room, day, timeslot) with a zero-byte placeholder
+        file per speaker slot. Existing <code>.roomSync</code> templates
+        in the destination are preserved (your wiring isn't wiped); the
+        speaker placeholders overwrite.
+      </p>
+      <p>
+        <button type="button" class="btn" id="generate-folders-btn" title="Materialise the folder tree for this event into a destination folder you pick">Generate folders…</button>
+        <button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button>
+      </p>
+      <p class="hint">Generate sample schedule is only available on placeholder schedules. Clear the file first to enable.</p>
     </section>`;
   }
   const c = vm.schedule.config;
@@ -737,6 +747,10 @@ function clientScript(): string {
       }
       if (t.id === 'open-text-btn') {
         post({ type: 'openAsText' });
+        return;
+      }
+      if (t.id === 'generate-folders-btn') {
+        post({ type: 'generateFolders' });
         return;
       }
       if (t.id === 'clear-all-btn') {

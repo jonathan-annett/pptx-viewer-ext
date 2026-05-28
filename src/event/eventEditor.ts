@@ -51,6 +51,7 @@ import {
 } from './scheduleData';
 import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind } from './schedule';
+import { planEventFolders, type Layout } from './eventFolders';
 import { getActivePlaceholderSet } from '../sync/placeholderRegistry';
 import { sha256Hex } from '../sync/hash';
 
@@ -286,6 +287,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'regenerate':
             await this.handleRegenerate(document, msg.config, writeSchedule);
             break;
+          case 'generateFolders':
+            await this.handleGenerateFolders(document);
+            break;
           case 'openAsText':
             await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
             break;
@@ -340,6 +344,164 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
     const next = regenerateFromConfig(config);
     log(`event-editor: regenerate applied — seed=${next.config.seed} sessions=${next.sessions.length}`);
     await writeSchedule(next);
+  }
+
+  /**
+   * Materialise the folder tree implied by the current schedule. Pure planner
+   * lives in ./eventFolders.ts; this wired half asks the user for the bits
+   * the CLI takes via flags (layout + destination), then walks the plan
+   * through `vscode.workspace.fs` so it works in the web extension host.
+   *
+   * Existing `<roomId>.roomSync` templates are preserved on re-runs — the
+   * operator may have hand-wired destinations into them already, and the
+   * planner would otherwise emit a clean template that wipes their work.
+   * Speaker placeholder files are overwritten unconditionally; they're
+   * test fixtures and a fresh run should win.
+   */
+  private async handleGenerateFolders(document: vscode.TextDocument): Promise<void> {
+    const parsed = parseSchedule(document.getText());
+    if (parsed.schedule.sessions.length === 0) {
+      void vscode.window.showWarningMessage(
+        'Generate folders: this schedule has no sessions — nothing to emit.',
+      );
+      return;
+    }
+
+    // Ask layout first — it's the choice the CLI takes via --layout and
+    // there's no useful default (organisers tend to think day-major,
+    // distribution tends to be room-major; pick deliberately).
+    type LayoutItem = vscode.QuickPickItem & { value: Layout };
+    const layoutChoice = await vscode.window.showQuickPick<LayoutItem>(
+      [
+        {
+          label: 'Room-major',
+          description: '<event>/<room>/<day>/<timeslot>/',
+          detail: 'One room\'s whole event under one folder. Natural for distribution to a destination room.',
+          value: 'room-major',
+        },
+        {
+          label: 'Day-major',
+          description: '<event>/<day>/<room>/<timeslot>/',
+          detail: 'One day\'s rooms grouped together. Natural for an organiser\'s view of "what\'s happening today".',
+          value: 'day-major',
+        },
+      ],
+      { placeHolder: 'Choose folder layout for the event tree', title: 'Generate folders' },
+    );
+    if (!layoutChoice) {
+      log('event-editor: generateFolders cancelled at layout pick');
+      return;
+    }
+
+    // Destination folder — default to the workspace folder containing this
+    // document, fall back to the document's own parent dir if the file is
+    // open without a workspace.
+    const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    const defaultDestUri = wsFolder?.uri ?? vscode.Uri.joinPath(document.uri, '..');
+    const picks = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      defaultUri: defaultDestUri,
+      openLabel: 'Generate event folders here',
+      title: `Generate "${parsed.schedule.config.name}" folders into…`,
+    });
+    if (!picks || picks.length === 0) {
+      log('event-editor: generateFolders cancelled at folder picker');
+      return;
+    }
+    const destUri = picks[0];
+
+    // Pass outRoot:'' so the planner returns paths relative to destUri.
+    // The web extension then splits on '/' and uses vscode.Uri.joinPath
+    // to build per-entry URIs — works for any FS provider, including
+    // vscode.dev's FSA-backed file://.
+    const plan = planEventFolders({
+      schedule: parsed.schedule,
+      layout: layoutChoice.value,
+      outRoot: '',
+    });
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `Generating folders for "${parsed.schedule.config.name}"`,
+        cancellable: false,
+      },
+      async (progress) => {
+        const total = plan.directories.length + plan.files.length;
+        let done = 0;
+        const tick = (label: string): void => {
+          done++;
+          progress.report({
+            message: label,
+            increment: total > 0 ? (100 / total) : 0,
+          });
+        };
+
+        for (const dir of plan.directories) {
+          const segments = dir.split('/').filter((s) => s.length > 0);
+          const dirUri = vscode.Uri.joinPath(destUri, ...segments);
+          try {
+            await vscode.workspace.fs.createDirectory(dirUri);
+          } catch (err) {
+            log(
+              `event-editor: generateFolders mkdir failed for ${dirUri.toString()} — ` +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+          tick(dir);
+        }
+
+        let skippedRoomSync = 0;
+        for (const f of plan.files) {
+          const segments = f.path.split('/').filter((s) => s.length > 0);
+          const fileUri = vscode.Uri.joinPath(destUri, ...segments);
+          // Preserve hand-wired .roomSync templates on re-runs. Check stat
+          // first; missing file → ENOENT → write. Any other error path
+          // (permission etc.) we let fall through to the writeFile so the
+          // real diagnostic surfaces.
+          if (f.path.endsWith('.roomSync')) {
+            let exists = false;
+            try {
+              await vscode.workspace.fs.stat(fileUri);
+              exists = true;
+            } catch {
+              exists = false;
+            }
+            if (exists) {
+              skippedRoomSync++;
+              tick(`(kept) ${f.path}`);
+              continue;
+            }
+          }
+          try {
+            await vscode.workspace.fs.writeFile(fileUri, f.bytes);
+          } catch (err) {
+            log(
+              `event-editor: generateFolders writeFile failed for ${fileUri.toString()} — ` +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+          tick(f.path);
+        }
+
+        const eventRootUri = vscode.Uri.joinPath(
+          destUri,
+          ...plan.eventRoot.split('/').filter((s) => s.length > 0),
+        );
+        const summary =
+          `Generated ${plan.files.length - skippedRoomSync} file(s) across ` +
+          `${plan.directories.length} directory(ies) under ${parsed.schedule.config.name}/` +
+          (skippedRoomSync > 0 ? ` (kept ${skippedRoomSync} existing .roomSync template(s))` : '') +
+          `.`;
+        log(`event-editor: ${summary} → ${eventRootUri.toString()}`);
+        const reveal = await vscode.window.showInformationMessage(summary, 'Reveal');
+        if (reveal === 'Reveal') {
+          await vscode.commands.executeCommand('revealInExplorer', eventRootUri);
+        }
+      },
+    );
   }
 
   private async renderFor(document: vscode.TextDocument): Promise<string> {
@@ -425,6 +587,7 @@ type WebviewMessage =
       labelB: string;
     }
   | { type: 'regenerate'; config: Partial<EventConfig> }
+  | { type: 'generateFolders' }
   | { type: 'openAsText' };
 
 function makeNonce(): string {

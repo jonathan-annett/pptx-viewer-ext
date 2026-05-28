@@ -1,31 +1,10 @@
 // Materialise a folder tree + placeholder files from an event schedule JSON.
 //
-// Reads the output of `generate-event-schedule.ts` and writes a directory
-// per (room, day, timeslot) — or (day, room, timeslot), depending on the
-// `--layout` flag — with one placeholder file per speaker slot inside.
-//
-// Also emits one `<roomId>.roomSync` template per unique room at the event
-// root. Each template ships with an empty `destinations: []` so the
-// operator can drag the per-room destination folder(s) into the workspace
-// and wire them up via the form editor. The `path-aliases` block uses the
-// `${roomSync}` template variable + the `**` wildcard so the same alias
-// rule covers both layouts: `**/${roomSync}` → `**` matches whether the
-// room sits at depth 1 (room-major: <event>/<room>/<day>/…) or depth 2
-// (day-major: <event>/<day>/<room>/…), and the captured prefix preserves
-// the per-day grouping at the destination.
-//
-// Why two layouts: organisers usually think day-major (what's happening
-// today, in every room), while distribution to a destination room is
-// naturally room-major (one room's whole deck across the event). Different
-// events suit different layouts; this tool lets the user pick rather than
-// baking in an opinion.
-//
-// File naming convention: "DAY ROOM TIME # SPEAKER.ext" — alpha-sorts
-// stably into speaker order within a session because every field except
-// the slot number is constant in a given directory. Capital DAY/ROOM/TIME
-// matches the conference-circuit convention; ROOM is compact-upper
-// (e.g. "BREAKOUT1" from id "breakout-1") so it survives transit through
-// systems that dislike hyphens in filename tokens.
+// CLI wrapper around the pure planner in src/event/eventFolders.ts. The
+// planner is now web-extension-safe (no node:fs / no node:path) so the
+// .eventSchedule custom editor can call it directly from the browser.
+// This file is the Node entrypoint that wires the planner to argv + the
+// real filesystem.
 //
 // CLI:
 //   node --import tsx scripts/generate-event-folders.ts \
@@ -40,199 +19,29 @@
 // are copied to every speaker slot. Without it, every speaker slot is a
 // zero-byte file. Zero-byte files are recognised as placeholders by the
 // pptx viewer's empty-file short-circuit, so they're a useful default.
-//
-// The planner is pure (`planEventFolders`) so it's testable. The CLI
-// wrapper just walks the plan and writes.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { resolve, join } from 'node:path';
-import type {
-  EventSchedule,
-  EventSession,
-  SessionSpeakerSlot,
-} from './generate-event-schedule';
+import { resolve } from 'node:path';
+import {
+  planEventFolders,
+  type FolderGenPlan,
+  type Layout,
+} from '../src/event/eventFolders';
+import type { EventSchedule } from '../src/event/schedule';
 
-// ───── Types ─────────────────────────────────────────────────────────────
-
-export type Layout = 'room-major' | 'day-major';
-
-export interface FolderGenInput {
-  schedule: EventSchedule;
-  layout: Layout;
-  /** Directory the event folder is created inside (e.g. "./events"). */
-  outRoot: string;
-  /** Optional override; falls back to schedule.config.name when undefined. */
-  eventName?: string;
-  /** File extension for speaker placeholders (default ".pptx"). */
-  extension?: string;
-  /** Bytes copied into every speaker placeholder. Empty buffer → zero-byte files. */
-  placeholderBytes?: Uint8Array;
-}
-
-export interface FolderGenPlan {
-  /** Absolute-ish path to the event root (outRoot/eventName). */
-  eventRoot: string;
-  /** Directories that need to exist before any file is written. Sorted. */
-  directories: string[];
-  /** Files to write. Order matches sessions × speaker slot. */
-  files: Array<{ path: string; bytes: Uint8Array }>;
-}
-
-// ───── Pure planner ──────────────────────────────────────────────────────
+// Re-export the planner surface so existing imports
+// (`from '../scripts/generate-event-folders'`) keep working without churn.
+export {
+  planEventFolders,
+  roomSyncTemplate,
+  sessionSpeakerFilename,
+  normaliseExtension,
+  type FolderGenInput,
+  type FolderGenPlan,
+  type Layout,
+} from '../src/event/eventFolders';
 
 const EMPTY_BYTES = new Uint8Array(0);
-const UTF8 = new TextEncoder();
-
-/**
- * Pure: turn a schedule + layout choice into a list of dirs + files to
- * create. Doesn't touch the filesystem. The materialiser below walks this
- * plan exactly — so what the tests verify here is what the CLI writes.
- *
- * Output includes:
- *  - One directory per (room, day, timeslot) — see `sessionDirectory`.
- *  - One placeholder file per speaker slot inside that directory.
- *  - One `<roomId>.roomSync` template at the event root per unique room
- *    that appears in `schedule.sessions` (post-relocation roomId — so a
- *    relocated breakout shows up under the plenary's template).
- */
-export function planEventFolders(input: FolderGenInput): FolderGenPlan {
-  const { schedule, layout } = input;
-  const eventName = input.eventName ?? schedule.config.name;
-  const ext = normaliseExtension(input.extension ?? '.pptx');
-  const bytes = input.placeholderBytes ?? EMPTY_BYTES;
-
-  const eventRoot = join(input.outRoot, eventName);
-  const dirs = new Set<string>();
-  const files: FolderGenPlan['files'] = [];
-
-  // Unique room ids — preserves first-seen order so the .roomSync files
-  // sort the same way the schedule introduces them (typically plenary
-  // first, breakout-1, breakout-2, …). Set-iteration order is insertion
-  // order in JS, so a plain Set works.
-  const roomIds = new Set<string>();
-
-  for (const session of schedule.sessions) {
-    const dir = sessionDirectory(eventRoot, layout, session);
-    dirs.add(dir);
-    roomIds.add(session.roomId);
-    for (const sp of session.speakers) {
-      const filename = sessionSpeakerFilename(session, sp, ext);
-      files.push({ path: join(dir, filename), bytes });
-    }
-  }
-
-  // Append the per-room `.roomSync` templates last so the placeholder
-  // file count assertions in existing tests stay valid regardless of
-  // ordering — the new files are appended, never interleaved.
-  for (const roomId of roomIds) {
-    files.push({
-      path: join(eventRoot, `${roomId}.roomSync`),
-      bytes: UTF8.encode(roomSyncTemplate(roomId)),
-    });
-  }
-
-  return {
-    eventRoot,
-    directories: Array.from(dirs).sort(),
-    files,
-  };
-}
-
-/**
- * Compose the JSONC body of a generated `<roomId>.roomSync` template.
- *
- * The file ships with `destinations: []` so the operator can wire it up
- * after dragging the per-room destination folder(s) into the workspace.
- * The `${roomSync}` template variable is preserved as a literal — the
- * extension's wired loader resolves it from the filename at load time
- * (resolves to `<roomId>` for a file named `<roomId>.roomSync`), so the
- * same template body could be copied verbatim to a different room and
- * still do the right thing.
- *
- * The `**` glob on both sides handles every reasonable source layout:
- *   - room-major (<event>/<room>/<day>/<timeslot>/) → captures empty
- *     for the room-at-root case; tail flows through unchanged.
- *   - day-major (<event>/<day>/<room>/<timeslot>/) → captures the day
- *     prefix; substituted into the destination path so the per-day
- *     grouping survives the rewrite.
- */
-export function roomSyncTemplate(roomId: string): string {
-  return [
-    `{`,
-    `  // Generated by generate-event-folders. The operator drags the`,
-    `  // destination folder(s) for "${roomId}" into the workspace, then`,
-    `  // uses the form editor to add their URIs here.`,
-    `  //`,
-    `  // \${roomSync} resolves to "${roomId}" at load time (from the`,
-    `  // filename of this file). The **/\${roomSync} alias matches the`,
-    `  // room folder at any depth — works for room-major + day-major`,
-    `  // layouts and any nesting the operator chooses to add later.`,
-    `  "destinations": [],`,
-    `  "path-aliases": {`,
-    `    "**/\${roomSync}": "**"`,
-    `  }`,
-    `}`,
-    ``,
-  ].join('\n');
-}
-
-/** Path components by layout. Relocated sessions follow the post-move roomId. */
-function sessionDirectory(
-  eventRoot: string,
-  layout: Layout,
-  session: EventSession,
-): string {
-  const room = roomFolderToken(session.roomId);
-  const day = session.day;
-  const timeslot = session.timeslot;
-  return layout === 'room-major'
-    ? join(eventRoot, room, day, timeslot)
-    : join(eventRoot, day, room, timeslot);
-}
-
-/** Folder token: lowercase room id straight from the JSON (e.g. "breakout-1"). */
-function roomFolderToken(roomId: string): string {
-  return roomId;
-}
-
-/**
- * Filename room token: uppercase, no hyphens (e.g. "BREAKOUT1"). Matches the
- * conference convention of "MON BREAKOUT1 A 1 John Smith.pptx". Kept distinct
- * from the folder token because filenames travel further than folder names
- * (email, USB sticks, AV-control software) and the compact form is what
- * organisers tend to write by hand.
- */
-function roomFilenameToken(roomId: string): string {
-  return roomId.replace(/-/g, '').toUpperCase();
-}
-
-/**
- * Speaker placeholder filename. Format: `DAY ROOM TIME # SPEAKER.ext`.
- * Within a single directory every field except `#` is constant, so alpha
- * sort puts speakers in their assigned slot order. Speaker names are
- * inserted verbatim — typical "Firstname Lastname" plays well with most
- * filesystems; the rare apostrophe (e.g. "O'Connell") is fine on POSIX
- * and ok on modern Windows.
- */
-export function sessionSpeakerFilename(
-  session: EventSession,
-  speaker: SessionSpeakerSlot,
-  extension: string,
-): string {
-  return (
-    `${session.day} ` +
-    `${roomFilenameToken(session.roomId)} ` +
-    `${session.timeslot} ` +
-    `${speaker.slot} ` +
-    `${speaker.speakerName}` +
-    `${extension}`
-  );
-}
-
-function normaliseExtension(ext: string): string {
-  if (!ext) return '';
-  return ext.startsWith('.') ? ext : `.${ext}`;
-}
 
 // ───── Materialiser ──────────────────────────────────────────────────────
 
