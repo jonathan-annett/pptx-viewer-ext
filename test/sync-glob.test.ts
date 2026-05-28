@@ -89,9 +89,15 @@ test('built-in ignores catch Office lock files anywhere', () => {
 });
 
 test('built-in ignores catch the sync config and manifest', () => {
+  // Both honoured source-config filenames must be ignored anywhere in the
+  // tree — otherwise a `.roomSync` in a source folder would be copied to
+  // every destination as if it were content (the M1 regression this guards
+  // against). See SYNC_CONFIG_FILENAMES in src/sync/configFilenames.ts.
   const set = new GlobSet(BUILT_IN_IGNORES);
   assert.equal(set.matches('.sync.jsonc'), true);
   assert.equal(set.matches('sub/.sync.jsonc'), true);
+  assert.equal(set.matches('.roomSync'), true);
+  assert.equal(set.matches('sub/.roomSync'), true);
   assert.equal(set.matches('.foldersync-manifest.json'), true);
 });
 

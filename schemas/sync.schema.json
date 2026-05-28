@@ -31,7 +31,7 @@
     },
     "exclude": {
       "type": "array",
-      "description": "Glob patterns to exclude, in addition to the built-in ignore list (.git, .DS_Store, ~$*, .sync.jsonc, .foldersync-manifest.json).",
+      "description": "Glob patterns to exclude, in addition to the built-in ignore list (.git, .DS_Store, ~$*, .sync.jsonc, .roomSync, .foldersync-manifest.json).",
       "items": {
         "type": "string",
         "description": "Glob pattern. Supports *, ?, **, and trailing /** to match a directory and its contents."

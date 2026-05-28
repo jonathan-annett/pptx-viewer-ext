@@ -99,7 +99,7 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
 
   <section class="card">
     <h2>Exclude</h2>
-    <p class="hint">Glob patterns to exclude, in addition to the built-ins (<code>.git</code>, <code>.DS_Store</code>, <code>~$*</code>, <code>.sync.jsonc</code>, <code>.foldersync-manifest.json</code>). One pattern per line.</p>
+    <p class="hint">Glob patterns to exclude, in addition to the built-ins (<code>.git</code>, <code>.DS_Store</code>, <code>~$*</code>, <code>.sync.jsonc</code>, <code>.roomSync</code>, <code>.foldersync-manifest.json</code>). One pattern per line.</p>
     <textarea id="exclude" rows="4" spellcheck="false"></textarea>
   </section>
 

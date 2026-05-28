@@ -92,10 +92,11 @@ export class GlobSet {
  * Built-in ignore patterns — applied to every source walk regardless of
  * what the .sync.jsonc says. Mirrors the list in folder-sync-v1-plan.md.
  *
- * The config file itself and the manifest file are *not* baked in here: those
- * are matched by basename anywhere in the tree by the walker, so a deeply
- * nested .sync.jsonc (e.g. for a nested source) is still excluded from its
- * parent's sync correctly.
+ * Both honoured source-config filenames are ignored anywhere in the tree
+ * (see SYNC_CONFIG_FILENAMES in configFilenames.ts). The walker matches
+ * these by basename, so a deeply nested config (e.g. for a nested source)
+ * is still excluded from its parent's sync correctly — and a `.roomSync`
+ * file is never copied to a destination as if it were content.
  */
 export const BUILT_IN_IGNORES: readonly string[] = [
   '**/.git',
@@ -104,6 +105,7 @@ export const BUILT_IN_IGNORES: readonly string[] = [
   '**/Thumbs.db',
   '**/~$*',
   '**/.sync.jsonc',
+  '**/.roomSync',
   '**/.foldersync-manifest.json',
   '**/*.tmp',
 ];
