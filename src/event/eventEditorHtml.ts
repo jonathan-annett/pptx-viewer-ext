@@ -390,6 +390,14 @@ function clientScript(): string {
     // once at script-load time — they survive innerHTML swaps because the
     // root element itself isn't replaced, only its descendants.
     //
+    // Preserve open <details> across the swap so a chip-drag or add-speaker
+    // doesn't collapse the session editor the user is actively working in.
+    // Snapshot the open set before the swap, re-apply after. We can't do a
+    // targeted "only re-render this session" update because a speaker move
+    // in one session changes the eligibility list of every OTHER session in
+    // the same (day, timeslot) — a partial update would leave the sibling
+    // pickers stale.
+    //
     // The wired layer pushes on every successful own-write (with the next
     // schedule directly) AND on every onDidChangeTextDocument event (with
     // the parsed-from-doc view model). Both paths produce the same body
@@ -398,7 +406,33 @@ function clientScript(): string {
       const m = e.data;
       if (!m || typeof m !== 'object') return;
       if (m.type === 'docChanged' && typeof m.html === 'string') {
+        // Snapshot the panels the user has open BEFORE the swap so we can
+        // re-open them after innerHTML replaces every descendant.
+        const openSessionIds = [];
+        const openSessions = root.querySelectorAll('td.cell-filled details.session-edit[open]');
+        for (let i = 0; i < openSessions.length; i++) {
+          const td = openSessions[i].closest('td.cell-filled');
+          const sid = td ? td.getAttribute('data-session-id') : null;
+          if (sid) openSessionIds.push(sid);
+        }
+        // Tools / regenerate section is a top-level <details> too.
+        const toolsOpen = !!root.querySelector('section.evt-tools details[open]');
+
         root.innerHTML = m.html;
+
+        // Re-open. closest() can't traverse from a fragment we just dropped
+        // in, so query against the root.
+        for (let i = 0; i < openSessionIds.length; i++) {
+          const sid = openSessionIds[i];
+          const td = root.querySelector('td.cell-filled[data-session-id="' + cssEscape(sid) + '"]');
+          if (!td) continue;
+          const details = td.querySelector('details.session-edit');
+          if (details) details.open = true;
+        }
+        if (toolsOpen) {
+          const toolsDetails = root.querySelector('section.evt-tools details');
+          if (toolsDetails) toolsDetails.open = true;
+        }
       }
     });
 
