@@ -385,7 +385,7 @@ function renderTools(vm: EventEditorViewModel): string {
   if (!vm.isPlaceholder) {
     return `<section class="evt-section evt-tools">
       ${toolsHeader}
-      <p class="hint">Regenerate is only available on placeholder schedules. This file has authored data — Clear it first to enable Regenerate.</p>
+      <p class="hint">Generate sample schedule is only available on placeholder schedules. This file has authored data — Clear it first to enable.</p>
       <p><button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button></p>
     </section>`;
   }
@@ -393,9 +393,9 @@ function renderTools(vm: EventEditorViewModel): string {
   return `<section class="evt-section evt-tools">
     ${toolsHeader}
     <details>
-      <summary><span class="evt-tools-regen-label">Regenerate from config</span></summary>
+      <summary><span class="evt-tools-regen-label">Generate sample schedule from config</span></summary>
       <p class="hint">
-        Fill these and press Regenerate. The file is rebuilt from scratch — speakers, rooms, and sessions are replaced with a freshly generated set. Available only because this file is currently empty or matches a placeholder hash.
+        Fill these and press Generate. The file is rebuilt from scratch — speakers, rooms, and sessions are <strong>replaced</strong> with a freshly-randomised sample set (speaker names drawn from a fixed pool, breakouts assigned by seed). Available only because this file is currently empty or matches a placeholder hash. Use this to stub out test events; it does NOT re-emit anything from the data you've already entered.
       </p>
       <div class="evt-config-grid">
         ${configField('seed', 'Seed', c.seed)}
@@ -410,7 +410,7 @@ function renderTools(vm: EventEditorViewModel): string {
         ${configField('relocations', 'Relocations', c.relocations)}
       </div>
       <p>
-        <button type="button" class="btn btn-warn" id="regenerate-btn" title="Re-run the generator and replace this file's contents">Regenerate</button>
+        <button type="button" class="btn btn-warn" id="regenerate-btn" title="Run the random-data generator and replace this file's contents with sample data">Generate</button>
         <button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button>
       </p>
     </details>
