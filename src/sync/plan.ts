@@ -34,6 +34,24 @@ export interface FileInfo {
    * we're about to push.
    */
   warnings?: PlanWarning[];
+  /**
+   * Alias-rewrite provenance (M2 of room-sync-format-v1-plan.md). Set on
+   * source-side FileInfos when the source config's `path-aliases` rewrote
+   * the relpath. Absent on destination-side FileInfos and on source-side
+   * FileInfos from configs without aliases. The renderer surfaces this as a
+   * tooltip on each row so the user can trace where the file actually lives
+   * in the source tree.
+   */
+  aliasOrigin?: AliasOrigin;
+}
+
+export interface AliasOrigin {
+  /** Source-relative path BEFORE the alias rewrite (the on-disk location). */
+  sourceRelPath: string;
+  /** LHS of the alias that matched (the source-relative directory). */
+  from: string;
+  /** RHS of the alias (the destination-relative directory). */
+  to: string;
 }
 
 /**
@@ -112,6 +130,13 @@ export interface PlanItem {
    * flagged.
    */
   isPlaceholder?: boolean;
+  /**
+   * Alias-rewrite provenance copied from the source FileInfo at classification
+   * time. Only ever attached to source-side items (create / update-* / skip).
+   * The plan view renders this as a tooltip so the user can trace where the
+   * file actually lives in the source tree under a `path-aliases` rewrite.
+   */
+  aliasOrigin?: AliasOrigin;
 }
 
 /**
@@ -147,6 +172,7 @@ export function classifyFiles(
   //    - destination-only → consult manifest.decisions[key].destOnlyDelete.
   for (const sourceFile of sourceFiles) {
     const carry = carryWarnings(sourceFile);
+    const origin = carryAliasOrigin(sourceFile);
     const destFile = destMap.get(sourceFile.relPath);
     const key = manifestKey(sourceWorkspaceFolderName, sourceFile.relPath);
     const warningCarry = rememberedForWarning(sourceFile, manifest, key);
@@ -158,6 +184,7 @@ export function classifyFiles(
         sourceHash: sourceFile.sha256,
         ...carry,
         ...warningCarry,
+        ...origin,
       });
       continue;
     }
@@ -171,6 +198,7 @@ export function classifyFiles(
         sourceHash: sourceFile.sha256,
         destHash: destFile.sha256,
         ...carry,
+        ...origin,
       });
       continue;
     }
@@ -188,6 +216,7 @@ export function classifyFiles(
         manifestHash: entry.sha256,
         ...carry,
         ...warningCarry,
+        ...origin,
       });
     } else {
       // Manifest absent, or it disagrees — could be user-edited destination.
@@ -204,6 +233,7 @@ export function classifyFiles(
         ...(entry ? { manifestHash: entry.sha256 } : {}),
         ...carry,
         ...remembered,
+        ...origin,
       });
     }
   }
@@ -317,6 +347,10 @@ function carryWarnings(src: FileInfo): { warnings?: PlanWarning[] } {
   return src.warnings && src.warnings.length > 0
     ? { warnings: src.warnings }
     : {};
+}
+
+function carryAliasOrigin(src: FileInfo): { aliasOrigin?: AliasOrigin } {
+  return src.aliasOrigin ? { aliasOrigin: src.aliasOrigin } : {};
 }
 
 /**

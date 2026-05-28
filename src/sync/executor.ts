@@ -237,7 +237,12 @@ async function executeWrite<U extends { toString(): string }>(
   now: () => string,
 ): Promise<void> {
   const { fs, sourceRootUri, destRootUri } = opts;
-  const sourceUri = fs.joinPath(sourceRootUri, item.relPath);
+  // Under `path-aliases` (M2 of room-sync-format-v1-plan.md) `item.relPath`
+  // is the destination-relative path post-rewrite. The on-disk source file
+  // lives at the pre-rewrite path carried on `aliasOrigin`. When no alias
+  // rewrote this row, `aliasOrigin` is absent and both paths coincide.
+  const sourceRelPath = item.aliasOrigin?.sourceRelPath ?? item.relPath;
+  const sourceUri = fs.joinPath(sourceRootUri, sourceRelPath);
   const destUri = fs.joinPath(destRootUri, item.relPath);
   const tmpUri = fs.joinPath(destRootUri, item.relPath + TMP_SUFFIX);
 

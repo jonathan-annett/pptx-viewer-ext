@@ -103,6 +103,13 @@ export function renderConfigEditorHtml(vm: ConfigEditorViewModel, nonce: string)
     <textarea id="exclude" rows="4" spellcheck="false"></textarea>
   </section>
 
+  <section class="card">
+    <h2>Path aliases</h2>
+    <p class="hint">Rewrite source-relative directories into destination-relative directories. When non-empty, only files inside one of the listed <em>From</em> directories sync — the destination relpath is <em>To</em> + the sub-path inside <em>From</em>. Useful for unifying day-major layouts (<code>MON/room1</code>, <code>TUE/room1</code>, …) into a room-major destination tree. Precedence is the row order (first match wins) — use the arrow buttons to reorder.</p>
+    <ul id="alias-list" class="alias-list"></ul>
+    <button id="add-alias" class="btn btn-secondary" type="button">+ Add path alias</button>
+  </section>
+
   <section class="card plan-card">
     <div class="plan-card-head">
       <h2>Dry-run plan — this room</h2>
@@ -189,6 +196,36 @@ code {
   border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.15));
 }
 .dest-list li:last-child { border-bottom: none; }
+/* Path-aliases list — From/To pair, reorder controls, remove. The grid
+   keeps From and To equal-width so users can see both sides at a glance;
+   the arrow column is intrinsic-width. M2 of room-sync-format-v1-plan.md. */
+.alias-list { list-style: none; padding: 0; margin: 0 0 10px; }
+.alias-list li {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr) auto auto;
+  gap: 6px 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--vscode-editorWidget-border, rgba(127,127,127,0.15));
+}
+.alias-list li:last-child { border-bottom: none; }
+.alias-arrow {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+.alias-move {
+  background: transparent;
+  border: 1px solid var(--vscode-input-border, rgba(127,127,127,0.3));
+  color: var(--vscode-foreground);
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+.alias-move:disabled { opacity: 0.4; cursor: not-allowed; }
+.alias-move-group { display: inline-flex; gap: 2px; }
 .dest-uri {
   grid-column: 1 / -1;
   margin: 0;
@@ -347,6 +384,10 @@ const CLIENT_JS = `
     })),
     include: initial.config.include || [],
     exclude: initial.config.exclude || [],
+    // Path aliases (M2): on-disk shape is Record<string,string>; the form
+    // keeps it as an ordered list of {from,to} pairs so precedence and
+    // reordering are explicit. Flushed back to a record at save time.
+    pathAliases: aliasRecordToList(initial.config.pathAliases || {}),
     // Each entry: { uri, name }. Display name is for the dropdown label;
     // the option value (what gets persisted in .sync.jsonc) is the URI.
     workspaceFolders: initial.workspaceFolders || [],
@@ -380,6 +421,27 @@ const CLIENT_JS = `
   const destListEl = document.getElementById('dest-list');
   const includeEl = document.getElementById('include');
   const excludeEl = document.getElementById('exclude');
+  const aliasListEl = document.getElementById('alias-list');
+
+  function aliasRecordToList(record) {
+    return Object.entries(record || {}).map(([from, to]) => ({
+      from: String(from || ''),
+      to: String(to || ''),
+    }));
+  }
+  function aliasListToRecord(list) {
+    // Object property order is preserved — that's the precedence at runtime.
+    // Skip rows that are fully empty (both sides blank) so a user adding a
+    // row then changing their mind doesn't pollute the saved file.
+    const out = {};
+    for (const a of list) {
+      const from = (a.from || '').trim();
+      const to = (a.to || '').trim();
+      if (from === '' && to === '') continue;
+      out[from] = to;
+    }
+    return out;
+  }
 
   includeEl.value = state.include.join('\\n');
   excludeEl.value = state.exclude.join('\\n');
@@ -511,6 +573,99 @@ const CLIENT_JS = `
     });
   }
 
+  function renderAliasList() {
+    aliasListEl.innerHTML = '';
+    state.pathAliases.forEach((alias, idx) => {
+      const li = document.createElement('li');
+
+      const fromInput = document.createElement('input');
+      fromInput.type = 'text';
+      fromInput.placeholder = 'From (source dir, e.g. MON/room1)';
+      fromInput.spellcheck = false;
+      fromInput.value = alias.from;
+      fromInput.addEventListener('input', () => {
+        state.pathAliases[idx].from = fromInput.value;
+      });
+      fromInput.addEventListener('change', flush);
+      fromInput.addEventListener('blur', flush);
+
+      const arrow = document.createElement('span');
+      arrow.className = 'alias-arrow';
+      arrow.textContent = '→';
+
+      const toInput = document.createElement('input');
+      toInput.type = 'text';
+      toInput.placeholder = 'To (destination dir, e.g. MON)';
+      toInput.spellcheck = false;
+      toInput.value = alias.to;
+      toInput.addEventListener('input', () => {
+        state.pathAliases[idx].to = toInput.value;
+      });
+      toInput.addEventListener('change', flush);
+      toInput.addEventListener('blur', flush);
+
+      // Reorder controls — precedence is first-match-wins, so the user can
+      // promote a narrower rule above a broader one.
+      const moveGroup = document.createElement('span');
+      moveGroup.className = 'alias-move-group';
+      const up = document.createElement('button');
+      up.type = 'button';
+      up.className = 'alias-move';
+      up.title = 'Move up (raise precedence)';
+      up.textContent = '↑';
+      up.disabled = idx === 0;
+      up.addEventListener('click', () => {
+        if (idx === 0) return;
+        const tmp = state.pathAliases[idx - 1];
+        state.pathAliases[idx - 1] = state.pathAliases[idx];
+        state.pathAliases[idx] = tmp;
+        renderAliasList();
+        flush();
+      });
+      const down = document.createElement('button');
+      down.type = 'button';
+      down.className = 'alias-move';
+      down.title = 'Move down (lower precedence)';
+      down.textContent = '↓';
+      down.disabled = idx === state.pathAliases.length - 1;
+      down.addEventListener('click', () => {
+        if (idx === state.pathAliases.length - 1) return;
+        const tmp = state.pathAliases[idx + 1];
+        state.pathAliases[idx + 1] = state.pathAliases[idx];
+        state.pathAliases[idx] = tmp;
+        renderAliasList();
+        flush();
+      });
+      moveGroup.appendChild(up);
+      moveGroup.appendChild(down);
+
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'btn-remove';
+      rm.textContent = '×';
+      rm.title = 'Remove alias';
+      rm.addEventListener('click', () => {
+        state.pathAliases.splice(idx, 1);
+        renderAliasList();
+        flush();
+      });
+
+      li.appendChild(fromInput);
+      li.appendChild(arrow);
+      li.appendChild(toInput);
+      li.appendChild(moveGroup);
+      li.appendChild(rm);
+      aliasListEl.appendChild(li);
+    });
+  }
+
+  document.getElementById('add-alias').addEventListener('click', () => {
+    state.pathAliases.push({ from: '', to: '' });
+    renderAliasList();
+    // Don't flush yet — fully empty row is filtered out by aliasListToRecord
+    // so flush would no-op. Wait for the user to type something.
+  });
+
   document.getElementById('add-dest').addEventListener('click', () => {
     // Default to the first workspace folder that's actually a legal
     // destination — skip the source folder, anything claimed by other
@@ -565,6 +720,7 @@ const CLIENT_JS = `
           .map(d => d.path ? { uri: d.uri, path: d.path } : { uri: d.uri }),
         include: state.include,
         exclude: state.exclude,
+        pathAliases: aliasListToRecord(state.pathAliases),
       },
     });
   }
@@ -751,9 +907,11 @@ const CLIENT_JS = `
       }));
       state.include = msg.config.include || [];
       state.exclude = msg.config.exclude || [];
+      state.pathAliases = aliasRecordToList(msg.config.pathAliases || {});
       includeEl.value = state.include.join('\\n');
       excludeEl.value = state.exclude.join('\\n');
       renderDestList();
+      renderAliasList();
       if (msg.parseError) {
         parseErrEl.textContent = 'Cannot parse file: ' + msg.parseError;
         parseErrEl.hidden = false;
@@ -799,5 +957,6 @@ const CLIENT_JS = `
   });
 
   renderDestList();
+  renderAliasList();
 })();
 `;

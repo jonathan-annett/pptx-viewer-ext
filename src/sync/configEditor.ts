@@ -340,7 +340,7 @@ type WebviewMessage =
   | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
 function emptyConfig(): SyncConfig {
-  return { destinations: [], include: [], exclude: [] };
+  return { destinations: [], include: [], exclude: [], pathAliases: {} };
 }
 
 function currentFolderEntries(): Array<{ uri: string; name: string }> {
@@ -526,7 +526,27 @@ function serialiseConfig(originalText: string, config: SyncConfig): string {
   text = setOrRemoveArray(text, 'include', config.include);
   text = setOrRemoveArray(text, 'exclude', config.exclude);
 
+  // path-aliases — empty record stays out of the file unless it was already
+  // there (mirrors the include/exclude policy). The on-disk spelling is the
+  // hyphenated `path-aliases`. If the doc carries the camelCase `pathAliases`
+  // (legitimately accepted by parseSyncConfigText for ergonomics) the
+  // hyphenated key gets written alongside it — neutral on parse, but worth
+  // documenting if it surprises a user.
+  text = setOrRemoveAliasRecord(text, 'path-aliases', config.pathAliases ?? {});
+
   return text;
+}
+
+function setOrRemoveAliasRecord(
+  text: string,
+  key: string,
+  value: Record<string, string>,
+): string {
+  const isEmpty = Object.keys(value).length === 0;
+  if (isEmpty) {
+    if (!currentlyHasKey(text, key)) return text;
+  }
+  return applyEdits(text, modify(text, [key], value, { formattingOptions: FORMATTING }));
 }
 
 function setOrRemoveArray(text: string, key: string, value: string[]): string {
@@ -563,6 +583,9 @@ function canonicalSerialise(config: SyncConfig): string {
   const out: Record<string, unknown> = { destinations: config.destinations };
   if (config.include.length > 0) out.include = config.include;
   if (config.exclude.length > 0) out.exclude = config.exclude;
+  if (Object.keys(config.pathAliases).length > 0) {
+    out['path-aliases'] = config.pathAliases;
+  }
   return JSON.stringify(out, null, 2);
 }
 

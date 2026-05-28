@@ -14,10 +14,16 @@
 
 import * as vscode from 'vscode';
 import type { ResolvedSource, ResolvedDestination, ResolvedTopology } from './topology';
-import type { FileInfo, PlanItem, PlanWarning } from './plan';
+import type { AliasOrigin, FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
-import { walkTree } from './walker';
+import { walkTree, type WalkEntry } from './walker';
 import { hashFileAtUri } from './hash';
+import {
+  aliasesFromRecord,
+  detectAliasCollisions,
+  resolveAlias,
+  type PathAlias,
+} from './aliasResolve';
 import {
   getHashCacheSingleton,
   type HashCacheEntry,
@@ -193,6 +199,16 @@ async function planForSource(
   const destExclude = new GlobSet([...BUILT_IN_IGNORES, ...(yamlConfig?.exclude ?? [])]);
   const destInclude = new GlobSet([]); // include filter only meaningful on source
 
+  // Path-aliases (M2 of room-sync-format-v1-plan.md): when present, every
+  // source file's source-relative path goes through `resolveAlias` to derive
+  // its destination-relative path. Files outside every LHS are dropped
+  // (no implicit catch-all — opting into aliases is opting into explicit
+  // sub-tree mapping). Empty record = legacy behaviour, file relpaths flow
+  // through unchanged.
+  const aliasList: PathAlias[] = yamlConfig?.pathAliases
+    ? aliasesFromRecord(yamlConfig.pathAliases)
+    : [];
+
   // One cache instance shared across source + destination walks — the
   // singleton is initialised at activation; tests / no-cache contexts get
   // undefined and walkAndHash degrades to stat+read+hash.
@@ -240,6 +256,7 @@ async function planForSource(
         // for hashing — one read per source file, validators see the same content
         // we will (or won't) sync.
         validate: true,
+        aliases: aliasList,
       },
       cache,
       sourceStats,
@@ -250,6 +267,27 @@ async function planForSource(
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
   }
+
+  // Surface alias-driven dest-relpath collisions to the Output Channel.
+  // Logged once per source walk (the rewrite is paid once, before fanning
+  // out to destinations) — collisions are a config-level issue, not a
+  // per-destination one. The user fixes them in `.roomSync`'s `path-aliases`.
+  if (aliasList.length > 0) {
+    const aliasCollisions = detectAliasCollisions(
+      sourceFiles.map((f) => ({
+        sourceRelPath: f.aliasOrigin?.sourceRelPath ?? f.relPath,
+        destRelPath: f.relPath,
+      })),
+    );
+    for (const c of aliasCollisions) {
+      log(
+        `sync: [alias-collision] ${displayConfigUri(source.configUri)}: ` +
+          `multiple source files rewrite to "${c.destRelPath}" — ` +
+          c.sourceRelPaths.join(', '),
+      );
+    }
+  }
+
   const scopedSourceFiles = filterFilesToScope(sourceFiles, scope);
 
   // Compute per-source-walk parse-cache delta. Logged once per source (the
@@ -397,13 +435,17 @@ async function pathIsFile(uri: vscode.Uri): Promise<boolean> {
  */
 async function loadConfigForSource(
   source: ResolvedSource,
-): Promise<{ include: string[]; exclude: string[] } | null> {
+): Promise<{ include: string[]; exclude: string[]; pathAliases: Record<string, string> } | null> {
   try {
     const bytes = await vscode.workspace.fs.readFile(source.configUri);
     const text = new TextDecoder().decode(bytes);
     const parsed = parseSyncConfigText(text);
     if (parsed.kind !== 'ok') return null;
-    return { include: parsed.config.include, exclude: parsed.config.exclude };
+    return {
+      include: parsed.config.include,
+      exclude: parsed.config.exclude,
+      pathAliases: parsed.config.pathAliases,
+    };
   } catch {
     return null;
   }
@@ -418,6 +460,48 @@ interface WalkAndHashOpts {
    * Only meaningful on the source walk; the destination walk leaves this off.
    */
   validate?: boolean;
+  /**
+   * Source-rewrite aliases. When non-empty, each walked entry's relpath is
+   * resolved through the alias list: matches are rewritten with the alias
+   * provenance attached as `aliasOrigin`; non-matches are dropped before
+   * hashing (no I/O cost for files outside every LHS). Only meaningful on
+   * the source walk; the destination walk leaves this empty.
+   */
+  aliases?: readonly PathAlias[];
+}
+
+/** A walked entry, optionally with its source-rewrite provenance attached. */
+interface WalkAlias extends WalkEntry {
+  aliasOrigin?: AliasOrigin;
+}
+
+/**
+ * Apply the alias rewrite to a freshly walked entry list. Empty alias list →
+ * passthrough (legacy behaviour); non-empty list → drop entries with no match
+ * and rewrite the surviving entries' relpath + aliasOrigin.
+ */
+function applyAliases(entries: readonly WalkEntry[], aliases: readonly PathAlias[]): WalkAlias[] {
+  if (aliases.length === 0) return entries.slice();
+  const out: WalkAlias[] = [];
+  for (const e of entries) {
+    const match = resolveAlias(e.relPath, aliases);
+    if (!match) continue;
+    out.push({
+      ...e,
+      relPath: match.destRelPath,
+      aliasOrigin: {
+        sourceRelPath: e.relPath,
+        from: match.alias.from,
+        to: match.alias.to,
+      },
+    });
+  }
+  return out;
+}
+
+function displayConfigUri(uri: vscode.Uri): string {
+  const rel = vscode.workspace.asRelativePath(uri, false);
+  return rel || uri.toString();
 }
 
 async function walkAndHash(
@@ -429,7 +513,13 @@ async function walkAndHash(
   parseSnapshot?: Map<string, CachedParseResult>,
   hashSnapshot?: Map<string, HashCacheEntry>,
 ): Promise<FileInfo[]> {
-  const entries = await walkTree(root, opts);
+  const rawEntries = await walkTree(root, opts);
+  // Apply path-alias rewrite before we read any bytes — files outside every
+  // LHS drop here, saving the read+hash for paths the user didn't opt in for.
+  // Rewrite preserves URI (the file lives at its on-disk location); only the
+  // relpath changes, and aliasOrigin carries the pre-rewrite path for the
+  // plan-view tooltip.
+  const entries: WalkAlias[] = applyAliases(rawEntries, opts.aliases ?? []);
   const out: FileInfo[] = [];
   const fs = vscodeFs();
   for (const e of entries) {
@@ -468,7 +558,12 @@ async function walkAndHash(
       } else {
         stats.misses++;
       }
-      const info: FileInfo = { relPath: e.relPath, size: e.size, sha256: result.sha256 };
+      const info: FileInfo = {
+        relPath: e.relPath,
+        size: e.size,
+        sha256: result.sha256,
+        ...(e.aliasOrigin ? { aliasOrigin: e.aliasOrigin } : {}),
+      };
       if (opts.validate && result.bytes) {
         // Pass sha256 + parseCache + parseSnapshot through. The snapshot
         // (when present) serves snapshot hits without an IDB round-trip;

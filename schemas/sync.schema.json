@@ -44,6 +44,21 @@
         "type": "string",
         "description": "Glob pattern. Supports *, ?, **, and trailing /** to match a directory and its contents."
       }
+    },
+    "path-aliases": {
+      "type": "object",
+      "description": "Source-rewrite layer. Each entry maps a source-relative directory (LHS) to a destination-relative directory (RHS). When non-empty, the walker emits one stream per LHS — files outside every LHS are not synced. Aliases combine additively; precedence is the order of the entries (first match wins). Useful for unifying day-major source layouts (MON/room1, TUE/room1, …) into a single room-major destination tree.",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Destination-relative directory. Leave empty to strip the LHS prefix and write files at the destination root."
+      },
+      "examples": [
+        {
+          "MON/room1": "MON",
+          "TUE/room1": "TUE",
+          "WED/room1": "WED"
+        }
+      ]
     }
   }
 }

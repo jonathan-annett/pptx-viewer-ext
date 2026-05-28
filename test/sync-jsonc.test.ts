@@ -55,6 +55,7 @@ test('full .sync.jsonc shape parses to expected SyncConfig', () => {
     ],
     exclude: ['~$*', '*.tmp', 'node_modules/**'],
     include: ['**/*'],
+    pathAliases: {},
   });
 });
 
@@ -186,6 +187,84 @@ test('unknown top-level keys are ignored', () => {
 test('extra name field on destination is ignored (parser tolerates it)', () => {
   const got = ok(`{ "destinations": [{ "uri": "${URI_A}", "name": "legacy" }] }`);
   assert.deepEqual(got.config.destinations, [{ uri: URI_A }]);
+});
+
+// ───── path-aliases (M2 of room-sync-format-v1-plan.md) ──────────────────
+
+test('path-aliases parses the hyphenated spelling', () => {
+  const got = ok(`{
+  "destinations": [{ "uri": "${URI_A}" }],
+  "path-aliases": {
+    "MON/room1": "MON",
+    "TUE/room1": "TUE"
+  }
+}`);
+  assert.deepEqual(got.config.pathAliases, {
+    'MON/room1': 'MON',
+    'TUE/room1': 'TUE',
+  });
+});
+
+test('path-aliases also accepts the camelCase spelling', () => {
+  // The TypeScript field is `pathAliases`; users typing it from the type
+  // shape should still see it work. The schema documents the hyphenated form.
+  const got = ok(`{
+  "destinations": [{ "uri": "${URI_A}" }],
+  "pathAliases": { "MON/room1": "MON" }
+}`);
+  assert.deepEqual(got.config.pathAliases, { 'MON/room1': 'MON' });
+});
+
+test('path-aliases is empty record when omitted', () => {
+  const got = ok(`{ "destinations": [{ "uri": "${URI_A}" }] }`);
+  assert.deepEqual(got.config.pathAliases, {});
+});
+
+test('path-aliases normalises leading/trailing/duplicate slashes on both sides', () => {
+  const got = ok(`{
+  "destinations": [{ "uri": "${URI_A}" }],
+  "path-aliases": {
+    "/MON/room1/": "/MON/",
+    "TUE//room1": "TUE"
+  }
+}`);
+  assert.deepEqual(got.config.pathAliases, {
+    'MON/room1': 'MON',
+    'TUE/room1': 'TUE',
+  });
+});
+
+test('path-aliases preserves authoring order (used as precedence)', () => {
+  // First-match-wins resolution depends on order. JSON property order is
+  // preserved by jsonc-parser, so the runtime sees aliases in the order
+  // the user wrote them.
+  const got = ok(`{
+  "destinations": [{ "uri": "${URI_A}" }],
+  "path-aliases": {
+    "z/first": "z",
+    "a/second": "a",
+    "m/third": "m"
+  }
+}`);
+  assert.deepEqual(Object.keys(got.config.pathAliases), [
+    'z/first',
+    'a/second',
+    'm/third',
+  ]);
+});
+
+test('path-aliases not an object is rejected', () => {
+  err(
+    `{ "destinations": [{ "uri": "${URI_A}" }], "path-aliases": ["nope"] }`,
+    /`path-aliases` must be an object/,
+  );
+});
+
+test('path-aliases with a non-string value is rejected', () => {
+  err(
+    `{ "destinations": [{ "uri": "${URI_A}" }], "path-aliases": { "a": 42 } }`,
+    /`path-aliases`\["a"\] must be a string/,
+  );
 });
 
 // ───── run ────────────────────────────────────────────────────────────────

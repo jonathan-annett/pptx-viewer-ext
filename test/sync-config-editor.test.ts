@@ -18,7 +18,7 @@ const test = (name: string, fn: () => void): void => {
 
 function baseVm(overrides: Partial<ConfigEditorViewModel> = {}): ConfigEditorViewModel {
   return {
-    initialConfig: { destinations: [], include: [], exclude: [] },
+    initialConfig: { destinations: [], include: [], exclude: [], pathAliases: {} },
     workspaceFolders: [],
     sourceFolderUri: null,
     claimedElsewhere: [],
@@ -44,6 +44,7 @@ test('init payload includes destinations (uri-keyed), includes, excludes', () =>
         destinations: [{ uri: 'file:///handle/abc', path: 'a/b' }],
         include: ['**/*.ts'],
         exclude: ['*.tmp'],
+        pathAliases: {},
       },
       workspaceFolders: [
         { uri: 'file:///handle/abc', name: 'foo' },
@@ -137,6 +138,31 @@ test('hint text explains the source + claimed-elsewhere filters', () => {
   // expectation that the dropdown is filtered.
   const html = renderConfigEditorHtml(baseVm(), 'n');
   assert.match(html, /source folder.*filtered out automatically/);
+});
+
+test('renders the Path aliases section + add button', () => {
+  // M2 of room-sync-format-v1-plan.md: the editor surfaces a dedicated card
+  // for the path-aliases field. Initially empty; the user adds rows via the
+  // "+ Add path alias" button.
+  const html = renderConfigEditorHtml(baseVm(), 'n');
+  assert.match(html, /<h2>Path aliases<\/h2>/);
+  assert.match(html, /id="alias-list"/);
+  assert.match(html, /id="add-alias"/);
+});
+
+test('payload carries pathAliases verbatim from initial config', () => {
+  const html = renderConfigEditorHtml(
+    baseVm({
+      initialConfig: {
+        destinations: [{ uri: 'file:///handle/abc' }],
+        include: [],
+        exclude: [],
+        pathAliases: { 'MON/room1': 'MON', 'TUE/room1': 'TUE' },
+      },
+    }),
+    'n',
+  );
+  assert.match(html, /"pathAliases":\{"MON\/room1":"MON","TUE\/room1":"TUE"\}/);
 });
 
 test('payload escapes </ to prevent script-tag breakout', () => {

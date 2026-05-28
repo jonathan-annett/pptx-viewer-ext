@@ -11,6 +11,7 @@
 // text editor (see contributes.jsonValidation in package.json).
 
 import { parse as parseJsonc, type ParseError, printParseErrorCode } from 'jsonc-parser';
+import { normaliseAliasPath } from './aliasResolve';
 
 export interface SyncDestination {
   /**
@@ -33,6 +34,22 @@ export interface SyncConfig {
   exclude: string[];
   /** Glob patterns to include (default behaviour: everything not excluded). */
   include: string[];
+  /**
+   * Source-rewrite layer (M2 of room-sync-format-v1-plan.md). Each entry
+   * maps a source-relative LHS directory to a destination-relative RHS
+   * directory. When non-empty, the walker emits one stream per LHS instead
+   * of treating the source folder as a single root — files outside every
+   * LHS are not synced (no implicit catch-all; users opting into aliases
+   * pick exactly what flows through them).
+   *
+   * Authoring order matters: aliases resolve first-match-wins. JSON object
+   * iteration is the authoring order in every parser we use, so the
+   * record-of-strings form on disk is preserved as an ordered list here.
+   *
+   * Both sides have leading/trailing slashes stripped and repeats collapsed
+   * — same rules as `destinations[].path`.
+   */
+  pathAliases: Record<string, string>;
 }
 
 export type ParseResult =
@@ -109,14 +126,46 @@ function validateSchema(raw: unknown): ParseResult {
   const include = toStringArray(obj.include, 'include');
   if (include.kind === 'error') return include;
 
+  // path-aliases can be `path-aliases` (the spec spelling — hyphens read
+  // naturally in JSONC and match the field name in the JSON Schema) or
+  // `pathAliases` (camelCase, what TypeScript callers see). Accept either
+  // so a user typing one form by reflex doesn't get a silent miss.
+  const aliasesRaw = obj['path-aliases'] ?? obj.pathAliases;
+  const pathAliases = toAliasRecord(aliasesRaw);
+  if (pathAliases.kind === 'error') return pathAliases;
+
   return {
     kind: 'ok',
     config: {
       destinations,
       exclude: exclude.value,
       include: include.value,
+      pathAliases: pathAliases.value,
     },
   };
+}
+
+function toAliasRecord(
+  raw: unknown,
+): { kind: 'ok'; value: Record<string, string> } | { kind: 'error'; error: string } {
+  if (raw === undefined || raw === null) return { kind: 'ok', value: {} };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { kind: 'error', error: '`path-aliases` must be an object of string→string' };
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== 'string') {
+      return {
+        kind: 'error',
+        error: `\`path-aliases\`["${key}"] must be a string`,
+      };
+    }
+    // Normalise both sides — same rules as destination subpaths. The empty
+    // string is preserved as a "whole-tree" LHS or "strip-prefix" RHS marker
+    // (see aliasResolve.ts).
+    out[normaliseAliasPath(key)] = normaliseAliasPath(value);
+  }
+  return { kind: 'ok', value: out };
 }
 
 function toStringArray(

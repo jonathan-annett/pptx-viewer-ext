@@ -1035,6 +1035,75 @@ test('renderPlanHtml: all-placeholders uses singular when N=M=1', () => {
   assert.match(html, /All 1 source file is a placeholder \(no content received yet\)\./);
 });
 
+// ───── path-aliases provenance (M2) ──────────────────────────────────────
+
+test('toViewModel carries aliasOrigin onto source rows', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'MON/keynote.pptx', {
+          sourceSize: 1024,
+          sourceHash: 'aaaa',
+          aliasOrigin: {
+            sourceRelPath: 'MON/room1/keynote.pptx',
+            from: 'MON/room1',
+            to: 'MON',
+          },
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.create[0];
+  assert.ok(row.aliasOrigin, 'create row should carry aliasOrigin');
+  assert.equal(row.aliasOrigin!.sourceRelPath, 'MON/room1/keynote.pptx');
+  assert.equal(row.aliasOrigin!.from, 'MON/room1');
+  assert.equal(row.aliasOrigin!.to, 'MON');
+});
+
+test('renderPlanHtml renders the alias-from badge + tooltip when aliasOrigin is present', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'MON/keynote.pptx', {
+          sourceSize: 1024,
+          sourceHash: 'aaaa',
+          aliasOrigin: {
+            sourceRelPath: 'MON/room1/keynote.pptx',
+            from: 'MON/room1',
+            to: 'MON',
+          },
+        }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  // The "← <sourceRelPath>" badge is rendered next to the path.
+  assert.match(html, /class="alias-from"[^>]*>← MON\/room1\/keynote\.pptx</);
+  // The tooltip on both the path span and the badge mentions the alias pair.
+  // Quotes inside the title attribute are HTML-escaped to &quot;.
+  assert.match(html, /Rewritten by path-alias &quot;MON\/room1&quot; → &quot;MON&quot;/);
+});
+
+test('renderPlanHtml omits the alias-from badge for rows with no aliasOrigin', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.txt', { sourceSize: 100, sourceHash: 'aaaa' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const html = renderPlanHtml(vm, 'n');
+  // `alias-from` appears in the CSS block (a rule for the badge class) even
+  // when no row uses it — match the actual rendered <span> instead.
+  assert.ok(!/<span class="alias-from"/.test(html), 'no alias-from <span> for non-aliased rows');
+});
+
 // ───── humanSize sanity ──────────────────────────────────────────────────
 
 test('humanSize formats B / KB / MB', () => {

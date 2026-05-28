@@ -6,7 +6,7 @@
 // other sync tests; the vscode-touching half lives in planView.ts.
 
 import type { PlanForDestination } from './planner';
-import type { PlanItem, PlanWarning } from './plan';
+import type { AliasOrigin, PlanItem, PlanWarning } from './plan';
 import { hasBlockingWarning, hasOverridableWarningOnly } from './plan';
 
 // ───── view model ────────────────────────────────────────────────────────
@@ -48,6 +48,14 @@ export interface PlanRowView {
    * safe (greens) or already accounted for by the manifest.
    */
   decision?: PlanRowDecisionView;
+  /**
+   * Alias-rewrite provenance copied from the source FileInfo (M2 of
+   * room-sync-format-v1-plan.md). Set when the source config's `path-aliases`
+   * rewrote this file's relpath. The renderer surfaces it as a tooltip on
+   * the path span so users can trace "this file landed at MON/foo.pptx
+   * because alias `MON/room1 → MON` rewrote MON/room1/foo.pptx".
+   */
+  aliasOrigin?: AliasOrigin;
 }
 
 export interface PlanWarningView {
@@ -379,6 +387,7 @@ function toRow(item: PlanItem): PlanRowView {
       ? { warnings: item.warnings.map(toWarningView) }
       : {}),
     ...(item.isPlaceholder ? { isPlaceholder: true } : {}),
+    ...(item.aliasOrigin ? { aliasOrigin: item.aliasOrigin } : {}),
   };
 }
 
@@ -629,12 +638,35 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
   // split keeps the size+hash column stable now that placeholders, warning
   // badges, and decision controls have started accumulating between them.
   const leadExtras = [badge, placeholderChip, decisionHtml].filter((x) => x !== '').join(' ');
-  const lead = `<div class="row-lead"><span class="path">${escapeHtml(row.relPath)}</span>${leadExtras ? ` ${leadExtras}` : ''}</div>`;
+  // Alias rewrite (M2 of room-sync-format-v1-plan.md): when a path-alias
+  // rewrote this file's relpath, show the on-disk source path + the alias
+  // pair in a tooltip on the path span so the user can trace where the
+  // file actually lives. Also append a small "← <sourceRelPath>" badge
+  // after the path so the rewrite is visible at a glance without hovering.
+  const aliasTooltip = row.aliasOrigin ? aliasTooltipText(row.aliasOrigin) : '';
+  const pathAttrs = aliasTooltip ? ` title="${escapeHtml(aliasTooltip)}"` : '';
+  const aliasBadge = row.aliasOrigin
+    ? `<span class="alias-from" title="${escapeHtml(aliasTooltip)}">← ${escapeHtml(row.aliasOrigin.sourceRelPath)}</span>`
+    : '';
+  const leadInner = `<span class="path"${pathAttrs}>${escapeHtml(row.relPath)}</span>${aliasBadge ? ` ${aliasBadge}` : ''}`;
+  const lead = `<div class="row-lead">${leadInner}${leadExtras ? ` ${leadExtras}` : ''}</div>`;
   const meta = `<div class="row-meta"><span class="size">${escapeHtml(sizeStr)}</span>${hashesStr}</div>`;
 
   return `<li class="row${warnings.length > 0 ? ' row-warn' : ''}${decision ? ' row-decide' : ''}${row.isPlaceholder ? ' row-placeholder' : ''}">
         <div class="row-main">${lead}${meta}</div>${messages}
       </li>`;
+}
+
+/**
+ * Compose the tooltip text shown when hovering an alias-rewritten row. Read
+ * by both the path span (in the row-lead) and the "← <sourceRelPath>" badge
+ * appended next to it. Format keeps to one line so plain `title` attribute
+ * rendering works across browsers.
+ */
+function aliasTooltipText(origin: AliasOrigin): string {
+  const from = origin.from === '' ? '<source root>' : origin.from;
+  const to = origin.to === '' ? '<destination root>' : origin.to;
+  return `Rewritten by path-alias "${from}" → "${to}" (source: ${origin.sourceRelPath})`;
 }
 
 function warningTooltip(warnings: PlanWarningView[]): string {
@@ -1121,6 +1153,19 @@ function planContentCss(): string {
       background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 18%, transparent);
       border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 50%, transparent);
       color: var(--vscode-editorWarning-foreground, #cca700);
+      cursor: help;
+    }
+    /* Alias-rewrite badge — appears next to the path span when the source
+       config's path-aliases rewrote the file's relpath. Subdued styling so
+       it doesn't crowd out the primary path; tooltip carries the full
+       alias pair. M2 of room-sync-format-v1-plan.md. */
+    ul.rows .alias-from {
+      display: inline-block;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      opacity: 0.85;
+      white-space: nowrap;
       cursor: help;
     }
     ul.rows .warn-list {

@@ -64,10 +64,19 @@ export function scopeFromRelPath(relPath: string, isFile: boolean): Scope {
   return { kind: 'directory', relPrefix: relPath };
 }
 
-/** Filter a flat FileInfo list to only entries inside `scope`. */
+/**
+ * Filter a flat FileInfo list to only entries inside `scope`.
+ *
+ * Scope paths come from the user clicking a folder/file in the SOURCE
+ * explorer — they're source-relative. When a path-alias rewrite ran (M2 of
+ * room-sync-format-v1-plan.md), `f.relPath` is the post-rewrite destination
+ * relpath; the original source-relative path is captured in `f.aliasOrigin`.
+ * Falling back to `aliasOrigin?.sourceRelPath` for the scope check means
+ * scoped plans on alias-using configs still match what the user clicked.
+ */
 export function filterFilesToScope(files: readonly FileInfo[], scope: Scope): FileInfo[] {
   if (scope.kind === 'none') return [...files];
-  return files.filter((f) => inScope(f.relPath, scope));
+  return files.filter((f) => inScope(f.aliasOrigin?.sourceRelPath ?? f.relPath, scope));
 }
 
 /**
