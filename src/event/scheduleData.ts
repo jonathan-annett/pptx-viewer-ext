@@ -585,6 +585,26 @@ export function displayTitleForSession(session: EventSession): string {
 }
 
 /**
+ * True iff the schedule carries no authored content — no speakers, no
+ * rooms, no sessions, no vacancies. Config, days, and per-day timeslot
+ * labels are NOT considered authored content for this purpose: the user
+ * may have customised them and still want Regenerate available (Clear
+ * deliberately preserves them precisely so Regenerate becomes safe).
+ *
+ * Used by the editor to decide whether the Regenerate Tools section is
+ * safe to surface — and by the wired layer as its belt-and-braces refusal
+ * if a stale tab tries to regenerate a populated schedule.
+ */
+export function isStructurallyEmpty(schedule: EventSchedule): boolean {
+  return (
+    schedule.speakers.length === 0 &&
+    schedule.rooms.length === 0 &&
+    schedule.sessions.length === 0 &&
+    schedule.vacancies.length === 0
+  );
+}
+
+/**
  * The ordered timeslot list for a single day. Reads from
  * `schedule.timeslotsByDay[day]` when present; otherwise falls back to
  * the deterministic list `timeslotsForDay(config, dayIndex)` produces.

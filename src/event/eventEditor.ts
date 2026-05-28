@@ -28,6 +28,7 @@ import {
   addTimeslot,
   clearAll,
   emptySchedule,
+  isStructurallyEmpty,
   isValidTimeslotLabel,
   marshalSchedule,
   parseSchedule,
@@ -311,16 +312,20 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
     config: Partial<EventConfig>,
     writeSchedule: (next: EventSchedule) => Promise<void>,
   ): Promise<void> {
-    const currentBytes = new TextEncoder().encode(document.getText());
+    const text = document.getText();
+    const currentBytes = new TextEncoder().encode(text);
     const currentSha = await sha256Hex(currentBytes);
     const placeholders = await getActivePlaceholderSet();
-    const isPlaceholder = placeholders.has(currentSha);
+    const isEmpty = text.trim() === '';
+    const { schedule: parsed } = parseSchedule(text);
+    const isPlaceholder =
+      isEmpty || isStructurallyEmpty(parsed) || placeholders.has(currentSha);
     if (!isPlaceholder) {
       // Editor's UI also hides the button in this case; this is the
       // belt-and-braces refusal.
       log(
         `event-editor: regenerate refused — current content sha ${currentSha.slice(0, 8)} ` +
-          `is not in the placeholder registry`,
+          `has authored data and is not in the placeholder registry`,
       );
       void vscode.window.showWarningMessage(
         'Regenerate is only available on placeholder schedules — this file appears to have authored data. ' +
@@ -347,10 +352,17 @@ async function buildViewModel(document: vscode.TextDocument): Promise<EventEdito
   const { schedule, errors } = parseSchedule(text);
   // Sha-of-current-content drives the placeholder check used by the
   // Regenerate-button visibility gate. Pre-compute it here so the renderer
-  // doesn't have to.
+  // doesn't have to. Three gates feed isPlaceholder:
+  //   1. The file is byte-empty (initial state).
+  //   2. The file's sha is in the workspace placeholder registry.
+  //   3. The schedule is structurally empty — no speakers, rooms,
+  //      sessions, or vacancies. This is the post-Clear state: the
+  //      file still has JSON scaffolding (config, timeslotsByDay) but
+  //      no authored content, so Regenerate is safe.
   const currentSha = await sha256Hex(new TextEncoder().encode(text));
   const placeholders = await getActivePlaceholderSet();
-  const isPlaceholder = isEmpty || placeholders.has(currentSha);
+  const isPlaceholder =
+    isEmpty || isStructurallyEmpty(schedule) || placeholders.has(currentSha);
   return {
     schedule: isEmpty ? emptySchedule() : schedule,
     parseErrors: errors,

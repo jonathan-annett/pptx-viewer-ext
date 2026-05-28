@@ -17,6 +17,7 @@ import {
   eligibleSpeakersForSession,
   emptySchedule,
   ensureTimeslotsByDay,
+  isStructurallyEmpty,
   isValidTimeslotLabel,
   marshalSchedule,
   parseSchedule,
@@ -647,6 +648,20 @@ test('addRooms skips empty entries', () => {
   assert.equal(s.rooms.length, 2);
   assert.equal(s.rooms[0].name, 'Hall A');
   assert.equal(s.rooms[1].name, 'Hall B');
+});
+
+test('isStructurallyEmpty: empty + cleared schedules count; populated does not', () => {
+  assert.ok(isStructurallyEmpty(emptySchedule()));
+  let s = emptySchedule();
+  s = addSpeaker(s, 'A');
+  s = addRoom(s, { name: 'Room' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  assert.ok(!isStructurallyEmpty(s), 'populated schedule is NOT structurally empty');
+  // Custom timeslot labels and a non-default event name don't count as
+  // authored content for placeholder purposes — Clear deliberately
+  // preserves them.
+  const cleared = clearAll(s);
+  assert.ok(isStructurallyEmpty(cleared), 'post-Clear schedule IS structurally empty');
 });
 
 // ───── run ────────────────────────────────────────────────────────────
