@@ -26,6 +26,7 @@ import {
   addSpeaker,
   addSpeakers,
   addTimeslot,
+  applyDefaultTimeslotsToAllDays,
   clearAll,
   emptySchedule,
   isStructurallyEmpty,
@@ -168,6 +169,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
             break;
           case 'setDefaultTimeslots':
             await mutate((s) => setDefaultTimeslots(s, msg.labels));
+            break;
+          case 'applyDefaultTimeslotsToAllDays':
+            await mutate((s) => applyDefaultTimeslotsToAllDays(s));
             break;
           case 'addSpeaker':
             await mutate((s) => addSpeaker(s, msg.name));
@@ -592,6 +596,7 @@ type WebviewMessage =
   | { type: 'setEventName'; name: string }
   | { type: 'setDays'; days: string[] }
   | { type: 'setDefaultTimeslots'; labels: string[] }
+  | { type: 'applyDefaultTimeslotsToAllDays' }
   | { type: 'addSpeaker'; name: string }
   | { type: 'addSpeakers'; names: string[] }
   | { type: 'renameSpeaker'; speakerId: string; name: string }

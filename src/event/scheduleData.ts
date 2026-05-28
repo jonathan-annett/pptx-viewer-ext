@@ -146,6 +146,90 @@ export function setDays(schedule: EventSchedule, days: string[]): EventSchedule 
 }
 
 /**
+ * Apply `config.defaultTimeslots` to every day in `config.days` by
+ * positional rename. Pure relabeling — no sessions or vacancies are ever
+ * dropped:
+ *
+ *   - At position i: if old and new differ, rename old → new (sessions
+ *     and vacancies at that label get rewritten).
+ *   - Slots past the new list's length: kept as-is on the day. The
+ *     intent is "rename the slots", not "trim the day".
+ *   - Slots past the old list's length: appended onto the day's list
+ *     (no session cascade needed — they're new empty rows).
+ *
+ * No-op when `defaultTimeslots` is empty / missing — leaves existing
+ * days alone.
+ */
+export function applyDefaultTimeslotsToAllDays(schedule: EventSchedule): EventSchedule {
+  const defaults = schedule.config.defaultTimeslots;
+  if (!Array.isArray(defaults) || defaults.length === 0) return schedule;
+  const work = ensureTimeslotsByDay(schedule);
+  const newByDay: Record<string, string[]> = { ...work.timeslotsByDay };
+  const remapByDay = new Map<string, Map<string, string>>();
+  for (const day of work.config.days) {
+    const oldList = newByDay[day] ?? [];
+    const { newList, remap } = applyPositionalRename(oldList, defaults);
+    newByDay[day] = newList;
+    remapByDay.set(day, remap);
+  }
+  const nextSessions = work.sessions.map((s) => {
+    const remap = remapByDay.get(s.day);
+    if (!remap) return s;
+    const target = remap.get(s.timeslot);
+    if (!target) return s;
+    return { ...s, timeslot: target, id: `${s.day}-${target}-${s.roomId}` };
+  });
+  const nextVacancies = work.vacancies.map((v) => {
+    const remap = remapByDay.get(v.day);
+    if (!remap) return v;
+    const target = remap.get(v.timeslot);
+    if (!target) return v;
+    return { ...v, timeslot: target };
+  });
+  return {
+    ...work,
+    timeslotsByDay: newByDay,
+    sessions: nextSessions,
+    vacancies: nextVacancies,
+  };
+}
+
+/**
+ * Walk old + new lists position-by-position; produce the day's new
+ * label list and the rename map that cascades into sessions.
+ *
+ *   - Both lists carry a label at position i: keep newList[i] as the
+ *     day's label; if it differs from oldList[i], record the rename.
+ *   - oldList has a label at position i, newList doesn't: keep the old
+ *     label (extras at the tail of an existing day stay put).
+ *   - newList has a label at position i, oldList doesn't: append it.
+ *
+ * The remap only contains positions where labels actually change, so a
+ * caller iterating sessions can detect "no change" by an absent key.
+ */
+function applyPositionalRename(
+  oldList: readonly string[],
+  newList: readonly string[],
+): { newList: string[]; remap: Map<string, string> } {
+  const out: string[] = [];
+  const remap = new Map<string, string>();
+  const maxLen = Math.max(oldList.length, newList.length);
+  for (let i = 0; i < maxLen; i++) {
+    const oldLabel = oldList[i];
+    const newLabel = newList[i];
+    if (oldLabel && newLabel) {
+      out.push(newLabel);
+      if (oldLabel !== newLabel) remap.set(oldLabel, newLabel);
+    } else if (oldLabel) {
+      out.push(oldLabel);
+    } else if (newLabel) {
+      out.push(newLabel);
+    }
+  }
+  return { newList: out, remap };
+}
+
+/**
  * Set the default timeslot labels used when ensureTimeslotsByDay seeds a
  * newly-added day. Each label is trimmed; empties + duplicates dropped;
  * invalid labels (filename-hostile chars) silently no-op the whole call

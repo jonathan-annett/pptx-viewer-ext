@@ -12,6 +12,7 @@ import {
   addSpeaker,
   addSpeakers,
   addTimeslot,
+  applyDefaultTimeslotsToAllDays,
   clearAll,
   displayTitleForSession,
   eligibleSpeakersForSession,
@@ -799,6 +800,71 @@ test('replaceSessionSpeakersByNames is a no-op when sessionId is unknown', () =>
   assert.equal(result.schedule, before, 'schedule reference unchanged');
   assert.deepEqual(result.conflicts, []);
   assert.deepEqual(result.addedSpeakers, []);
+});
+
+// ───── applyDefaultTimeslotsToAllDays ───────────────────────────────
+
+test('applyDefaultTimeslotsToAllDays: positional rename cascades into sessions', () => {
+  let s = setDays(emptySchedule(), ['MON', 'TUE']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B', 'C'], TUE: ['A', 'B', 'C'] } };
+  s = setDefaultTimeslots(s, ['Morning', 'Lunch', 'Afternoon']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'B', roomId: 'breakout-1', kind: 'breakout' });
+  s = addSession(s, { day: 'TUE', timeslot: 'C', roomId: 'breakout-1', kind: 'breakout' });
+  const result = applyDefaultTimeslotsToAllDays(s);
+  assert.deepEqual(result.timeslotsByDay!.MON, ['Morning', 'Lunch', 'Afternoon']);
+  assert.deepEqual(result.timeslotsByDay!.TUE, ['Morning', 'Lunch', 'Afternoon']);
+  // Sessions follow positionally + id rebuilds.
+  const monSession = result.sessions.find((sess) => sess.day === 'MON')!;
+  const tueSession = result.sessions.find((sess) => sess.day === 'TUE')!;
+  assert.equal(monSession.timeslot, 'Lunch');
+  assert.equal(monSession.id, 'MON-Lunch-breakout-1');
+  assert.equal(tueSession.timeslot, 'Afternoon');
+  assert.equal(tueSession.id, 'TUE-Afternoon-breakout-1');
+});
+
+test('applyDefaultTimeslotsToAllDays: keeps old extras when old list is longer', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B', 'C', 'D'] } };
+  s = setDefaultTimeslots(s, ['Morning', 'Lunch']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  // Session at D should be preserved (D is past the defaults' length).
+  s = addSession(s, { day: 'MON', timeslot: 'D', roomId: 'breakout-1', kind: 'breakout' });
+  const result = applyDefaultTimeslotsToAllDays(s);
+  assert.deepEqual(result.timeslotsByDay!.MON, ['Morning', 'Lunch', 'C', 'D']);
+  // Session at D survives — the operation is rename-only, never wipe.
+  assert.equal(result.sessions.length, 1);
+  assert.equal(result.sessions[0].timeslot, 'D');
+});
+
+test('applyDefaultTimeslotsToAllDays: appends when new list is longer', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = setDefaultTimeslots(s, ['Morning', 'Lunch', 'Afternoon', 'Evening']);
+  const result = applyDefaultTimeslotsToAllDays(s);
+  assert.deepEqual(
+    result.timeslotsByDay!.MON,
+    ['Morning', 'Lunch', 'Afternoon', 'Evening'],
+  );
+});
+
+test('applyDefaultTimeslotsToAllDays: no-op when defaults are empty', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  const result = applyDefaultTimeslotsToAllDays(s);
+  assert.equal(result, s, 'returns the same reference');
+});
+
+test('applyDefaultTimeslotsToAllDays: positional swap leaves no duplicates', () => {
+  let s = setDays(emptySchedule(), ['MON']);
+  s = { ...s, timeslotsByDay: { MON: ['A', 'B'] } };
+  s = setDefaultTimeslots(s, ['B', 'A']);
+  s = addRoom(s, { name: 'Breakout 1' });
+  s = addSession(s, { day: 'MON', timeslot: 'A', roomId: 'breakout-1', kind: 'breakout' });
+  const result = applyDefaultTimeslotsToAllDays(s);
+  assert.deepEqual(result.timeslotsByDay!.MON, ['B', 'A']);
+  // The session previously at A is now at B (positional rename).
+  assert.equal(result.sessions[0].timeslot, 'B');
 });
 
 test('isStructurallyEmpty: empty + cleared schedules count; populated does not', () => {

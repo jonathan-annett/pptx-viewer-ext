@@ -96,7 +96,10 @@ function renderHeader(s: EventSchedule): string {
     <div class="evt-row">
       <label class="evt-field">
         <span>Default timeslot labels for new days <span class="muted">(comma-separated, optional)</span></span>
-        <input type="text" id="event-default-timeslots" value="${escapeAttr(defaultsValue)}" autocomplete="off" placeholder="A, B, C, D">
+        <div class="evt-field-with-action">
+          <input type="text" id="event-default-timeslots" value="${escapeAttr(defaultsValue)}" autocomplete="off" placeholder="A, B, C, D">
+          <button type="button" class="btn btn-sm" id="apply-defaults-btn"${defaultsValue ? '' : ' disabled'} title="Apply these labels positionally to every existing day — renames the slots, doesn't drop any sessions">Apply to all</button>
+        </div>
       </label>
     </div>
   </header>`;
@@ -773,6 +776,10 @@ function clientScript(): string {
         post({ type: 'generateFolders' });
         return;
       }
+      if (t.id === 'apply-defaults-btn') {
+        post({ type: 'applyDefaultTimeslotsToAllDays' });
+        return;
+      }
       if (t.id === 'clear-all-btn') {
         // Modal-confirm happens on the wired side. No client-side guard
         // here — the wired layer is the source of truth.
@@ -1032,6 +1039,12 @@ function pageCss(): string {
     .evt-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
     .evt-field { display: flex; flex-direction: column; gap: 2px; min-width: 220px; flex: 1 1 220px; }
     .evt-field > span { font-size: 0.85em; color: var(--vscode-descriptionForeground); }
+    /* Input + inline action button — used for the "Default timeslot labels"
+       row so "Apply to all" sits flush to the right of the input. Flex with
+       the input growing (flex:1) and the button keeping its intrinsic width. */
+    .evt-field-with-action { display: flex; gap: 8px; align-items: stretch; }
+    .evt-field-with-action > input { flex: 1 1 auto; min-width: 0; }
+    .evt-field-with-action > button { flex: 0 0 auto; }
     input[type="text"], input[type="number"], select {
       font-family: inherit;
       font-size: inherit;
