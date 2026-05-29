@@ -14,6 +14,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); sub-sections use
 
 ---
 
+## [0.1.5] — 2026-05-29
+
+### Added
+- **Session title slides — generate one .pptx per (room, day) from a designed template.** Design a title-slide template in PowerPoint (style it however you want, drop in sample content for room / day / session title / N speaker names), then:
+  - Click **Bind title-slide template…** in the event editor's Tools section. A focused webview lists every text frame on the template's first visible slide with a role dropdown (Session title / Room name / Timeslot / Day / Speaker 1 / Speaker 2 / …). Pick a role for each frame and Save — the binding lands in `config.titleSlides`. Single-value roles are unique-per-frame; speaker positions are explicit (Speaker N+1 unlocks once Speaker N is assigned) so you can order Speaker 1, Speaker 2 to read left-to-right regardless of the underlying frame order in the .pptx.
+  - Click **Generate title slides…** to render one deck per (room, day) into the folder containing your `.eventSchedule`. Speaker names get hyperlinks (shape-attached, no forced underline) pointing at the per-session placeholder files Generate folders lays out — operators click a name during the event and the speaker's deck opens.
+  - **Slide visibility on the template encodes deck structure**: keep one visible slide → template only; two visible → walk-in + template; three or more visible → walk-in + template + supplementary slides appended verbatim to the output. Hidden slides are ignored, so authors can stash old designs in the same file and swap by toggling hide.
+  - **Re-runs skip unchanged decks.** Each generated deck embeds a deterministic fingerprint in PowerPoint's Comments field (`docProps/core.xml`'s `<dc:description>`): `pptx-title-deck format=1 / deck-version=N / template-sha256=… / data-sha256=… / generated-at=…`. The generator reads back the fingerprint, compares hashes, and only rewrites decks whose underlying data changed. Typical workflow: "morning generate, mid-day refresh after a name correction" rewrites just the affected (room, day) decks; everything else stays at the same version.
+  - **Version-stamped thumbnail.** Each deck carries a synthesised 256×192 thumbnail showing "DAY / Room Name" + a big "v3" + the generation timestamp, visible in Finder / Explorer without opening the file. The thumbnail bumps to "v2", "v3", … on each material regen so operators see at a glance whether they're holding the latest version.
+- **Folder layout locked into the schedule.** A **Folder layout** dropdown (`Day-major` / `Room-major`) in the event editor's Tools section persists the choice on `config.layout`. Both generators (Generate folders + Generate title slides) read it silently — no per-click QuickPick. Layout switching applies to the next Generate run.
+
+### Changed
+- **Generate folders + Generate title slides no longer prompt for destination.** The folder containing the `.eventSchedule` IS the event root — output paths drop the old `<eventName>/` wrapper and files land directly in the schedule's parent folder. (The Node CLI keeps the wrapper for unattended runs against a shared parent directory.)
+- **Generate folders no longer prompts for layout.** Uses the new `config.layout` field — defaults to `Day-major` for schedules that don't carry the field. The first click after upgrading uses the default; switch via the dropdown if you want Room-major.
+
+### Notes
+- Existing event trees from before this release (which had the `<eventName>/` wrapper) will be left in place but treated as orphans by re-runs. You may want to delete them manually after re-generating.
+- The first time you regenerate title slides for an event already on disk, every deck rewrites — there's no prior fingerprint to match against. Subsequent runs will skip unchanged decks.
+
+---
+
 ## [0.1.4] — 2026-05-29
 
 ### Added
