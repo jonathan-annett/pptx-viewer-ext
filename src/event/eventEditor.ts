@@ -56,6 +56,7 @@ import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind, TitleSlidesBinding } from './schedule';
 import { planEventFolders, type Layout } from './eventFolders';
 import { openBindingPanel } from './titleSlides/bindingUi';
+import { generateTitleSlides } from './titleSlides/generator';
 import { getActivePlaceholderSet } from '../sync/placeholderRegistry';
 import { sha256Hex } from '../sync/hash';
 
@@ -337,6 +338,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'bindTitleSlides':
             await this.handleBindTitleSlides(document, mutate);
             break;
+          case 'generateTitleSlides':
+            await this.handleGenerateTitleSlides(document);
+            break;
           case 'openAsText':
             await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
             break;
@@ -470,6 +474,29 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           templatePath: this.relativePath(document.uri, next.uri),
         };
       },
+    });
+  }
+
+  /**
+   * Run the title-slide generator for the current schedule. Reads the
+   * binding from `config.titleSlides`; refuses if absent (the UI hides
+   * the button in that case, this is the belt-and-braces refusal).
+   * The generator itself owns layout + destination picks + progress UI;
+   * we just hand off the schedule + binding.
+   */
+  private async handleGenerateTitleSlides(document: vscode.TextDocument): Promise<void> {
+    const parsed = parseSchedule(document.getText());
+    const binding = parsed.schedule.config.titleSlides;
+    if (!binding) {
+      void vscode.window.showWarningMessage(
+        'Generate title slides: no template bound yet. Click "Bind title-slide template…" first.',
+      );
+      return;
+    }
+    await generateTitleSlides({
+      document,
+      schedule: parsed.schedule,
+      binding,
     });
   }
 
@@ -748,6 +775,7 @@ type WebviewMessage =
   | { type: 'regenerate'; config: Partial<EventConfig> }
   | { type: 'generateFolders' }
   | { type: 'bindTitleSlides' }
+  | { type: 'generateTitleSlides' }
   | { type: 'openAsText' };
 
 function makeNonce(): string {

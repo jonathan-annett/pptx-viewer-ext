@@ -67,6 +67,13 @@ export interface DeckBuildInput {
    *  byte-identical output for stable inputs is preserved when omitted.
    *  M4 typically passes `new Date().toISOString()`. */
   generatedAt?: string;
+  /** Optional JPEG bytes for `docProps/thumbnail.jpeg`. When provided the
+   *  embed path also wires in the Content_Types Override + root-rels
+   *  Relationship needed for OS-level thumbnail rendering (Finder /
+   *  Explorer). Rendered by the wired layer (`thumbnail.ts` via
+   *  OffscreenCanvas); the bytes are NOT part of the data hash so
+   *  thumbnail-only changes don't bump deck-version. */
+  thumbnailBytes?: Uint8Array;
 }
 
 export interface SessionForDeck {
@@ -226,6 +233,12 @@ export async function buildTitleDeck(input: DeckBuildInput): Promise<DeckBuildOu
   // the file + Content_Types Override + root rels entry if the template
   // didn't carry core props (Google Slides exports often omit them).
   embedFingerprint(zip, fingerprint);
+
+  // Optional thumbnail (M4.2). Caller renders the bytes (typically a
+  // version-stamped sticker via OffscreenCanvas); we just embed.
+  if (input.thumbnailBytes) {
+    embedThumbnail(zip, input.thumbnailBytes);
+  }
 
   return { bytes: zipSync(zip), warnings, fingerprint };
 }
@@ -751,6 +764,45 @@ function addCoreRootRel(rootRelsXml: string): string {
     `<Relationship Id="${rId}" ` +
     `Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" ` +
     `Target="docProps/core.xml"/>`;
+  return rootRelsXml.replace('</Relationships>', rel + '</Relationships>');
+}
+
+// ───── Thumbnail embed ──────────────────────────────────────────────────
+
+function embedThumbnail(zip: Record<string, Uint8Array>, jpegBytes: Uint8Array): void {
+  zip['docProps/thumbnail.jpeg'] = jpegBytes;
+  zip['[Content_Types].xml'] = strToU8(
+    addThumbnailContentTypeOverride(strFromU8(zip['[Content_Types].xml'])),
+  );
+  const rootRelsPath = '_rels/.rels';
+  if (zip[rootRelsPath] !== undefined) {
+    zip[rootRelsPath] = strToU8(
+      addThumbnailRootRel(strFromU8(zip[rootRelsPath])),
+    );
+  }
+}
+
+function addThumbnailContentTypeOverride(ctXml: string): string {
+  if (/PartName="\/docProps\/thumbnail\.jpeg"/.test(ctXml)) return ctXml;
+  const override = `<Override ContentType="image/jpeg" PartName="/docProps/thumbnail.jpeg"/>`;
+  return ctXml.replace('</Types>', override + '</Types>');
+}
+
+function addThumbnailRootRel(rootRelsXml: string): string {
+  if (/Type="http:\/\/schemas\.openxmlformats\.org\/package\/2006\/relationships\/metadata\/thumbnail"/.test(rootRelsXml)) {
+    return rootRelsXml;
+  }
+  const used = new Set<string>();
+  const re = /Id="([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rootRelsXml))) used.add(m[1]);
+  let n = 200;
+  while (used.has(`rId${n}`)) n++;
+  const rId = `rId${n}`;
+  const rel =
+    `<Relationship Id="${rId}" ` +
+    `Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" ` +
+    `Target="docProps/thumbnail.jpeg"/>`;
   return rootRelsXml.replace('</Relationships>', rel + '</Relationships>');
 }
 

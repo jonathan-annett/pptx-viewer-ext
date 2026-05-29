@@ -844,6 +844,77 @@ test('docProps/core.xml is created from scratch when absent in template', async 
     'root rels Relationship added');
 });
 
+// ───── thumbnail embed ─────────────────────────────────────────────────
+
+test('thumbnailBytes are embedded at docProps/thumbnail.jpeg with scaffolding', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  // Synthetic "JPEG" bytes — content doesn't matter for embed-side tests,
+  // only that they round-trip and the scaffolding lands correctly.
+  const fakeJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0xde, 0xad, 0xbe, 0xef]);
+  const out = await buildTitleDeck({
+    templateBytes: tpl, inspection,
+    binding: {
+      templatePath: 't.pptx',
+      fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+    },
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(makeSpeakers(['John']), 1, false),
+      session: makeSession({
+        day: 'MON', timeslot: 'A', roomId: 'room-1',
+        speakers: makeSpeakers(['John']),
+      }),
+    }],
+    day: 'MON', roomName: 'Room 1',
+    thumbnailBytes: fakeJpeg,
+  });
+  const zip = unzipSync(out.bytes);
+  // File present + bytes match.
+  assert.ok(zip['docProps/thumbnail.jpeg'], 'thumbnail file in zip');
+  assert.equal(zip['docProps/thumbnail.jpeg'].length, fakeJpeg.length);
+  // Content_Types Override added.
+  const ct = strFromU8(zip['[Content_Types].xml']);
+  assert.ok(ct.includes('PartName="/docProps/thumbnail.jpeg"'),
+    'Content_Types Override added');
+  assert.ok(ct.includes('image/jpeg'),
+    'Override declares image/jpeg content type');
+  // Root rels Relationship added.
+  const rootRels = strFromU8(zip['_rels/.rels']);
+  assert.ok(rootRels.includes('relationships/metadata/thumbnail'),
+    'root rels Relationship added');
+  assert.ok(rootRels.includes('Target="docProps/thumbnail.jpeg"'),
+    'root rels Target points at the embedded thumbnail');
+});
+
+test('No thumbnail input → no docProps/thumbnail.jpeg in output', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const out = await buildTitleDeck({
+    templateBytes: tpl, inspection,
+    binding: {
+      templatePath: 't.pptx',
+      fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+    },
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(makeSpeakers(['John']), 1, false),
+      session: makeSession({
+        day: 'MON', timeslot: 'A', roomId: 'room-1',
+        speakers: makeSpeakers(['John']),
+      }),
+    }],
+    day: 'MON', roomName: 'Room 1',
+  });
+  const zip = unzipSync(out.bytes);
+  assert.ok(!zip['docProps/thumbnail.jpeg'], 'no thumbnail file when not requested');
+  const ct = strFromU8(zip['[Content_Types].xml']);
+  assert.ok(!ct.includes('thumbnail.jpeg'),
+    'no Content_Types entry for absent thumbnail');
+});
+
 // ───── validation: out-of-range frame → throw ──────────────────────────
 
 test('Binding referencing an out-of-range frame throws at build time', async () => {

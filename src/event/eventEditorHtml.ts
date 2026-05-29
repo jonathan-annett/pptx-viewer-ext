@@ -402,6 +402,9 @@ function renderTools(vm: EventEditorViewModel): string {
             ? 'Edit title-slide binding…'
             : 'Bind title-slide template…'
         }</button>
+        <button type="button" class="btn" id="generate-title-slides-btn"${
+          vm.schedule.config.titleSlides ? '' : ' disabled'
+        } title="${escapeAttr(generateTitleButtonTitle(vm))}">Generate title slides…</button>
         <button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button>
       </p>
       <p class="hint">Generate sample schedule is only available on placeholder schedules. Clear the file first to enable.</p>
@@ -441,6 +444,14 @@ function bindButtonTitle(vm: EventEditorViewModel): string {
     return 'Pick a .pptx template and assign roles to its text frames. Generates one title deck per (room, day) at generate time.';
   }
   return `Currently bound to ${ts.templatePath}. Click to re-bind or change template.`;
+}
+
+function generateTitleButtonTitle(vm: EventEditorViewModel): string {
+  const ts = vm.schedule.config.titleSlides;
+  if (!ts) {
+    return 'Bind a title-slide template first.';
+  }
+  return `Render one title deck per (room, day) using "${ts.templatePath}". Decks whose underlying data hasn't changed since the last run are skipped (fingerprint match).`;
 }
 
 function configField(key: keyof EventConfig, label: string, value: number): string {
@@ -791,6 +802,10 @@ function clientScript(): string {
       }
       if (t.id === 'bind-title-slides-btn') {
         post({ type: 'bindTitleSlides' });
+        return;
+      }
+      if (t.id === 'generate-title-slides-btn') {
+        post({ type: 'generateTitleSlides' });
         return;
       }
       if (t.id === 'apply-defaults-btn') {

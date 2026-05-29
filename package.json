@@ -266,6 +266,8 @@
     "test:title-slides-pagination": "node --import tsx test/title-slides-pagination.test.ts",
     "test:title-slides-pptx-build": "node --import tsx test/title-slides-pptxBuild.test.ts",
     "test:title-slides-binding-ui-html": "node --import tsx test/title-slides-bindingUiHtml.test.ts",
+    "test:title-slides-generator-plan": "node --import tsx test/title-slides-generator-plan.test.ts",
+    "test:title-slides-thumbnail": "node --import tsx test/title-slides-thumbnail.test.ts",
     "test:sync-placeholder-registry": "node --import tsx test/sync-placeholder-registry.test.ts",
     "test:sync-manifest-editor-html": "node --import tsx test/sync-manifest-editor-html.test.ts",
     "test:sync-preview-context": "node --import tsx test/sync-preview-context.test.ts",
