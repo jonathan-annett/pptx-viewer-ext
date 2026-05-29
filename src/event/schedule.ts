@@ -52,7 +52,45 @@ export interface EventConfig {
    * still produces its A-onward sequence based on the slot count.
    */
   defaultTimeslots?: string[];
+  /**
+   * Title-slide template binding. Set by the "Bind title-slide template"
+   * action in the event editor; consumed by `buildTitleDeck` in
+   * `titleSlides/pptxBuild.ts`. Absent means no template has been bound
+   * for this event yet — the generate button is disabled in that state.
+   */
+  titleSlides?: TitleSlidesBinding;
 }
+
+/**
+ * One-per-event template binding describing how to populate per-(room, day)
+ * title decks. Lives under `EventConfig.titleSlides`.
+ */
+export interface TitleSlidesBinding {
+  /** Path to the template `.pptx`, relative to the `.eventSchedule` file. */
+  templatePath: string;
+  /** Ordered field bindings. `role: 'speaker'` entries determine the
+   *  per-slide speaker capacity — see `titleSlideCapacity` helper. */
+  fields: TitleSlideFieldBinding[];
+  /** Pagination behaviour when a session's speaker count exceeds capacity.
+   *  `false` (default): fill to capacity, last page takes remainder.
+   *  `true`: distribute as evenly as possible across pages. */
+  distributeEvenly?: boolean;
+}
+
+/**
+ * One binding from a role to a text frame on the template slide.
+ * `frame` is the zero-based index into `TemplateInspectResult.textFrames`
+ * (document order). Speaker bindings may additionally carry a `line`
+ * index when the speaker lives on one line of a multi-line text frame
+ * (v1: line-bound speakers substitute text but don't get hyperlinks —
+ * see `pptxBuild.ts` for the deferred per-line overlay path).
+ */
+export type TitleSlideFieldBinding =
+  | { role: 'sessionTitle'; frame: number }
+  | { role: 'roomName';     frame: number }
+  | { role: 'timeslot';     frame: number }
+  | { role: 'day';          frame: number }
+  | { role: 'speaker';      frame: number; line?: number };
 
 export interface EventSpeaker {
   id: string;

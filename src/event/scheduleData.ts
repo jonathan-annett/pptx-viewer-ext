@@ -22,6 +22,7 @@ import {
   type EventVacancy,
   type SessionKind,
   type SessionSpeakerSlot,
+  type TitleSlidesBinding,
 } from './schedule';
 
 export interface ScheduleParseResult {
@@ -138,6 +139,24 @@ export function emptySchedule(): EventSchedule {
 /** Update the human-readable event name (also stored on `config.name`). */
 export function setEventName(schedule: EventSchedule, name: string): EventSchedule {
   return { ...schedule, config: { ...schedule.config, name } };
+}
+
+/**
+ * Write or clear the title-slide template binding on the event config.
+ * Pass `undefined` to remove the binding entirely (the field becomes
+ * absent from the serialised JSON rather than `null`).
+ */
+export function setTitleSlidesBinding(
+  schedule: EventSchedule,
+  binding: TitleSlidesBinding | undefined,
+): EventSchedule {
+  const nextConfig: EventConfig = { ...schedule.config };
+  if (binding) {
+    nextConfig.titleSlides = binding;
+  } else {
+    delete nextConfig.titleSlides;
+  }
+  return { ...schedule, config: nextConfig };
 }
 
 /** Replace the days list (preserves session day labels even if they vanish — caller's responsibility to cascade if desired). */
@@ -685,7 +704,46 @@ function parseConfig(raw: unknown, errors: string[]): EventConfig {
     const arr = c.defaultTimeslots.filter((v): v is string => typeof v === 'string');
     if (arr.length > 0) result.defaultTimeslots = arr;
   }
+  // `titleSlides` is also optional + not in DEFAULT_CONFIG. Pick it up
+  // verbatim when shape-valid; bail to undefined otherwise. The wired
+  // binding flow rebuilds the binding on each save so a corrupted
+  // value here is recoverable via re-binding.
+  const ts = parseTitleSlidesBinding(c.titleSlides, errors);
+  if (ts) result.titleSlides = ts;
   return result;
+}
+
+function parseTitleSlidesBinding(raw: unknown, errors: string[]): TitleSlidesBinding | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    errors.push('config.titleSlides must be an object — ignoring');
+    return undefined;
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.templatePath !== 'string' || !Array.isArray(r.fields)) {
+    errors.push('config.titleSlides needs templatePath (string) and fields (array) — ignoring');
+    return undefined;
+  }
+  const validRoles = new Set(['sessionTitle', 'roomName', 'timeslot', 'day', 'speaker']);
+  const fields: TitleSlidesBinding['fields'] = [];
+  for (const entry of r.fields) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.role !== 'string' || !validRoles.has(e.role)) continue;
+    if (typeof e.frame !== 'number' || !Number.isFinite(e.frame) || e.frame < 0) continue;
+    if (e.role === 'speaker') {
+      const f: TitleSlidesBinding['fields'][number] = { role: 'speaker', frame: e.frame };
+      if (typeof e.line === 'number' && Number.isFinite(e.line) && e.line >= 0) {
+        f.line = e.line;
+      }
+      fields.push(f);
+    } else {
+      fields.push({ role: e.role as 'sessionTitle' | 'roomName' | 'timeslot' | 'day', frame: e.frame });
+    }
+  }
+  const binding: TitleSlidesBinding = { templatePath: r.templatePath, fields };
+  if (r.distributeEvenly === true) binding.distributeEvenly = true;
+  return binding;
 }
 
 function parseSpeakers(raw: unknown, errors: string[]): EventSpeaker[] {

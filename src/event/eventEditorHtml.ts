@@ -397,6 +397,11 @@ function renderTools(vm: EventEditorViewModel): string {
       </p>
       <p>
         <button type="button" class="btn" id="generate-folders-btn" title="Materialise the folder tree for this event into a destination folder you pick">Generate folders…</button>
+        <button type="button" class="btn" id="bind-title-slides-btn" title="${escapeAttr(bindButtonTitle(vm))}">${
+          vm.schedule.config.titleSlides
+            ? 'Edit title-slide binding…'
+            : 'Bind title-slide template…'
+        }</button>
         <button type="button" class="btn btn-secondary" id="open-text-btn">Reopen as text</button>
       </p>
       <p class="hint">Generate sample schedule is only available on placeholder schedules. Clear the file first to enable.</p>
@@ -428,6 +433,14 @@ function renderTools(vm: EventEditorViewModel): string {
       </p>
     </details>
   </section>`;
+}
+
+function bindButtonTitle(vm: EventEditorViewModel): string {
+  const ts = vm.schedule.config.titleSlides;
+  if (!ts) {
+    return 'Pick a .pptx template and assign roles to its text frames. Generates one title deck per (room, day) at generate time.';
+  }
+  return `Currently bound to ${ts.templatePath}. Click to re-bind or change template.`;
 }
 
 function configField(key: keyof EventConfig, label: string, value: number): string {
@@ -774,6 +787,10 @@ function clientScript(): string {
       }
       if (t.id === 'generate-folders-btn') {
         post({ type: 'generateFolders' });
+        return;
+      }
+      if (t.id === 'bind-title-slides-btn') {
+        post({ type: 'bindTitleSlides' });
         return;
       }
       if (t.id === 'apply-defaults-btn') {

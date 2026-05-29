@@ -22,3 +22,6 @@ event.json
 events/
 events-by-day/
 
+# M0 XML spike for session-title-slides — scratch script + outputs.
+samples/m0-spike/
+

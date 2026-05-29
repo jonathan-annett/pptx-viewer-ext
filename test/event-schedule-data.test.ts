@@ -37,6 +37,7 @@ import {
   setSessionKind,
   setSessionSpeakers,
   setSessionTitle,
+  setTitleSlidesBinding,
   swapSessionsInRoom,
   timeslotsForDayResolved,
 } from '../src/event/scheduleData';
@@ -865,6 +866,104 @@ test('applyDefaultTimeslotsToAllDays: positional swap leaves no duplicates', () 
   assert.deepEqual(result.timeslotsByDay!.MON, ['B', 'A']);
   // The session previously at A is now at B (positional rename).
   assert.equal(result.sessions[0].timeslot, 'B');
+});
+
+// ───── titleSlides binding (setTitleSlidesBinding + roundtrip) ─────────
+
+test('setTitleSlidesBinding writes the binding into config; round-trips through marshal/parse', () => {
+  let s = emptySchedule();
+  const binding = {
+    templatePath: 'templates/my.pptx',
+    fields: [
+      { role: 'sessionTitle' as const, frame: 3 },
+      { role: 'speaker' as const, frame: 5 },
+      { role: 'speaker' as const, frame: 6 },
+    ],
+    distributeEvenly: true,
+  };
+  s = setTitleSlidesBinding(s, binding);
+  assert.deepEqual(s.config.titleSlides, binding);
+  const reparsed = parseSchedule(marshalSchedule(s));
+  assert.equal(reparsed.errors.length, 0, 'no parse errors');
+  assert.deepEqual(reparsed.schedule.config.titleSlides, binding,
+    'titleSlides survives serialise + reparse');
+});
+
+test('setTitleSlidesBinding(undefined) clears the binding (field becomes absent in output)', () => {
+  let s = emptySchedule();
+  s = setTitleSlidesBinding(s, {
+    templatePath: 't.pptx',
+    fields: [{ role: 'speaker', frame: 0 }],
+  });
+  assert.ok(s.config.titleSlides);
+  s = setTitleSlidesBinding(s, undefined);
+  assert.equal(s.config.titleSlides, undefined);
+  // Output JSON should not have the key at all (not just null).
+  const text = marshalSchedule(s);
+  assert.ok(!text.includes('titleSlides'), 'titleSlides absent from serialised output');
+});
+
+test('parseSchedule preserves line-bound speaker entries verbatim', () => {
+  // Hand-authored line-bound binding — should round-trip without losing `line`.
+  let s = emptySchedule();
+  s = setTitleSlidesBinding(s, {
+    templatePath: 't.pptx',
+    fields: [
+      { role: 'speaker', frame: 3, line: 0 },
+      { role: 'speaker', frame: 3, line: 1 },
+      { role: 'speaker', frame: 3, line: 2 },
+    ],
+  });
+  const reparsed = parseSchedule(marshalSchedule(s));
+  const fields = reparsed.schedule.config.titleSlides?.fields ?? [];
+  assert.equal(fields.length, 3);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(fields[i].role, 'speaker');
+    assert.equal(fields[i].frame, 3);
+    assert.equal((fields[i] as { line?: number }).line, i,
+      `line ${i} preserved`);
+  }
+});
+
+test('parseSchedule with malformed titleSlides surfaces error + drops the binding', () => {
+  // Not an object → drop.
+  const text = JSON.stringify({
+    generatedAt: '2026-01-01T00:00:00Z',
+    config: {
+      name: 'Test', days: ['MON'],
+      titleSlides: 'not an object',
+    },
+    speakers: [], rooms: [], sessions: [], vacancies: [],
+  });
+  const r = parseSchedule(text);
+  assert.equal(r.schedule.config.titleSlides, undefined);
+  assert.ok(r.errors.some(e => e.includes('titleSlides')),
+    `expected an error mentioning titleSlides; got ${JSON.stringify(r.errors)}`);
+});
+
+test('parseSchedule drops invalid field entries but keeps valid ones', () => {
+  const text = JSON.stringify({
+    generatedAt: '2026-01-01T00:00:00Z',
+    config: {
+      name: 'Test', days: ['MON'],
+      titleSlides: {
+        templatePath: 't.pptx',
+        fields: [
+          { role: 'speaker', frame: 0 },         // ok
+          { role: 'bogus', frame: 1 },           // invalid role → drop
+          { role: 'speaker', frame: -1 },        // invalid frame → drop
+          { role: 'speaker', frame: 'abc' },     // not a number → drop
+          { role: 'roomName', frame: 2 },        // ok
+        ],
+      },
+    },
+    speakers: [], rooms: [], sessions: [], vacancies: [],
+  });
+  const r = parseSchedule(text);
+  const fields = r.schedule.config.titleSlides?.fields ?? [];
+  assert.equal(fields.length, 2);
+  assert.equal(fields[0].role, 'speaker');
+  assert.equal(fields[1].role, 'roomName');
 });
 
 test('isStructurallyEmpty: empty + cleared schedules count; populated does not', () => {

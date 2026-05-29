@@ -49,11 +49,13 @@ import {
   setSessionKind,
   setSessionSpeakers,
   setSessionTitle,
+  setTitleSlidesBinding,
   swapSessionsInRoom,
 } from './scheduleData';
 import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
-import type { EventConfig, EventSchedule, SessionKind } from './schedule';
+import type { EventConfig, EventSchedule, SessionKind, TitleSlidesBinding } from './schedule';
 import { planEventFolders, type Layout } from './eventFolders';
+import { openBindingPanel } from './titleSlides/bindingUi';
 import { getActivePlaceholderSet } from '../sync/placeholderRegistry';
 import { sha256Hex } from '../sync/hash';
 
@@ -332,6 +334,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'generateFolders':
             await this.handleGenerateFolders(document);
             break;
+          case 'bindTitleSlides':
+            await this.handleBindTitleSlides(document, mutate);
+            break;
           case 'openAsText':
             await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
             break;
@@ -386,6 +391,116 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
     const next = regenerateFromConfig(config);
     log(`event-editor: regenerate applied — seed=${next.config.seed} sessions=${next.sessions.length}`);
     await writeSchedule(next);
+  }
+
+  /**
+   * Open the title-slide binding panel. Picks a template via showOpenDialog
+   * (defaulting to the currently-bound template if any), loads its bytes,
+   * and hands off to `openBindingPanel` from titleSlides/bindingUi.ts.
+   *
+   * On save: write `config.titleSlides` back to the .eventSchedule via
+   * the shared `mutate` helper (which uses workspace.fs.writeFile — same
+   * FSA-flush workaround as everywhere else in this file).
+   *
+   * `templatePath` is stored relative to the .eventSchedule's directory,
+   * so the binding travels cleanly across machines / clones of the same
+   * project tree.
+   */
+  private async handleBindTitleSlides(
+    document: vscode.TextDocument,
+    mutate: (fn: (s: EventSchedule) => EventSchedule) => Promise<void>,
+  ): Promise<void> {
+    const parsed = parseSchedule(document.getText());
+    const existing = parsed.schedule.config.titleSlides;
+
+    const pickTemplate = async (
+      currentRelPath?: string,
+    ): Promise<{ bytes: Uint8Array; uri: vscode.Uri } | undefined> => {
+      const defaultUri = currentRelPath
+        ? this.resolveRelativeUri(document.uri, currentRelPath)
+        : (vscode.workspace.getWorkspaceFolder(document.uri)?.uri ?? document.uri);
+      const picks = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        defaultUri,
+        filters: { 'PowerPoint': ['pptx'] },
+        openLabel: 'Use as title-slide template',
+        title: 'Pick title-slide template (.pptx)',
+      });
+      if (!picks || picks.length === 0) return undefined;
+      const uri = picks[0];
+      try {
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        return { bytes, uri };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`event-editor: bindTitleSlides — read failed for ${uri.toString()} — ${msg}`);
+        void vscode.window.showErrorMessage(`Couldn't read template: ${msg}`);
+        return undefined;
+      }
+    };
+
+    const initial = await pickTemplate(existing?.templatePath);
+    if (!initial) {
+      log('event-editor: bindTitleSlides cancelled at template pick');
+      return;
+    }
+
+    openBindingPanel({} as vscode.ExtensionContext, {
+      templateBytes: initial.bytes,
+      templatePath: this.relativePath(document.uri, initial.uri),
+      existing,
+      onSave: async (binding: TitleSlidesBinding) => {
+        try {
+          await mutate((s) => setTitleSlidesBinding(s, binding));
+          log(`event-editor: bindTitleSlides saved — ${binding.fields.length} field(s) @ ${binding.templatePath}`);
+          return { ok: true };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`event-editor: bindTitleSlides save failed — ${msg}`);
+          return { ok: false, error: msg };
+        }
+      },
+      onChangeTemplate: async () => {
+        const next = await pickTemplate(undefined);
+        if (!next) return undefined;
+        return {
+          templateBytes: next.bytes,
+          templatePath: this.relativePath(document.uri, next.uri),
+        };
+      },
+    });
+  }
+
+  /**
+   * Compute a path from `fromUri`'s directory to `toUri`. Used to store
+   * the template's location in the binding relative to the .eventSchedule.
+   * Falls back to `toUri.toString()` if the URIs aren't comparable (different
+   * scheme / authority).
+   */
+  private relativePath(fromUri: vscode.Uri, toUri: vscode.Uri): string {
+    if (fromUri.scheme !== toUri.scheme || fromUri.authority !== toUri.authority) {
+      return toUri.toString();
+    }
+    const fromParts = fromUri.path.split('/').slice(0, -1);
+    const toParts = toUri.path.split('/');
+    let i = 0;
+    while (i < fromParts.length && i < toParts.length - 1 && fromParts[i] === toParts[i]) {
+      i++;
+    }
+    const ups = fromParts.slice(i).map(() => '..');
+    const downs = toParts.slice(i);
+    return [...ups, ...downs].join('/');
+  }
+
+  /** Inverse of `relativePath` — resolve a stored relative path against a base URI. */
+  private resolveRelativeUri(baseUri: vscode.Uri, relPath: string): vscode.Uri {
+    if (/^[a-z][a-z0-9+\-.]*:/i.test(relPath)) {
+      // Looks like an absolute URI — use directly.
+      return vscode.Uri.parse(relPath);
+    }
+    return vscode.Uri.joinPath(baseUri, '..', ...relPath.split('/'));
   }
 
   /**
@@ -632,6 +747,7 @@ type WebviewMessage =
     }
   | { type: 'regenerate'; config: Partial<EventConfig> }
   | { type: 'generateFolders' }
+  | { type: 'bindTitleSlides' }
   | { type: 'openAsText' };
 
 function makeNonce(): string {

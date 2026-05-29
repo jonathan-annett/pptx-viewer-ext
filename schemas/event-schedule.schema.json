@@ -30,6 +30,46 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Default timeslot labels used to seed newly-added days. Absent/empty falls through to the deterministic config-derived list (timeslotsForDay)."
+        },
+        "titleSlides": {
+          "type": "object",
+          "description": "Title-slide template binding. Populated by the 'Bind title-slide template' action in the editor; consumed by the title-slide generator. Absent means no template is bound yet.",
+          "required": ["templatePath", "fields"],
+          "properties": {
+            "templatePath": {
+              "type": "string",
+              "description": "Path to the template .pptx, relative to this .eventSchedule file."
+            },
+            "fields": {
+              "type": "array",
+              "description": "Ordered field bindings. Speaker entries determine per-slide speaker capacity.",
+              "items": {
+                "type": "object",
+                "required": ["role", "frame"],
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": ["sessionTitle", "roomName", "timeslot", "day", "speaker"],
+                    "description": "What this frame's text is populated with at generate time."
+                  },
+                  "frame": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Zero-based index of the text frame on the template slide (document order)."
+                  },
+                  "line": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Speaker bindings only: zero-based line within a multi-line frame. Line-bound speakers substitute text in v1 but do not get hyperlinks (per-line overlay deferred)."
+                  }
+                }
+              }
+            },
+            "distributeEvenly": {
+              "type": "boolean",
+              "description": "When a session's speaker count exceeds capacity, distribute as evenly as possible across slides (true) vs. fill-then-remainder (false, default). 5 speakers @ capacity 4 → [3, 2] vs [4, 1]."
+            }
+          }
         }
       }
     },
