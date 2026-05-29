@@ -76,7 +76,7 @@ test('renderBindingPanelHtml emits valid HTML envelope + CSP with nonce', () => 
 test('Init JSON script tag carries inspection + templatePath + existing', () => {
   const existing: TitleSlidesBinding = {
     templatePath: 'templates/my.pptx',
-    fields: [{ role: 'speaker', frame: 2 }],
+    fields: [{ role: 'speaker', frame: 2, position: 1 }],
     distributeEvenly: true,
   };
   const html = renderBindingPanelHtml(vm(twoDeckInspection(), existing), 'n');
@@ -187,23 +187,6 @@ test('Speaker positions surface as Speaker 1 / 2 / 3 in the order the user assig
   assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker:3" selected>/.test(html));
 });
 
-test('Legacy speaker bindings without position get contiguous 1..N at render time', () => {
-  // Three speaker bindings in array order, no position fields — these
-  // should render as Speaker 1, 2, 3 by their position in the fields array.
-  const existing: TitleSlidesBinding = {
-    templatePath: 't.pptx',
-    fields: [
-      { role: 'speaker', frame: 0 },
-      { role: 'speaker', frame: 1 },
-      { role: 'speaker', frame: 2 },
-    ],
-  };
-  const html = renderBody(vm(twoDeckInspection(), existing));
-  assert.ok(/<select[^>]*data-frame-role="0"[\s\S]*?<option value="speaker:1" selected>/.test(html));
-  assert.ok(/<select[^>]*data-frame-role="1"[\s\S]*?<option value="speaker:2" selected>/.test(html));
-  assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker:3" selected>/.test(html));
-});
-
 test('Dropdown emits Speaker 1..N options (N up to MAX_SPEAKER_OPTIONS)', () => {
   const html = renderBody(vm(twoDeckInspection()));
   // At least Speaker 1 through Speaker 10 emitted as options in each select.
@@ -272,7 +255,7 @@ test('distributeEvenly checkbox unchecked when binding omits it / false', () => 
 test('distributeEvenly checkbox checked when existing binding has it true', () => {
   const existing: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: 2 }],
+    fields: [{ role: 'speaker', frame: 2, position: 1 }],
     distributeEvenly: true,
   };
   const html = renderBody(vm(twoDeckInspection(), existing));

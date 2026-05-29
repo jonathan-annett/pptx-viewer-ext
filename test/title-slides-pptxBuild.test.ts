@@ -106,7 +106,7 @@ test('2 deck sample: walk-in + 1 session slide; substitutes speaker name', () =>
 
   const binding: TitleSlidesBinding = {
     templatePath: '2 deck sample.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -140,7 +140,7 @@ test('2 deck sample: hyperlink rels added on session slides', () => {
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -170,7 +170,7 @@ test('2 deck sample: shape-attached hyperlink lands on <p:cNvPr>', () => {
   const frame = inspection.textFrames[speakerFrame];
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -203,7 +203,7 @@ test('5 speakers @ capacity 1 produces 5 session slides + walk-in = 6 total', ()
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const speakers = makeSpeakers(['A', 'B', 'C', 'D', 'E']);
   const session = makeSession({
@@ -237,7 +237,7 @@ test('3 slide sample: supplementary slide appended after session slides', () => 
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -269,7 +269,7 @@ test('1 deck sample: no walk-in; 1 session = 1 slide total', () => {
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -302,7 +302,7 @@ test('Multi-field binding substitutes all roles', () => {
     fields: [
       { role: 'sessionTitle', frame: titleFrame },
       { role: 'roomName', frame: roomFrame },
-      { role: 'speaker', frame: speakerFrame },
+      { role: 'speaker', frame: speakerFrame, position: 1 },
     ],
   };
   const session = makeSession({
@@ -333,7 +333,7 @@ test('Content_Types has Override for each output slide; no orphan notes', () => 
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -372,7 +372,7 @@ test('presentation.xml sldIdLst rebuilt with one entry per output slide', () => 
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -410,7 +410,7 @@ test('Line-bound speaker binding substitutes line text + emits warning', () => {
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame, line: 0 }],
+    fields: [{ role: 'speaker', frame: speakerFrame, line: 0, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -454,8 +454,8 @@ test('Last page with fewer speakers than capacity blanks trailing slots', () => 
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
     fields: [
-      { role: 'speaker', frame: speakerFrame },
-      { role: 'speaker', frame: otherFrame },
+      { role: 'speaker', frame: speakerFrame, position: 1 },
+      { role: 'speaker', frame: otherFrame, position: 2 },
     ],
   };
   const speakers = makeSpeakers(['A', 'B', 'C']);
@@ -589,7 +589,7 @@ test('Same inputs produce byte-identical output (deterministic)', () => {
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: speakerFrame }],
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',
@@ -621,7 +621,7 @@ test('Binding referencing an out-of-range frame throws at build time', () => {
   const inspection = inspectTemplate(tpl);
   const binding: TitleSlidesBinding = {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: 9999 }],   // way out of range
+    fields: [{ role: 'speaker', frame: 9999, position: 1 }],   // way out of range
   };
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1',

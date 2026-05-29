@@ -876,8 +876,8 @@ test('setTitleSlidesBinding writes the binding into config; round-trips through 
     templatePath: 'templates/my.pptx',
     fields: [
       { role: 'sessionTitle' as const, frame: 3 },
-      { role: 'speaker' as const, frame: 5 },
-      { role: 'speaker' as const, frame: 6 },
+      { role: 'speaker' as const, frame: 5, position: 1 },
+      { role: 'speaker' as const, frame: 6, position: 2 },
     ],
     distributeEvenly: true,
   };
@@ -893,7 +893,7 @@ test('setTitleSlidesBinding(undefined) clears the binding (field becomes absent 
   let s = emptySchedule();
   s = setTitleSlidesBinding(s, {
     templatePath: 't.pptx',
-    fields: [{ role: 'speaker', frame: 0 }],
+    fields: [{ role: 'speaker', frame: 0, position: 1 }],
   });
   assert.ok(s.config.titleSlides);
   s = setTitleSlidesBinding(s, undefined);
@@ -909,9 +909,9 @@ test('parseSchedule preserves line-bound speaker entries verbatim', () => {
   s = setTitleSlidesBinding(s, {
     templatePath: 't.pptx',
     fields: [
-      { role: 'speaker', frame: 3, line: 0 },
-      { role: 'speaker', frame: 3, line: 1 },
-      { role: 'speaker', frame: 3, line: 2 },
+      { role: 'speaker', frame: 3, line: 0, position: 1 },
+      { role: 'speaker', frame: 3, line: 1, position: 2 },
+      { role: 'speaker', frame: 3, line: 2, position: 3 },
     ],
   });
   const reparsed = parseSchedule(marshalSchedule(s));
@@ -961,7 +961,10 @@ test('parseSchedule preserves explicit speaker position field on round-trip', ()
   assert.equal((byFrame.get(7) as { position?: number }).position, 3);
 });
 
-test('parseTitleSlidesBinding drops position values that are <1 or non-finite', () => {
+test('parseTitleSlidesBinding drops speaker entries lacking a valid position', () => {
+  // position is required for speaker bindings — entries with missing /
+  // <1 / non-finite values get dropped at parse time (safer than
+  // inventing an order).
   const text = JSON.stringify({
     generatedAt: '2026-01-01T00:00:00Z',
     config: {
@@ -970,9 +973,10 @@ test('parseTitleSlidesBinding drops position values that are <1 or non-finite', 
         templatePath: 't.pptx',
         fields: [
           { role: 'speaker', frame: 0, position: 1 },     // ok
-          { role: 'speaker', frame: 1, position: 0 },     // <1 → drop position
-          { role: 'speaker', frame: 2, position: -3 },    // negative → drop position
-          { role: 'speaker', frame: 3, position: 'abc' }, // wrong type → drop position
+          { role: 'speaker', frame: 1, position: 0 },     // <1 → drop entry
+          { role: 'speaker', frame: 2, position: -3 },    // negative → drop entry
+          { role: 'speaker', frame: 3, position: 'abc' }, // wrong type → drop entry
+          { role: 'speaker', frame: 4 },                  // missing position → drop entry
         ],
       },
     },
@@ -980,12 +984,9 @@ test('parseTitleSlidesBinding drops position values that are <1 or non-finite', 
   });
   const r = parseSchedule(text);
   const fields = r.schedule.config.titleSlides?.fields ?? [];
-  assert.equal(fields.length, 4, 'all 4 entries kept (frame indices are valid)');
-  assert.equal((fields[0] as { position?: number }).position, 1);
-  assert.equal((fields[1] as { position?: number }).position, undefined,
-    'invalid position field dropped, entry kept (fallback to array-order)');
-  assert.equal((fields[2] as { position?: number }).position, undefined);
-  assert.equal((fields[3] as { position?: number }).position, undefined);
+  assert.equal(fields.length, 1, 'only the entry with a valid position survives');
+  assert.equal(fields[0].frame, 0);
+  assert.equal((fields[0] as { position: number }).position, 1);
 });
 
 test('parseSchedule drops invalid field entries but keeps valid ones', () => {
@@ -996,11 +997,11 @@ test('parseSchedule drops invalid field entries but keeps valid ones', () => {
       titleSlides: {
         templatePath: 't.pptx',
         fields: [
-          { role: 'speaker', frame: 0 },         // ok
-          { role: 'bogus', frame: 1 },           // invalid role → drop
-          { role: 'speaker', frame: -1 },        // invalid frame → drop
-          { role: 'speaker', frame: 'abc' },     // not a number → drop
-          { role: 'roomName', frame: 2 },        // ok
+          { role: 'speaker', frame: 0, position: 1 }, // ok
+          { role: 'bogus', frame: 1 },                // invalid role → drop
+          { role: 'speaker', frame: -1, position: 2 },// invalid frame → drop
+          { role: 'speaker', frame: 'abc', position: 3 }, // not a number → drop
+          { role: 'roomName', frame: 2 },             // ok (no position needed)
         ],
       },
     },

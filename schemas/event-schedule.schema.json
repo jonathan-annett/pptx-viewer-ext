@@ -65,9 +65,15 @@
                   "position": {
                     "type": "number",
                     "minimum": 1,
-                    "description": "Speaker bindings only: 1-based position. Determines which session speaker (1st, 2nd, …) lands in this frame at generate time. Falls back to array-order position when omitted (legacy bindings)."
+                    "description": "Required for speaker bindings: 1-based position. Determines which session speaker (1st, 2nd, …) lands in this frame at generate time."
                   }
-                }
+                },
+                "allOf": [
+                  {
+                    "if": { "properties": { "role": { "const": "speaker" } }, "required": ["role"] },
+                    "then": { "required": ["role", "frame", "position"] }
+                  }
+                ]
               }
             },
             "distributeEvenly": {

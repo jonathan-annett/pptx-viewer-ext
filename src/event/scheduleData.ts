@@ -732,12 +732,20 @@ function parseTitleSlidesBinding(raw: unknown, errors: string[]): TitleSlidesBin
     if (typeof e.role !== 'string' || !validRoles.has(e.role)) continue;
     if (typeof e.frame !== 'number' || !Number.isFinite(e.frame) || e.frame < 0) continue;
     if (e.role === 'speaker') {
-      const f: TitleSlidesBinding['fields'][number] = { role: 'speaker', frame: e.frame };
+      // `position` is required for speaker bindings — drop entries that
+      // lack a valid value. The binding UI always writes a position; the
+      // only way to land here without one is a hand-edit, in which case
+      // dropping is safer than silently inventing an order.
+      if (typeof e.position !== 'number' || !Number.isFinite(e.position) || e.position < 1) {
+        continue;
+      }
+      const f: TitleSlidesBinding['fields'][number] = {
+        role: 'speaker',
+        frame: e.frame,
+        position: e.position,
+      };
       if (typeof e.line === 'number' && Number.isFinite(e.line) && e.line >= 0) {
         f.line = e.line;
-      }
-      if (typeof e.position === 'number' && Number.isFinite(e.position) && e.position >= 1) {
-        f.position = e.position;
       }
       fields.push(f);
     } else {

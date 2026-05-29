@@ -32,9 +32,9 @@ export function titleSlideCapacity(binding: TitleSlidesBinding): number {
  *
  * Speakers are returned sorted by their 1-based `position` so that
  * `speakers[i]` from the schedule's session lands in the frame the user
- * designated as "Speaker (i+1)". Entries with no explicit `position`
- * fall back to array-order positions (legacy bindings written before
- * the UI surfaced explicit slot numbers).
+ * designated as "Speaker (i+1)". `position` is required at the type
+ * level and the parser drops malformed entries, so no fallback is
+ * needed.
  */
 export function titleSlideFieldsByRole(binding: TitleSlidesBinding): {
   sessionTitle?: TitleSlideFieldBinding;
@@ -49,14 +49,7 @@ export function titleSlideFieldsByRole(binding: TitleSlidesBinding): {
     if (f.role === 'speaker') rawSpeakers.push(f);
     else out[f.role] = f;
   }
-  // Decorate-sort: speakers without explicit position get their
-  // 1-based array-order index as the default. Stable sort preserves
-  // input order for ties (e.g. all-defaulted = original order).
-  const decorated = rawSpeakers.map((s, i) => ({
-    s,
-    pos: typeof s.position === 'number' ? s.position : i + 1,
-  }));
-  decorated.sort((a, b) => a.pos - b.pos);
-  out.speakers = decorated.map((d) => d.s);
+  rawSpeakers.sort((a, b) => a.position - b.position);
+  out.speakers = rawSpeakers;
   return out;
 }

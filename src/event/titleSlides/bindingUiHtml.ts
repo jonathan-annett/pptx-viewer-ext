@@ -110,28 +110,16 @@ const MAX_SPEAKER_OPTIONS = 20;
 
 function renderFrameList(vm: BindingPanelViewModel): string {
   // Map frame index → selected dropdown value. Speaker bindings encode
-  // position into the value as `speaker:N` (1-based) so the UI can
-  // round-trip the explicit slot the user assigned.
+  // position into the value as `speaker:N` (1-based) so the UI round-
+  // trips the explicit slot the user assigned.
   const valueByFrame = new Map<number, string>();
   if (vm.existing) {
-    // Sort speakers by position (with array-order fallback) so we can
-    // assign default positions for any legacy entry that lacks one.
-    const speakers = vm.existing.fields
-      .map((f, idx) => ({ f, idx }))
-      .filter((x) => x.f.role === 'speaker')
-      .map((x, sIdx) => ({
-        ...x,
-        pos: (x.f as { position?: number }).position ?? sIdx + 1,
-      }))
-      .sort((a, b) => a.pos - b.pos);
-    // Re-number contiguously from 1 — if legacy data had gaps, we close
-    // them at render time so the UI is always sane. The user can re-assign
-    // explicitly afterwards.
-    speakers.forEach((s, i) => {
-      valueByFrame.set(s.f.frame, `speaker:${i + 1}`);
-    });
     for (const f of vm.existing.fields) {
-      if (f.role !== 'speaker') valueByFrame.set(f.frame, f.role);
+      if (f.role === 'speaker') {
+        valueByFrame.set(f.frame, `speaker:${f.position}`);
+      } else {
+        valueByFrame.set(f.frame, f.role);
+      }
     }
   }
   if (vm.inspection.textFrames.length === 0) {
