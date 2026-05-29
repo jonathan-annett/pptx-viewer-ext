@@ -28,9 +28,13 @@ export function titleSlideCapacity(binding: TitleSlidesBinding): number {
 /**
  * Group fields by role for the renderer. Single-role entries return the
  * first binding for that role (multiple bindings of the same single-value
- * role would be a binding-UI bug, last one wins here for safety). Speakers
- * are returned in source-list order — pagination preserves this so
- * speaker N from the schedule lands in speakers[N] on the slide.
+ * role would be a binding-UI bug; last one wins here for safety).
+ *
+ * Speakers are returned sorted by their 1-based `position` so that
+ * `speakers[i]` from the schedule's session lands in the frame the user
+ * designated as "Speaker (i+1)". Entries with no explicit `position`
+ * fall back to array-order positions (legacy bindings written before
+ * the UI surfaced explicit slot numbers).
  */
 export function titleSlideFieldsByRole(binding: TitleSlidesBinding): {
   sessionTitle?: TitleSlideFieldBinding;
@@ -40,9 +44,19 @@ export function titleSlideFieldsByRole(binding: TitleSlidesBinding): {
   speakers: SpeakerFieldBinding[];
 } {
   const out: ReturnType<typeof titleSlideFieldsByRole> = { speakers: [] };
+  const rawSpeakers: SpeakerFieldBinding[] = [];
   for (const f of binding.fields) {
-    if (f.role === 'speaker') out.speakers.push(f);
+    if (f.role === 'speaker') rawSpeakers.push(f);
     else out[f.role] = f;
   }
+  // Decorate-sort: speakers without explicit position get their
+  // 1-based array-order index as the default. Stable sort preserves
+  // input order for ties (e.g. all-defaulted = original order).
+  const decorated = rawSpeakers.map((s, i) => ({
+    s,
+    pos: typeof s.position === 'number' ? s.position : i + 1,
+  }));
+  decorated.sort((a, b) => a.pos - b.pos);
+  out.speakers = decorated.map((d) => d.s);
   return out;
 }

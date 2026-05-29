@@ -61,6 +61,11 @@
                     "type": "number",
                     "minimum": 0,
                     "description": "Speaker bindings only: zero-based line within a multi-line frame. Line-bound speakers substitute text in v1 but do not get hyperlinks (per-line overlay deferred)."
+                  },
+                  "position": {
+                    "type": "number",
+                    "minimum": 1,
+                    "description": "Speaker bindings only: 1-based position. Determines which session speaker (1st, 2nd, …) lands in this frame at generate time. Falls back to array-order position when omitted (legacy bindings)."
                   }
                 }
               }

@@ -941,6 +941,53 @@ test('parseSchedule with malformed titleSlides surfaces error + drops the bindin
     `expected an error mentioning titleSlides; got ${JSON.stringify(r.errors)}`);
 });
 
+test('parseSchedule preserves explicit speaker position field on round-trip', () => {
+  let s = emptySchedule();
+  s = setTitleSlidesBinding(s, {
+    templatePath: 't.pptx',
+    fields: [
+      { role: 'speaker', frame: 2, position: 2 },
+      { role: 'speaker', frame: 5, position: 1 },
+      { role: 'speaker', frame: 7, position: 3 },
+    ],
+  });
+  const reparsed = parseSchedule(marshalSchedule(s));
+  const fields = reparsed.schedule.config.titleSlides?.fields ?? [];
+  // Round-trip preserves position values verbatim — sort order in the
+  // array doesn't matter (titleSlideFieldsByRole sorts by position).
+  const byFrame = new Map(fields.map((f) => [f.frame, f]));
+  assert.equal((byFrame.get(2) as { position?: number }).position, 2);
+  assert.equal((byFrame.get(5) as { position?: number }).position, 1);
+  assert.equal((byFrame.get(7) as { position?: number }).position, 3);
+});
+
+test('parseTitleSlidesBinding drops position values that are <1 or non-finite', () => {
+  const text = JSON.stringify({
+    generatedAt: '2026-01-01T00:00:00Z',
+    config: {
+      name: 'Test', days: ['MON'],
+      titleSlides: {
+        templatePath: 't.pptx',
+        fields: [
+          { role: 'speaker', frame: 0, position: 1 },     // ok
+          { role: 'speaker', frame: 1, position: 0 },     // <1 → drop position
+          { role: 'speaker', frame: 2, position: -3 },    // negative → drop position
+          { role: 'speaker', frame: 3, position: 'abc' }, // wrong type → drop position
+        ],
+      },
+    },
+    speakers: [], rooms: [], sessions: [], vacancies: [],
+  });
+  const r = parseSchedule(text);
+  const fields = r.schedule.config.titleSlides?.fields ?? [];
+  assert.equal(fields.length, 4, 'all 4 entries kept (frame indices are valid)');
+  assert.equal((fields[0] as { position?: number }).position, 1);
+  assert.equal((fields[1] as { position?: number }).position, undefined,
+    'invalid position field dropped, entry kept (fallback to array-order)');
+  assert.equal((fields[2] as { position?: number }).position, undefined);
+  assert.equal((fields[3] as { position?: number }).position, undefined);
+});
+
 test('parseSchedule drops invalid field entries but keeps valid ones', () => {
   const text = JSON.stringify({
     generatedAt: '2026-01-01T00:00:00Z',

@@ -155,7 +155,7 @@ test('Existing binding pre-selects matching role on each dropdown', () => {
     fields: [
       { role: 'roomName', frame: 0 },
       { role: 'day', frame: 1 },
-      { role: 'speaker', frame: 2 },
+      { role: 'speaker', frame: 2, position: 1 },
     ],
   };
   const html = renderBody(vm(twoDeckInspection(), existing));
@@ -164,8 +164,56 @@ test('Existing binding pre-selects matching role on each dropdown', () => {
     'frame 0 → roomName selected');
   assert.ok(/<select[^>]*data-frame-role="1"[\s\S]*?<option value="day" selected>/.test(html),
     'frame 1 → day selected');
-  assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker" selected>/.test(html),
-    'frame 2 → speaker selected');
+  // Speaker bindings now use `speaker:N` encoding so the position round-trips.
+  assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker:1" selected>/.test(html),
+    'frame 2 → Speaker 1 selected');
+});
+
+test('Speaker positions surface as Speaker 1 / 2 / 3 in the order the user assigned', () => {
+  // Three frames bound to speakers with explicit positions 2, 1, 3 (out of
+  // document order). The UI should render each frame with its true
+  // position-N selected so the binding round-trips cleanly.
+  const existing: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [
+      { role: 'speaker', frame: 0, position: 2 },
+      { role: 'speaker', frame: 1, position: 1 },
+      { role: 'speaker', frame: 2, position: 3 },
+    ],
+  };
+  const html = renderBody(vm(twoDeckInspection(), existing));
+  assert.ok(/<select[^>]*data-frame-role="0"[\s\S]*?<option value="speaker:2" selected>/.test(html));
+  assert.ok(/<select[^>]*data-frame-role="1"[\s\S]*?<option value="speaker:1" selected>/.test(html));
+  assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker:3" selected>/.test(html));
+});
+
+test('Legacy speaker bindings without position get contiguous 1..N at render time', () => {
+  // Three speaker bindings in array order, no position fields — these
+  // should render as Speaker 1, 2, 3 by their position in the fields array.
+  const existing: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [
+      { role: 'speaker', frame: 0 },
+      { role: 'speaker', frame: 1 },
+      { role: 'speaker', frame: 2 },
+    ],
+  };
+  const html = renderBody(vm(twoDeckInspection(), existing));
+  assert.ok(/<select[^>]*data-frame-role="0"[\s\S]*?<option value="speaker:1" selected>/.test(html));
+  assert.ok(/<select[^>]*data-frame-role="1"[\s\S]*?<option value="speaker:2" selected>/.test(html));
+  assert.ok(/<select[^>]*data-frame-role="2"[\s\S]*?<option value="speaker:3" selected>/.test(html));
+});
+
+test('Dropdown emits Speaker 1..N options (N up to MAX_SPEAKER_OPTIONS)', () => {
+  const html = renderBody(vm(twoDeckInspection()));
+  // At least Speaker 1 through Speaker 10 emitted as options in each select.
+  const firstSelect = html.match(/<select[^>]*data-frame-role="0"[\s\S]*?<\/select>/)![0];
+  for (let n = 1; n <= 10; n++) {
+    assert.ok(firstSelect.includes(`value="speaker:${n}"`),
+      `Speaker ${n} option present`);
+    assert.ok(firstSelect.includes(`>Speaker ${n}<`),
+      `Speaker ${n} label rendered`);
+  }
 });
 
 test('No existing binding → all dropdowns default to unbound', () => {

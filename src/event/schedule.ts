@@ -80,17 +80,23 @@ export interface TitleSlidesBinding {
 /**
  * One binding from a role to a text frame on the template slide.
  * `frame` is the zero-based index into `TemplateInspectResult.textFrames`
- * (document order). Speaker bindings may additionally carry a `line`
- * index when the speaker lives on one line of a multi-line text frame
- * (v1: line-bound speakers substitute text but don't get hyperlinks —
- * see `pptxBuild.ts` for the deferred per-line overlay path).
+ * (document order). Speaker bindings additionally carry:
+ *   - `position`: 1-based slot index. Speaker positions determine which
+ *     session speaker (speakers[0], speakers[1], …) lands in this frame,
+ *     independent of document order. The binding UI enforces contiguity
+ *     (Speaker N+1 unavailable until Speaker N is assigned). When absent
+ *     (legacy bindings), the parser/`titleSlideFieldsByRole` fall back
+ *     to array-order positions.
+ *   - `line`: zero-based line within a multi-line frame. v1 substitutes
+ *     line text but doesn't hyperlink line-bound speakers (per-line
+ *     overlay deferred — see `pptxBuild.ts`).
  */
 export type TitleSlideFieldBinding =
   | { role: 'sessionTitle'; frame: number }
   | { role: 'roomName';     frame: number }
   | { role: 'timeslot';     frame: number }
   | { role: 'day';          frame: number }
-  | { role: 'speaker';      frame: number; line?: number };
+  | { role: 'speaker';      frame: number; line?: number; position?: number };
 
 export interface EventSpeaker {
   id: string;

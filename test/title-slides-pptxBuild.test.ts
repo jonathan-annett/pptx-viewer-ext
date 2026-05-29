@@ -484,6 +484,103 @@ test('Last page with fewer speakers than capacity blanks trailing slots', () => 
     `page 2 should have exactly 1 hyperlink (for C); got ${hyperlinks.length}`);
 });
 
+// ───── explicit positions drive speaker→frame assignment ───────────────
+
+test('Speaker positions assign session speakers in position order, not array order', () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  // Pick two distinct frames as speakers. We deliberately put them in
+  // fields in REVERSE position order to prove position drives the
+  // assignment (not array order).
+  const speakerFrameA = frameIdx(inspection.textFrames, 'First Person');
+  const speakerFrameB = inspection.textFrames[0].index;
+  if (speakerFrameA === speakerFrameB) throw new Error('test setup: collision');
+
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [
+      // Frame A is Speaker 2 — listed first in the array.
+      { role: 'speaker', frame: speakerFrameA, position: 2 },
+      // Frame B is Speaker 1 — listed second.
+      { role: 'speaker', frame: speakerFrameB, position: 1 },
+    ],
+  };
+  const speakers = makeSpeakers(['ALPHA', 'BETA']);
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
+  });
+  const out = buildTitleDeck({
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(speakers, 2, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+  });
+  const zip = unzipSync(out.bytes);
+
+  // First session speaker (ALPHA) should land in Frame B (= Speaker 1's frame).
+  // Second session speaker (BETA) should land in Frame A (= Speaker 2's frame).
+  const slide2Xml = strFromU8(zip['ppt/slides/slide2.xml']);
+  const frameAText = extractFirstATInShape(slide2Xml, inspection.textFrames.find(f => f.index === speakerFrameA)!.shapeId);
+  const frameBText = extractFirstATInShape(slide2Xml, inspection.textFrames.find(f => f.index === speakerFrameB)!.shapeId);
+  assert.equal(frameBText, 'ALPHA', 'Speaker 1 (first session speaker) lands in the frame bound to position 1');
+  assert.equal(frameAText, 'BETA', 'Speaker 2 (second session speaker) lands in the frame bound to position 2');
+});
+
+// ───── unused speaker frame on partial page is blanked (not template text) ──
+
+test('Partial page: unused speaker frames render empty <a:t>, not the template sample text', () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  // Two speaker frames @ capacity 2; only 1 speaker → page 1 has the
+  // speaker in slot 1, slot 2 should be BLANK (not "First Person").
+  const speakerFrameA = frameIdx(inspection.textFrames, 'First Person');
+  const speakerFrameB = inspection.textFrames[0].index;
+  if (speakerFrameA === speakerFrameB) throw new Error('test setup: collision');
+
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [
+      { role: 'speaker', frame: speakerFrameA, position: 1 },
+      { role: 'speaker', frame: speakerFrameB, position: 2 },
+    ],
+  };
+  const speakers = makeSpeakers(['ONLY']);
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
+  });
+  const out = buildTitleDeck({
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(speakers, 2, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+  });
+  const zip = unzipSync(out.bytes);
+  const slide2Xml = strFromU8(zip['ppt/slides/slide2.xml']);
+  const slot1Text = extractFirstATInShape(slide2Xml, inspection.textFrames.find(f => f.index === speakerFrameA)!.shapeId);
+  const slot2Text = extractFirstATInShape(slide2Xml, inspection.textFrames.find(f => f.index === speakerFrameB)!.shapeId);
+  assert.equal(slot1Text, 'ONLY', 'slot 1 has the only speaker');
+  assert.equal(slot2Text, '',
+    `slot 2 should be blanked (empty string), not the template's original text; got "${slot2Text}"`);
+});
+
+// Pull just the first <a:t>...</a:t> content inside a specific shape.
+function extractFirstATInShape(slideXml: string, shapeId: number): string {
+  const spRe = /<p:sp>([\s\S]*?)<\/p:sp>/g;
+  let m: RegExpExecArray | null;
+  while ((m = spRe.exec(slideXml))) {
+    if (!m[1].includes(`id="${shapeId}"`)) continue;
+    const t = m[1].match(/<a:t>([^<]*)<\/a:t>/);
+    return t ? t[1] : '';
+  }
+  return '';
+}
+
 // ───── deterministic output ────────────────────────────────────────────
 
 test('Same inputs produce byte-identical output (deterministic)', () => {

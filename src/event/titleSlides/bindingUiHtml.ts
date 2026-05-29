@@ -102,15 +102,36 @@ function renderSlideRoles(vm: BindingPanelViewModel): string {
   </section>`;
 }
 
+/** Cap on Speaker N options emitted into each <select>. Beyond this and
+ *  templates would have implausibly many speaker slots; 20 is comfortable
+ *  headroom for any real-world session size. Client script hides/disables
+ *  options beyond `maxAssigned + 1` so the dropdown stays tidy. */
+const MAX_SPEAKER_OPTIONS = 20;
+
 function renderFrameList(vm: BindingPanelViewModel): string {
-  const bindingByFrame = new Map<number, string>();   // frame → role
+  // Map frame index → selected dropdown value. Speaker bindings encode
+  // position into the value as `speaker:N` (1-based) so the UI can
+  // round-trip the explicit slot the user assigned.
+  const valueByFrame = new Map<number, string>();
   if (vm.existing) {
+    // Sort speakers by position (with array-order fallback) so we can
+    // assign default positions for any legacy entry that lacks one.
+    const speakers = vm.existing.fields
+      .map((f, idx) => ({ f, idx }))
+      .filter((x) => x.f.role === 'speaker')
+      .map((x, sIdx) => ({
+        ...x,
+        pos: (x.f as { position?: number }).position ?? sIdx + 1,
+      }))
+      .sort((a, b) => a.pos - b.pos);
+    // Re-number contiguously from 1 — if legacy data had gaps, we close
+    // them at render time so the UI is always sane. The user can re-assign
+    // explicitly afterwards.
+    speakers.forEach((s, i) => {
+      valueByFrame.set(s.f.frame, `speaker:${i + 1}`);
+    });
     for (const f of vm.existing.fields) {
-      // Line-bound speakers: keep as 'speaker' role for the dropdown,
-      // but the actual binding is preserved verbatim on save (the
-      // client carries the original `line` value through unmodified
-      // for frames whose lines were authored by hand).
-      bindingByFrame.set(f.frame, f.role);
+      if (f.role !== 'speaker') valueByFrame.set(f.frame, f.role);
     }
   }
   if (vm.inspection.textFrames.length === 0) {
@@ -120,7 +141,7 @@ function renderFrameList(vm: BindingPanelViewModel): string {
     </section>`;
   }
   const rows = vm.inspection.textFrames.map((f) => {
-    const existingRole = bindingByFrame.get(f.index) ?? 'unbound';
+    const existingValue = valueByFrame.get(f.index) ?? 'unbound';
     const preview = f.sampleText.length > 80
       ? f.sampleText.slice(0, 80) + '…'
       : f.sampleText;
@@ -132,14 +153,14 @@ function renderFrameList(vm: BindingPanelViewModel): string {
       <td class="bind-frame-text">${escapeHtml(preview || '(empty)')}${lineNote}</td>
       <td class="bind-frame-role">
         <select data-frame-role="${f.index}" class="bind-role-select">
-          ${roleOptions(existingRole)}
+          ${roleOptions(existingValue)}
         </select>
       </td>
     </tr>`;
   }).join('');
   return `<section class="bind-section">
     <h2>Text frames on the template slide</h2>
-    <p class="hint">Pick a role for each frame. Frames you don't bind stay as their sample text in the generated decks.</p>
+    <p class="hint">Pick a role for each frame. Speaker positions are explicit: Speaker 1 lands the first session speaker, Speaker 2 the next, and so on — order them as your template's layout reads. Frames you don't bind stay as their sample text.</p>
     <table class="bind-frame-table">
       <thead>
         <tr><th>#</th><th>Sample text</th><th>Role</th></tr>
@@ -151,17 +172,22 @@ function renderFrameList(vm: BindingPanelViewModel): string {
 }
 
 function roleOptions(selected: string): string {
-  const roles = [
-    { value: 'unbound', label: 'Unbound' },
-    { value: 'sessionTitle', label: 'Session title' },
-    { value: 'roomName', label: 'Room name' },
-    { value: 'timeslot', label: 'Timeslot' },
-    { value: 'day', label: 'Day' },
-    { value: 'speaker', label: 'Speaker' },
+  const opts: string[] = [
+    optionTag('unbound', 'Unbound', selected),
+    optionTag('sessionTitle', 'Session title', selected),
+    optionTag('roomName', 'Room name', selected),
+    optionTag('timeslot', 'Timeslot', selected),
+    optionTag('day', 'Day', selected),
   ];
-  return roles.map(r =>
-    `<option value="${r.value}"${r.value === selected ? ' selected' : ''}>${r.label}</option>`,
-  ).join('');
+  for (let n = 1; n <= MAX_SPEAKER_OPTIONS; n++) {
+    opts.push(optionTag(`speaker:${n}`, `Speaker ${n}`, selected));
+  }
+  return opts.join('');
+}
+
+function optionTag(value: string, label: string, selected: string): string {
+  const sel = value === selected ? ' selected' : '';
+  return `<option value="${value}"${sel}>${label}</option>`;
 }
 
 function renderOptions(vm: BindingPanelViewModel): string {
@@ -307,16 +333,25 @@ function clientScript(): string {
   // binding state from the dropdowns, post on Save / Change template /
   // Cancel. No round-trips to the extension during normal interaction.
   //
-  // Existing line-bound speaker bindings are preserved verbatim — the
-  // UI doesn't expose `line` but we don't want to clobber it if it was
-  // hand-authored. We track which frames had a line-bound binding at
-  // load time and reapply on save.
+  // Speaker dropdown values are encoded as 'speaker:N' so the position
+  // round-trips. On every change we recompute which Speaker N options
+  // each dropdown should expose, enforcing two rules:
+  //   1. Contiguity: Speaker N+1 is offered only when Speaker N is
+  //      assigned to some frame (the user's request).
+  //   2. Uniqueness: each Speaker N can only land on one frame.
+  // Single-value roles (sessionTitle, roomName, timeslot, day) get the
+  // same uniqueness treatment — at most one frame holds each.
+  //
+  // Line-bound speaker bindings (hand-authored \`line\`) round-trip
+  // verbatim on save: the UI doesn't expose \`line\` but we don't want
+  // to clobber it. Tracked per-frame at load time, re-attached on save.
   return `(function(){
     var vscode = acquireVsCodeApi();
     var initEl = document.getElementById('binding-init');
     var init = JSON.parse(initEl.textContent || '{}');
-    var inspection = init.inspection || { textFrames: [] };
     var existing = init.existing;
+
+    var SINGLE_ROLES = ['sessionTitle', 'roomName', 'timeslot', 'day'];
 
     // Map of frame index → line-bound binding to preserve on save.
     var lineBoundByFrame = {};
@@ -332,21 +367,103 @@ function clientScript(): string {
       try { vscode.postMessage(msg); } catch (_) {}
     }
 
-    function readBindingFromForm(){
-      var fields = [];
+    function parseValue(v){
+      // 'speaker:N' → { kind: 'speaker', n: N }; everything else as { kind: v }.
+      if (v && v.indexOf('speaker:') === 0) {
+        return { kind: 'speaker', n: Number(v.substring('speaker:'.length)) };
+      }
+      return { kind: v };
+    }
+
+    function collectState(){
+      // Returns: {
+      //   selectedByFrame: { frameIdx: 'value' },
+      //   speakers: { N: frameIdx },         // 1-based positions in use
+      //   singles: { roleName: frameIdx },   // taken single-value roles
+      // }
+      var selects = document.querySelectorAll('select[data-frame-role]');
+      var s = { selectedByFrame: {}, speakers: {}, singles: {} };
+      for (var i = 0; i < selects.length; i++) {
+        var sel = selects[i];
+        var f = sel.getAttribute('data-frame-role');
+        var v = sel.value;
+        s.selectedByFrame[f] = v;
+        var p = parseValue(v);
+        if (p.kind === 'speaker' && Number.isFinite(p.n) && p.n >= 1) {
+          s.speakers[p.n] = f;
+        } else if (SINGLE_ROLES.indexOf(p.kind) !== -1) {
+          s.singles[p.kind] = f;
+        }
+      }
+      return s;
+    }
+
+    function maxContiguousSpeaker(speakers){
+      // speakers: { N: frameIdx }. Returns highest K such that 1..K are all
+      // assigned. 0 when none assigned.
+      var k = 0;
+      while (speakers[k + 1] !== undefined) k++;
+      return k;
+    }
+
+    function refreshOptionAvailability(){
+      var state = collectState();
+      var contig = maxContiguousSpeaker(state.speakers);
       var selects = document.querySelectorAll('select[data-frame-role]');
       for (var i = 0; i < selects.length; i++) {
         var sel = selects[i];
-        var role = sel.value;
-        if (role === 'unbound') continue;
-        var frameIdx = Number(sel.getAttribute('data-frame-role'));
-        var entry = { role: role, frame: frameIdx };
-        // Preserve a line-bound speaker binding if the user didn't change the role.
-        if (role === 'speaker' && lineBoundByFrame[String(frameIdx)] !== undefined) {
+        var thisFrame = sel.getAttribute('data-frame-role');
+        var currentValue = sel.value;
+        for (var j = 0; j < sel.options.length; j++) {
+          var opt = sel.options[j];
+          var v = opt.value;
+          if (v === 'unbound') {
+            opt.disabled = false;
+            opt.hidden = false;
+            continue;
+          }
+          var p = parseValue(v);
+          var isCurrent = (v === currentValue);
+          var enabled = false;
+          var visible = true;
+          if (p.kind === 'speaker') {
+            // Hide options beyond the next assignable slot, unless this
+            // dropdown is the one currently holding that value (so the
+            // user can see + edit it).
+            visible = isCurrent || p.n <= contig + 1;
+            var takenByOther = state.speakers[p.n] !== undefined
+              && state.speakers[p.n] !== thisFrame;
+            enabled = isCurrent || (!takenByOther && p.n <= contig + 1);
+          } else if (SINGLE_ROLES.indexOf(p.kind) !== -1) {
+            var heldElsewhere = state.singles[p.kind] !== undefined
+              && state.singles[p.kind] !== thisFrame;
+            enabled = isCurrent || !heldElsewhere;
+            visible = true;
+          }
+          opt.disabled = !enabled;
+          opt.hidden = !visible;
+        }
+      }
+    }
+
+    function readBindingFromForm(){
+      var state = collectState();
+      var fields = [];
+      // Emit single-role fields first (stable order), then speakers by position.
+      SINGLE_ROLES.forEach(function(role){
+        var f = state.singles[role];
+        if (f !== undefined) fields.push({ role: role, frame: Number(f) });
+      });
+      // Speaker positions: 1..max
+      var positions = Object.keys(state.speakers).map(Number).sort(function(a,b){ return a - b; });
+      positions.forEach(function(n){
+        var frameIdx = Number(state.speakers[n]);
+        var entry = { role: 'speaker', frame: frameIdx, position: n };
+        if (lineBoundByFrame[String(frameIdx)] !== undefined) {
           entry.line = lineBoundByFrame[String(frameIdx)];
         }
         fields.push(entry);
-      }
+      });
       var distEl = document.getElementById('bind-distribute-evenly');
       var binding = {
         templatePath: init.templatePath,
@@ -357,19 +474,29 @@ function clientScript(): string {
     }
 
     function updateCapacitySummary(){
-      var selects = document.querySelectorAll('select[data-frame-role]');
-      var speakerCount = 0;
-      for (var i = 0; i < selects.length; i++) {
-        if (selects[i].value === 'speaker') speakerCount++;
-      }
+      var state = collectState();
+      var speakerCount = Object.keys(state.speakers).length;
       var summary = document.getElementById('bind-capacity-summary');
       if (!summary) return;
       if (speakerCount === 0) {
         summary.textContent = 'No speaker frames bound — speakers won\\'t appear on the generated slides until at least one frame is set to Speaker.';
-        summary.classList.add('hint');
       } else {
-        summary.textContent = 'Speaker capacity per slide: ' + speakerCount + ' (count of frames set to Speaker). Overflow speakers spill onto additional slides per session.';
+        var contig = maxContiguousSpeaker(state.speakers);
+        var note = (speakerCount === contig)
+          ? ''
+          : ' (gap detected: positions ' + missingPositions(state.speakers, speakerCount).join(', ') + ' unassigned — fix before saving)';
+        summary.textContent = 'Speaker capacity per slide: ' + speakerCount + note + '. Sessions with more speakers spill onto additional slides.';
       }
+    }
+
+    function missingPositions(speakers, total){
+      var missing = [];
+      var maxN = 0;
+      Object.keys(speakers).forEach(function(k){ if (Number(k) > maxN) maxN = Number(k); });
+      for (var n = 1; n <= maxN; n++) {
+        if (speakers[n] === undefined) missing.push(n);
+      }
+      return missing;
     }
 
     function showStatus(msg, cls){
@@ -383,6 +510,7 @@ function clientScript(): string {
     document.addEventListener('change', function(e){
       var t = e.target;
       if (t && t.matches && t.matches('select[data-frame-role]')) {
+        refreshOptionAvailability();
         updateCapacitySummary();
         showStatus('Unsaved changes', 'bind-status-warn');
       } else if (t && t.id === 'bind-distribute-evenly') {
@@ -405,6 +533,7 @@ function clientScript(): string {
         var distEl = document.getElementById('bind-distribute-evenly');
         if (distEl) distEl.checked = false;
         lineBoundByFrame = {};
+        refreshOptionAvailability();
         updateCapacitySummary();
         showStatus('Reset to unbound', 'bind-status-warn');
       } else if (t.id === 'bind-change-template-btn') {
@@ -422,6 +551,7 @@ function clientScript(): string {
       }
     });
 
+    refreshOptionAvailability();
     updateCapacitySummary();
   })();`;
 }

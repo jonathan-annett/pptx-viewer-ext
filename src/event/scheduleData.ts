@@ -736,6 +736,9 @@ function parseTitleSlidesBinding(raw: unknown, errors: string[]): TitleSlidesBin
       if (typeof e.line === 'number' && Number.isFinite(e.line) && e.line >= 0) {
         f.line = e.line;
       }
+      if (typeof e.position === 'number' && Number.isFinite(e.position) && e.position >= 1) {
+        f.position = e.position;
+      }
       fields.push(f);
     } else {
       fields.push({ role: e.role as 'sessionTitle' | 'roomName' | 'timeslot' | 'day', frame: e.frame });
