@@ -31,6 +31,11 @@
           "items": { "type": "string" },
           "description": "Default timeslot labels used to seed newly-added days. Absent/empty falls through to the deterministic config-derived list (timeslotsForDay)."
         },
+        "layout": {
+          "type": "string",
+          "enum": ["day-major", "room-major"],
+          "description": "Folder-tree shape for Generate folders + Generate title slides. Default 'day-major' for files without the field."
+        },
         "titleSlides": {
           "type": "object",
           "description": "Title-slide template binding. Populated by the 'Bind title-slide template' action in the editor; consumed by the title-slide generator. Absent means no template is bound yet.",

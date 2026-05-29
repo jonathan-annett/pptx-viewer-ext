@@ -34,6 +34,8 @@ import {
   setDays,
   setDefaultTimeslots,
   setEventName,
+  resolveLayout,
+  setEventLayout,
   setSessionKind,
   setSessionSpeakers,
   setSessionTitle,
@@ -866,6 +868,37 @@ test('applyDefaultTimeslotsToAllDays: positional swap leaves no duplicates', () 
   assert.deepEqual(result.timeslotsByDay!.MON, ['B', 'A']);
   // The session previously at A is now at B (positional rename).
   assert.equal(result.sessions[0].timeslot, 'B');
+});
+
+// ───── config.layout (resolveLayout + setEventLayout + roundtrip) ──────
+
+test('resolveLayout defaults to day-major when config.layout is absent', () => {
+  const s = emptySchedule();
+  assert.equal(s.config.layout, undefined,
+    'fresh schedule has no layout set');
+  assert.equal(resolveLayout(s), 'day-major');
+});
+
+test('setEventLayout writes the value; resolveLayout returns it; roundtrip survives', () => {
+  let s = emptySchedule();
+  s = setEventLayout(s, 'room-major');
+  assert.equal(s.config.layout, 'room-major');
+  assert.equal(resolveLayout(s), 'room-major');
+  const reparsed = parseSchedule(marshalSchedule(s));
+  assert.equal(reparsed.schedule.config.layout, 'room-major',
+    'layout survives marshal + parse roundtrip');
+});
+
+test('parser drops invalid layout values (corrupt hand-edit)', () => {
+  const text = JSON.stringify({
+    generatedAt: '2026-01-01T00:00:00Z',
+    config: { name: 'Test', days: ['MON'], layout: 'sideways' },
+    speakers: [], rooms: [], sessions: [], vacancies: [],
+  });
+  const r = parseSchedule(text);
+  assert.equal(r.schedule.config.layout, undefined,
+    'invalid layout dropped — resolveLayout will fall back to day-major');
+  assert.equal(resolveLayout(r.schedule), 'day-major');
 });
 
 // ───── titleSlides binding (setTitleSlidesBinding + roundtrip) ─────────

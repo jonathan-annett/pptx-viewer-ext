@@ -192,6 +192,31 @@ test('extension without leading dot is normalised', () => {
   }
 });
 
+test('wrapInEventFolder=false drops the <eventName> wrapper segment', () => {
+  // The editor passes this flag so output lands directly in the folder
+  // containing the .eventSchedule (which IS the event root). CLI keeps
+  // the wrapper by default.
+  const { plan } = planFor('room-major', { wrapInEventFolder: false });
+  assert.equal(plan.eventRoot, '/tmp/x', 'no event-name suffix appended');
+  // Every emitted dir + file starts at outRoot directly.
+  for (const dir of plan.directories) {
+    assert.ok(dir.startsWith('/tmp/x/'), `dir under outRoot: ${dir}`);
+    assert.ok(!dir.includes('/TestEvent/'),
+      `no event-name segment in ${dir}`);
+  }
+  for (const f of plan.files) {
+    assert.ok(f.path.startsWith('/tmp/x/'), `file under outRoot: ${f.path}`);
+    assert.ok(!f.path.includes('/TestEvent/'),
+      `no event-name segment in ${f.path}`);
+  }
+});
+
+test('wrapInEventFolder=true (default) keeps the wrapper — CLI behaviour preserved', () => {
+  const { plan } = planFor('room-major');   // omits the option → defaults to true
+  assert.equal(plan.eventRoot, '/tmp/x/TestEvent',
+    'eventRoot keeps the <eventName> wrapper under outRoot');
+});
+
 // ───── .roomSync template emission (workspace-root variant) ──────────────
 
 test('emits one <roomId>.roomSync template per unique room in the schedule', () => {

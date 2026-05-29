@@ -31,6 +31,14 @@ export interface FolderGenInput {
   extension?: string;
   /** Bytes copied into every speaker placeholder. Empty buffer → zero-byte files. */
   placeholderBytes?: Uint8Array;
+  /**
+   * When true (default) the plan paths include the event name as a wrapper
+   * segment under `outRoot` — natural for the CLI which writes to a shared
+   * parent dir (`./events/<event>/<room>/<day>/`). When false, the wrapper
+   * is omitted — the editor passes false so output lands directly in the
+   * folder containing the `.eventSchedule` file (which IS the event root).
+   */
+  wrapInEventFolder?: boolean;
 }
 
 export interface FolderGenPlan {
@@ -79,8 +87,9 @@ export function planEventFolders(input: FolderGenInput): FolderGenPlan {
   const eventName = input.eventName ?? schedule.config.name;
   const ext = normaliseExtension(input.extension ?? '.pptx');
   const bytes = input.placeholderBytes ?? EMPTY_BYTES;
+  const wrap = input.wrapInEventFolder !== false;   // default true
 
-  const eventRoot = joinPath(input.outRoot, eventName);
+  const eventRoot = wrap ? joinPath(input.outRoot, eventName) : input.outRoot;
   const dirs = new Set<string>();
   const files: FolderGenPlan['files'] = [];
 

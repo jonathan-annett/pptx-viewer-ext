@@ -108,7 +108,7 @@ export function planTitleSlideDecks(input: PlanInput): DeckGenerationPlan {
     }));
     decks.push({
       displayKey: `${g.day} / ${roomName}`,
-      outputPath: composeOutputPath(layout, schedule.config.name, g.roomId, g.day, roomName),
+      outputPath: composeOutputPath(layout, g.roomId, g.day, roomName),
       day: g.day,
       roomName,
       roomId: g.roomId,
@@ -122,26 +122,24 @@ export function planTitleSlideDecks(input: PlanInput): DeckGenerationPlan {
 // ───── Path composition ──────────────────────────────────────────────────
 
 /**
- * Forward-slash path RELATIVE to the destination root the user picked.
- * Mirrors `eventFolders.sessionDirectory` so the title deck lands in the
- * parent folder of the timeslot directories (where the hyperlinks resolve
- * relative to).
+ * Forward-slash path RELATIVE to the destination root (the folder
+ * containing the `.eventSchedule`). Mirrors `eventFolders.sessionDirectory`
+ * so the title deck lands in the parent folder of the timeslot
+ * directories — where the hyperlinks resolve relative to.
  *
- *   room-major: <event>/<roomId>/<day>/<DAY> <ROOM> Title Slides.pptx
- *   day-major:  <event>/<day>/<roomId>/<DAY> <ROOM> Title Slides.pptx
+ *   room-major: <roomId>/<day>/<DAY> <ROOM> Title Slides.pptx
+ *   day-major:  <day>/<roomId>/<DAY> <ROOM> Title Slides.pptx
  */
 function composeOutputPath(
   layout: Layout,
-  eventName: string,
   roomId: string,
   day: string,
   roomName: string,
 ): string {
   const filename = `${day} ${filenameSafe(roomName)} Title Slides.pptx`;
-  const event = filenameSafe(eventName);
   return layout === 'room-major'
-    ? `${event}/${roomId}/${day}/${filename}`
-    : `${event}/${day}/${roomId}/${filename}`;
+    ? `${roomId}/${day}/${filename}`
+    : `${day}/${roomId}/${filename}`;
 }
 
 /** Replace filesystem-unsafe characters with underscores; trim. */

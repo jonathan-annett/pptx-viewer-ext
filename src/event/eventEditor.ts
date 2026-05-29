@@ -46,6 +46,8 @@ import {
   setDays,
   setDefaultTimeslots,
   setEventName,
+  resolveLayout,
+  setEventLayout,
   setSessionKind,
   setSessionSpeakers,
   setSessionTitle,
@@ -54,7 +56,7 @@ import {
 } from './scheduleData';
 import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind, TitleSlidesBinding } from './schedule';
-import { planEventFolders, type Layout } from './eventFolders';
+import { planEventFolders } from './eventFolders';
 import { openBindingPanel } from './titleSlides/bindingUi';
 import { generateTitleSlides } from './titleSlides/generator';
 import { getActivePlaceholderSet } from '../sync/placeholderRegistry';
@@ -341,6 +343,9 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
           case 'generateTitleSlides':
             await this.handleGenerateTitleSlides(document);
             break;
+          case 'setLayout':
+            await mutate((s) => setEventLayout(s, msg.layout));
+            break;
           case 'openAsText':
             await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
             break;
@@ -497,6 +502,7 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
       document,
       schedule: parsed.schedule,
       binding,
+      layout: resolveLayout(parsed.schedule),
     });
   }
 
@@ -532,9 +538,14 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
 
   /**
    * Materialise the folder tree implied by the current schedule. Pure planner
-   * lives in ./eventFolders.ts; this wired half asks the user for the bits
-   * the CLI takes via flags (layout + destination), then walks the plan
-   * through `vscode.workspace.fs` so it works in the web extension host.
+   * lives in ./eventFolders.ts; this wired half walks the plan through
+   * `vscode.workspace.fs` so it works in the web extension host.
+   *
+   * Layout comes from `config.layout` (locked into the schedule via the
+   * editor's Folder-layout dropdown). Destination is the folder containing
+   * the `.eventSchedule` — no folder picker. `wrapInEventFolder: false`
+   * drops the legacy `<eventName>/` wrapper segment so output lands
+   * directly alongside the schedule.
    *
    * Existing `<roomId>.roomSync` templates are preserved on re-runs — the
    * operator may have hand-wired destinations into them already, and the
@@ -551,59 +562,14 @@ export class EventEditorProvider implements vscode.CustomTextEditorProvider {
       return;
     }
 
-    // Ask layout first — it's the choice the CLI takes via --layout and
-    // there's no useful default (organisers tend to think day-major,
-    // distribution tends to be room-major; pick deliberately).
-    type LayoutItem = vscode.QuickPickItem & { value: Layout };
-    const layoutChoice = await vscode.window.showQuickPick<LayoutItem>(
-      [
-        {
-          label: 'Room-major',
-          description: '<event>/<room>/<day>/<timeslot>/',
-          detail: 'One room\'s whole event under one folder. Natural for distribution to a destination room.',
-          value: 'room-major',
-        },
-        {
-          label: 'Day-major',
-          description: '<event>/<day>/<room>/<timeslot>/',
-          detail: 'One day\'s rooms grouped together. Natural for an organiser\'s view of "what\'s happening today".',
-          value: 'day-major',
-        },
-      ],
-      { placeHolder: 'Choose folder layout for the event tree', title: 'Generate folders' },
-    );
-    if (!layoutChoice) {
-      log('event-editor: generateFolders cancelled at layout pick');
-      return;
-    }
+    const destUri = vscode.Uri.joinPath(document.uri, '..');
+    const layout = resolveLayout(parsed.schedule);
 
-    // Destination folder — default to the workspace folder containing this
-    // document, fall back to the document's own parent dir if the file is
-    // open without a workspace.
-    const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-    const defaultDestUri = wsFolder?.uri ?? vscode.Uri.joinPath(document.uri, '..');
-    const picks = await vscode.window.showOpenDialog({
-      canSelectFiles: false,
-      canSelectFolders: true,
-      canSelectMany: false,
-      defaultUri: defaultDestUri,
-      openLabel: 'Generate event folders here',
-      title: `Generate "${parsed.schedule.config.name}" folders into…`,
-    });
-    if (!picks || picks.length === 0) {
-      log('event-editor: generateFolders cancelled at folder picker');
-      return;
-    }
-    const destUri = picks[0];
-
-    // Pass outRoot:'' so the planner returns paths relative to destUri.
-    // The web extension then splits on '/' and uses vscode.Uri.joinPath
-    // to build per-entry URIs — works for any FS provider, including
-    // vscode.dev's FSA-backed file://.
     const plan = planEventFolders({
       schedule: parsed.schedule,
-      layout: layoutChoice.value,
+      layout,
       outRoot: '',
+      wrapInEventFolder: false,
     });
 
     await vscode.window.withProgress(
@@ -776,6 +742,7 @@ type WebviewMessage =
   | { type: 'generateFolders' }
   | { type: 'bindTitleSlides' }
   | { type: 'generateTitleSlides' }
+  | { type: 'setLayout'; layout: 'day-major' | 'room-major' }
   | { type: 'openAsText' };
 
 function makeNonce(): string {

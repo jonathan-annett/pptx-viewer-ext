@@ -142,6 +142,22 @@ export function setEventName(schedule: EventSchedule, name: string): EventSchedu
 }
 
 /**
+ * Resolve the layout used by both generators. Default `'day-major'` for
+ * schedules that don't carry the field (legacy + freshly-created files).
+ */
+export function resolveLayout(schedule: EventSchedule): 'day-major' | 'room-major' {
+  return schedule.config.layout ?? 'day-major';
+}
+
+/** Set the folder-tree layout (`day-major` or `room-major`) on the config. */
+export function setEventLayout(
+  schedule: EventSchedule,
+  layout: 'day-major' | 'room-major',
+): EventSchedule {
+  return { ...schedule, config: { ...schedule.config, layout } };
+}
+
+/**
  * Write or clear the title-slide template binding on the event config.
  * Pass `undefined` to remove the binding entirely (the field becomes
  * absent from the serialised JSON rather than `null`).
@@ -703,6 +719,12 @@ function parseConfig(raw: unknown, errors: string[]): EventConfig {
   if (Array.isArray(c.defaultTimeslots)) {
     const arr = c.defaultTimeslots.filter((v): v is string => typeof v === 'string');
     if (arr.length > 0) result.defaultTimeslots = arr;
+  }
+  // `layout` is optional with a 'day-major' fallback applied at use-time
+  // (see `resolveLayout`). Pick up only valid values here so a corrupt
+  // string in the file doesn't poison downstream code.
+  if (c.layout === 'day-major' || c.layout === 'room-major') {
+    result.layout = c.layout;
   }
   // `titleSlides` is also optional + not in DEFAULT_CONFIG. Pick it up
   // verbatim when shape-valid; bail to undefined otherwise. The wired

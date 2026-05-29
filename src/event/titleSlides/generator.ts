@@ -32,8 +32,10 @@ export async function generateTitleSlides(opts: {
   document: vscode.TextDocument;
   schedule: EventSchedule;
   binding: TitleSlidesBinding;
+  /** Layout from `config.layout` (via `resolveLayout`). */
+  layout: Layout;
 }): Promise<void> {
-  const { document, schedule, binding } = opts;
+  const { document, schedule, binding, layout } = opts;
 
   if (titleSlideCapacity(binding) === 0) {
     void vscode.window.showWarningMessage(
@@ -48,17 +50,8 @@ export async function generateTitleSlides(opts: {
     return;
   }
 
-  const layout = await pickLayout();
-  if (!layout) {
-    log('title-slides: cancelled at layout pick');
-    return;
-  }
-
-  const destUri = await pickDestination(document, schedule.config.name);
-  if (!destUri) {
-    log('title-slides: cancelled at destination pick');
-    return;
-  }
+  // Destination = the folder containing the .eventSchedule. No picker.
+  const destUri = vscode.Uri.joinPath(document.uri, '..');
 
   const templateUri = resolveRelativeUri(document.uri, binding.templatePath);
   let templateBytes: Uint8Array;
@@ -251,51 +244,6 @@ async function generateOneDeck(opts: {
   await vscode.workspace.fs.writeFile(outputUri, out.bytes);
   log(`title-slides: wrote ${entry.displayKey} v${version} (${out.bytes.length} bytes) → ${outputUri.toString()}`);
   return { status: 'written', uri: outputUri };
-}
-
-// ───── UI pickers ────────────────────────────────────────────────────────
-
-type LayoutItem = vscode.QuickPickItem & { value: Layout };
-
-async function pickLayout(): Promise<Layout | undefined> {
-  const choice = await vscode.window.showQuickPick<LayoutItem>(
-    [
-      {
-        label: 'Room-major',
-        description: '<event>/<room>/<day>/',
-        detail: 'Title deck per (room, day) lands in the room\'s day folder.',
-        value: 'room-major',
-      },
-      {
-        label: 'Day-major',
-        description: '<event>/<day>/<room>/',
-        detail: 'Title deck per (room, day) lands in the day\'s room folder.',
-        value: 'day-major',
-      },
-    ],
-    {
-      placeHolder: 'Choose folder layout (match your Generate folders choice)',
-      title: 'Generate title slides',
-    },
-  );
-  return choice?.value;
-}
-
-async function pickDestination(
-  document: vscode.TextDocument,
-  eventName: string,
-): Promise<vscode.Uri | undefined> {
-  const wsFolder = vscode.workspace.getWorkspaceFolder(document.uri);
-  const defaultUri = wsFolder?.uri ?? vscode.Uri.joinPath(document.uri, '..');
-  const picks = await vscode.window.showOpenDialog({
-    canSelectFiles: false,
-    canSelectFolders: true,
-    canSelectMany: false,
-    defaultUri,
-    openLabel: 'Generate title slides here',
-    title: `Generate "${eventName}" title slides into…`,
-  });
-  return picks && picks.length > 0 ? picks[0] : undefined;
 }
 
 // ───── URI helpers ───────────────────────────────────────────────────────

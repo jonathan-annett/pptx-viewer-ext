@@ -147,7 +147,7 @@ test('Multiple rooms on the same day → one deck per (room, day)', () => {
 
 // ───── Layout-specific output paths ─────────────────────────────────────
 
-test('room-major path = <event>/<roomId>/<day>/<DAY> <ROOM> Title Slides.pptx', () => {
+test('room-major path = <roomId>/<day>/<DAY> <ROOM> Title Slides.pptx', () => {
   const sched = schedule({
     name: 'Widget Conf',
     sessions: [session('MON', 'A', 'breakout-1', ['Alice'])],
@@ -157,11 +157,13 @@ test('room-major path = <event>/<roomId>/<day>/<DAY> <ROOM> Title Slides.pptx', 
     layout: 'room-major',
     resolveSessionTitle: titleFor,
   });
+  // No <eventName> wrapper — destination is the folder containing the
+  // .eventSchedule; output lives directly inside it.
   assert.equal(plan.decks[0].outputPath,
-    'Widget Conf/breakout-1/MON/MON Room 1 Title Slides.pptx');
+    'breakout-1/MON/MON Room 1 Title Slides.pptx');
 });
 
-test('day-major path = <event>/<day>/<roomId>/<DAY> <ROOM> Title Slides.pptx', () => {
+test('day-major path = <day>/<roomId>/<DAY> <ROOM> Title Slides.pptx', () => {
   const sched = schedule({
     name: 'Widget Conf',
     sessions: [session('MON', 'A', 'breakout-1', ['Alice'])],
@@ -172,10 +174,10 @@ test('day-major path = <event>/<day>/<roomId>/<DAY> <ROOM> Title Slides.pptx', (
     resolveSessionTitle: titleFor,
   });
   assert.equal(plan.decks[0].outputPath,
-    'Widget Conf/MON/breakout-1/MON Room 1 Title Slides.pptx');
+    'MON/breakout-1/MON Room 1 Title Slides.pptx');
 });
 
-test('Filename-unsafe characters in room/event name get scrubbed', () => {
+test('Filename-unsafe characters in room name get scrubbed', () => {
   const sched = schedule({
     name: 'Bad/Name:1',
     rooms: [{ id: 'r1', name: 'Room*1?' }],
@@ -186,11 +188,11 @@ test('Filename-unsafe characters in room/event name get scrubbed', () => {
     layout: 'room-major',
     resolveSessionTitle: titleFor,
   });
-  // Slashes/colons/asterisks/question-marks → underscores.
+  // Slashes/colons/asterisks/question-marks → underscores in filename.
   assert.ok(!/[\\/:*?"<>|]/.test(plan.decks[0].outputPath.split('/').pop()!),
     `filename has no unsafe chars; got ${plan.decks[0].outputPath}`);
   assert.equal(plan.decks[0].outputPath,
-    'Bad_Name_1/r1/MON/MON Room_1_ Title Slides.pptx');
+    'r1/MON/MON Room_1_ Title Slides.pptx');
 });
 
 // ───── Sorting / ordering ──────────────────────────────────────────────

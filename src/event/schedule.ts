@@ -53,6 +53,17 @@ export interface EventConfig {
    */
   defaultTimeslots?: string[];
   /**
+   * Folder-tree shape for both Generate folders + Generate title slides.
+   * Locked into the schedule because every downstream artifact (placeholder
+   * paths, title-deck paths, hyperlink targets) depends on this choice
+   * being stable. Default `'day-major'` for legacy files without the
+   * field; the UI dropdown surfaces the resolved value.
+   *
+   *   - `day-major`: `<day>/<room>/<timeslot>/` — one day's rooms together.
+   *   - `room-major`: `<room>/<day>/<timeslot>/` — one room's whole event.
+   */
+  layout?: 'day-major' | 'room-major';
+  /**
    * Title-slide template binding. Set by the "Bind title-slide template"
    * action in the event editor; consumed by `buildTitleDeck` in
    * `titleSlides/pptxBuild.ts`. Absent means no template has been bound

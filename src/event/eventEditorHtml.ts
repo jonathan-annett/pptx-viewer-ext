@@ -29,6 +29,7 @@ import type {
 import {
   displayTitleForSession,
   eligibleSpeakersForSession,
+  resolveLayout,
   timeslotsForDayResolved,
 } from './scheduleData';
 
@@ -386,8 +387,17 @@ function renderTools(vm: EventEditorViewModel): string {
     ${clearBtn}
   </div>`;
   if (!vm.isPlaceholder) {
+    const layout = resolveLayout(vm.schedule);
     return `<section class="evt-section evt-tools">
       ${toolsHeader}
+      <p class="evt-tools-layout">
+        <label for="event-layout"><strong>Folder layout:</strong></label>
+        <select id="event-layout">
+          <option value="day-major"${layout === 'day-major' ? ' selected' : ''}>Day-major — &lt;day&gt;/&lt;room&gt;/&lt;timeslot&gt;/</option>
+          <option value="room-major"${layout === 'room-major' ? ' selected' : ''}>Room-major — &lt;room&gt;/&lt;day&gt;/&lt;timeslot&gt;/</option>
+        </select>
+        <span class="hint">Locked in here so both generators below stay consistent. Files land in the folder containing this <code>.eventSchedule</code>.</span>
+      </p>
       <p class="hint">
         Generate folders writes a directory tree mirroring this schedule —
         one folder per (room, day, timeslot) with a zero-byte placeholder
@@ -396,7 +406,7 @@ function renderTools(vm: EventEditorViewModel): string {
         speaker placeholders overwrite.
       </p>
       <p>
-        <button type="button" class="btn" id="generate-folders-btn" title="Materialise the folder tree for this event into a destination folder you pick">Generate folders…</button>
+        <button type="button" class="btn" id="generate-folders-btn" title="Materialise the folder tree for this event into the folder containing this .eventSchedule.">Generate folders…</button>
         <button type="button" class="btn" id="bind-title-slides-btn" title="${escapeAttr(bindButtonTitle(vm))}">${
           vm.schedule.config.titleSlides
             ? 'Edit title-slide binding…'
@@ -604,6 +614,8 @@ function clientScript(): string {
       } else if (t.id === 'event-default-timeslots') {
         const labels = t.value.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
         post({ type: 'setDefaultTimeslots', labels: labels });
+      } else if (t.id === 'event-layout') {
+        post({ type: 'setLayout', layout: t.value });
       }
     });
 
