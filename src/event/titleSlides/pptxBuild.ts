@@ -31,6 +31,7 @@ import type {
 import { titleSlideFieldsByRole } from './binding';
 import type { EventSession, SessionSpeakerSlot } from '../schedule';
 import { sessionSpeakerFilename, normaliseExtension } from '../eventFolders';
+import { sha256Hex } from '../../sync/hash';
 
 // ───── Types ─────────────────────────────────────────────────────────────
 
@@ -55,6 +56,17 @@ export interface DeckBuildInput {
    *  Should match what `eventFolders.planEventFolders` used to lay out
    *  the placeholder files this deck links into. */
   extension?: string;
+  /** Pre-computed sha256(templateBytes). M4 hashes the template once and
+   *  reuses across all (room, day) decks; tests and one-off callers omit. */
+  precomputedTemplateHash?: string;
+  /** Deck version (1, 2, 3, …). Default 1 — first generation. M4 computes
+   *  via `nextDeckVersion(previousFingerprint, newHashes)`. */
+  deckVersion?: number;
+  /** Optional ISO-8601 timestamp embedded alongside the hashes for human
+   *  reference (`generated-at=` in the comment). NOT part of the hash —
+   *  byte-identical output for stable inputs is preserved when omitted.
+   *  M4 typically passes `new Date().toISOString()`. */
+  generatedAt?: string;
 }
 
 export interface SessionForDeck {
@@ -77,16 +89,57 @@ export interface DeckBuildOutput {
   /** Non-fatal issues encountered during build. Empty when everything
    *  bound cleanly. Surfaces in the M4 result modal. */
   warnings: string[];
+  /** Deterministic fingerprint of the inputs that drove this build.
+   *  Embedded in docProps/core.xml's <dc:description>; M4's stale-check
+   *  reads it back via `readDeckFingerprint`. */
+  fingerprint: DeckFingerprint;
+}
+
+/**
+ * Format version for the fingerprint block embedded in <dc:description>.
+ * Bumped only when the *embedding format* changes (e.g. we add new fields
+ * or restructure). Independent of `deckVersion` (the regen counter for
+ * this specific deck's data).
+ */
+export const FINGERPRINT_FORMAT_VERSION = 1;
+
+export interface DeckFingerprint {
+  /** Format version of the embedded block (always `FINGERPRINT_FORMAT_VERSION`
+   *  for blocks this build emits). Older format versions stay parseable. */
+  formatVersion: number;
+  /** Regen counter for THIS deck — bumps each time the underlying data
+   *  changes. v1 on first generation. */
+  deckVersion: number;
+  /** sha256(templateBytes). Flips when the operator changes the template. */
+  templateHash: string;
+  /** sha256(canonicalJson(per-deck inputs)). Flips when speakers / sessions
+   *  / binding change for this specific (room, day). */
+  dataHash: string;
+  /** ISO-8601 timestamp of the build, if the caller passed `generatedAt`.
+   *  NOT part of the hashes — purely human-readable. */
+  generatedAt?: string;
 }
 
 // ───── Public entry point ────────────────────────────────────────────────
 
-export function buildTitleDeck(input: DeckBuildInput): DeckBuildOutput {
+export async function buildTitleDeck(input: DeckBuildInput): Promise<DeckBuildOutput> {
   const { templateBytes, inspection, binding, sessions, day, roomName } = input;
   const ext = normaliseExtension(input.extension ?? '.pptx');
   const warnings: string[] = [];
 
   validateBindingFrames(binding, inspection, warnings);
+
+  // Compute the fingerprint up-front so we can embed it after slide
+  // assembly. Hashes are over canonical inputs (timestamp excluded), so
+  // identical schedules produce identical bytes regardless of when run.
+  const hashes = await computeDeckHashes(input);
+  const fingerprint: DeckFingerprint = {
+    formatVersion: FINGERPRINT_FORMAT_VERSION,
+    deckVersion: input.deckVersion ?? 1,
+    templateHash: hashes.templateHash,
+    dataHash: hashes.dataHash,
+  };
+  if (input.generatedAt !== undefined) fingerprint.generatedAt = input.generatedAt;
 
   const zip = unzipSync(templateBytes);
 
@@ -169,7 +222,12 @@ export function buildTitleDeck(input: DeckBuildInput): DeckBuildOutput {
     rebuildContentTypes(strFromU8(zip['[Content_Types].xml']), slideRefs.map(r => r.path)),
   );
 
-  return { bytes: zipSync(zip), warnings };
+  // Embed fingerprint in docProps/core.xml's <dc:description>. Creates
+  // the file + Content_Types Override + root rels entry if the template
+  // didn't carry core props (Google Slides exports often omit them).
+  embedFingerprint(zip, fingerprint);
+
+  return { bytes: zipSync(zip), warnings, fingerprint };
 }
 
 // ───── Slide-level builders ──────────────────────────────────────────────
@@ -439,6 +497,270 @@ function rebuildContentTypes(ctXml: string, keepSlidePaths: string[]): string {
     )
     .join('');
   return out.replace('</Types>', newOverrides + '</Types>');
+}
+
+// ───── Fingerprint: compute, embed, read, version-bump ──────────────────
+
+/**
+ * Compute the template + data hashes for a deck without building it.
+ * M4's stale-check uses this to decide whether to skip an unchanged
+ * (room, day) without paying the full build cost. Pure (no I/O).
+ *
+ * The `templateHash` is sha256 of the raw .pptx bytes — caches via
+ * `input.precomputedTemplateHash` when provided (typical M4 flow:
+ * compute once across N decks for the same template).
+ *
+ * The `dataHash` is sha256 of a canonical JSON of every input that
+ * affects output bytes: binding (fields sorted for stability,
+ * distributeEvenly), day, roomName, extension, and per-session
+ * (title, timeslot, day, roomId, paginated speaker pages).
+ */
+export async function computeDeckHashes(input: DeckBuildInput): Promise<{
+  templateHash: string;
+  dataHash: string;
+}> {
+  const templateHash = input.precomputedTemplateHash
+    ?? (await sha256Hex(input.templateBytes));
+  const canonical = canonicalDeckInput(input);
+  const dataBytes = new TextEncoder().encode(canonicalJson(canonical));
+  const dataHash = await sha256Hex(dataBytes);
+  return { templateHash, dataHash };
+}
+
+/**
+ * Decide the next deck version based on the previous fingerprint (if any)
+ * and the new hashes. Pure.
+ *
+ *   - No previous deck → v1, changed.
+ *   - Hashes match previous → same version, NOT changed (M4 should skip).
+ *   - Hashes differ → version+1, changed.
+ */
+export function nextDeckVersion(
+  previous: DeckFingerprint | null,
+  next: { templateHash: string; dataHash: string },
+): { version: number; changed: boolean } {
+  if (!previous) return { version: 1, changed: true };
+  if (
+    previous.templateHash === next.templateHash &&
+    previous.dataHash === next.dataHash
+  ) {
+    return { version: previous.deckVersion, changed: false };
+  }
+  return { version: previous.deckVersion + 1, changed: true };
+}
+
+/**
+ * Read the embedded fingerprint from an existing deck. Returns null when
+ * the file isn't a deck we generated (no docProps/core.xml, no
+ * <dc:description>, or the description doesn't carry our format header).
+ *
+ * Sync: only zip-read + string parse. No hashing happens here, so this
+ * is cheap to call across many candidate files.
+ */
+export function readDeckFingerprint(pptxBytes: Uint8Array): DeckFingerprint | null {
+  let zip: Record<string, Uint8Array>;
+  try {
+    zip = unzipSync(pptxBytes);
+  } catch {
+    return null;
+  }
+  const core = zip['docProps/core.xml'];
+  if (!core) return null;
+  const xml = strFromU8(core);
+  const match = xml.match(/<dc:description\b[^>]*>([\s\S]*?)<\/dc:description>/);
+  if (!match) return null;
+  return parseFingerprintComment(unescapeXmlBasic(match[1]));
+}
+
+// ───── Canonicalization + hash helpers (pure) ────────────────────────────
+
+function canonicalDeckInput(input: DeckBuildInput): unknown {
+  // Sort the binding fields for stable serialisation. Within a role,
+  // sort by frame (then by position for speakers).
+  const sortedFields = [...input.binding.fields].sort((a, b) => {
+    if (a.role !== b.role) return a.role < b.role ? -1 : 1;
+    if (a.frame !== b.frame) return a.frame - b.frame;
+    const ap = (a as { position?: number }).position ?? 0;
+    const bp = (b as { position?: number }).position ?? 0;
+    return ap - bp;
+  });
+  return {
+    extension: normaliseExtension(input.extension ?? '.pptx'),
+    day: input.day,
+    roomName: input.roomName,
+    binding: {
+      fields: sortedFields,
+      distributeEvenly: input.binding.distributeEvenly === true,
+    },
+    sessions: input.sessions.map((s) => ({
+      title: s.title,
+      timeslot: s.timeslot,
+      day: s.session.day,
+      roomId: s.session.roomId,
+      speakerPages: s.speakerPages.map((page) =>
+        page.map((sp) => ({ slot: sp.slot, speakerName: sp.speakerName })),
+      ),
+    })),
+  };
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const obj = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(obj).sort()) {
+    out[key] = canonicalize(obj[key]);
+  }
+  return out;
+}
+
+// ───── Fingerprint comment: render + parse ───────────────────────────────
+
+function renderFingerprintComment(fp: DeckFingerprint): string {
+  const lines = [
+    `pptx-title-deck format=${fp.formatVersion}`,
+    `deck-version=${fp.deckVersion}`,
+    `template-sha256=${fp.templateHash}`,
+    `data-sha256=${fp.dataHash}`,
+  ];
+  if (fp.generatedAt) lines.push(`generated-at=${fp.generatedAt}`);
+  return lines.join('\n');
+}
+
+function parseFingerprintComment(text: string): DeckFingerprint | null {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+  const headerMatch = lines[0].match(/^pptx-title-deck\s+format=(\d+)$/);
+  if (!headerMatch) return null;
+  const fp: Partial<DeckFingerprint> = { formatVersion: Number(headerMatch[1]) };
+  for (const line of lines.slice(1)) {
+    const m = line.match(/^([a-z][a-z0-9-]*)=(.*)$/);
+    if (!m) continue;
+    const [, key, val] = m;
+    if (key === 'deck-version') {
+      const n = Number(val);
+      if (Number.isFinite(n) && n >= 1) fp.deckVersion = n;
+    } else if (key === 'template-sha256' && /^[0-9a-f]{64}$/i.test(val)) {
+      fp.templateHash = val.toLowerCase();
+    } else if (key === 'data-sha256' && /^[0-9a-f]{64}$/i.test(val)) {
+      fp.dataHash = val.toLowerCase();
+    } else if (key === 'generated-at') {
+      fp.generatedAt = val;
+    }
+  }
+  if (
+    fp.deckVersion === undefined ||
+    fp.templateHash === undefined ||
+    fp.dataHash === undefined
+  ) {
+    return null;
+  }
+  return fp as DeckFingerprint;
+}
+
+// ───── Fingerprint embed: mutate or create docProps/core.xml ─────────────
+
+function embedFingerprint(
+  zip: Record<string, Uint8Array>,
+  fp: DeckFingerprint,
+): void {
+  const commentText = renderFingerprintComment(fp);
+  const corePath = 'docProps/core.xml';
+  if (zip[corePath] !== undefined) {
+    zip[corePath] = strToU8(
+      replaceCoreDescription(strFromU8(zip[corePath]), commentText),
+    );
+    return;
+  }
+  // No core.xml in template (Google Slides exports skip it). Create the
+  // full scaffolding: core.xml + Content_Types Override + root rels entry.
+  zip[corePath] = strToU8(newCoreXml(commentText));
+  zip['[Content_Types].xml'] = strToU8(
+    addCoreContentTypeOverride(strFromU8(zip['[Content_Types].xml'])),
+  );
+  const rootRelsPath = '_rels/.rels';
+  if (zip[rootRelsPath] !== undefined) {
+    zip[rootRelsPath] = strToU8(
+      addCoreRootRel(strFromU8(zip[rootRelsPath])),
+    );
+  }
+}
+
+function replaceCoreDescription(coreXml: string, commentText: string): string {
+  const escaped = escapeXml(commentText);
+  if (/<dc:description\b[^>]*>[\s\S]*?<\/dc:description>/.test(coreXml)) {
+    return coreXml.replace(
+      /<dc:description\b[^>]*>[\s\S]*?<\/dc:description>/,
+      `<dc:description>${escaped}</dc:description>`,
+    );
+  }
+  if (/<dc:description\s*\/>/.test(coreXml)) {
+    return coreXml.replace(
+      /<dc:description\s*\/>/,
+      `<dc:description>${escaped}</dc:description>`,
+    );
+  }
+  // Insert before </cp:coreProperties>.
+  return coreXml.replace(
+    /<\/cp:coreProperties>/,
+    `<dc:description>${escaped}</dc:description></cp:coreProperties>`,
+  );
+}
+
+function newCoreXml(commentText: string): string {
+  const escaped = escapeXml(commentText);
+  return [
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+    `<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"`,
+    ` xmlns:dc="http://purl.org/dc/elements/1.1/"`,
+    ` xmlns:dcterms="http://purl.org/dc/terms/"`,
+    ` xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">`,
+    `<dc:description>${escaped}</dc:description>`,
+    `</cp:coreProperties>`,
+  ].join('');
+}
+
+function addCoreContentTypeOverride(ctXml: string): string {
+  // Don't double-add.
+  if (/PartName="\/docProps\/core\.xml"/.test(ctXml)) return ctXml;
+  const override =
+    `<Override ContentType="application/vnd.openxmlformats-package.core-properties+xml" ` +
+    `PartName="/docProps/core.xml"/>`;
+  return ctXml.replace('</Types>', override + '</Types>');
+}
+
+function addCoreRootRel(rootRelsXml: string): string {
+  // Don't double-add.
+  if (/Type="http:\/\/schemas\.openxmlformats\.org\/package\/2006\/relationships\/metadata\/core-properties"/.test(rootRelsXml)) {
+    return rootRelsXml;
+  }
+  // Pick an rId that doesn't clash with existing ones.
+  const used = new Set<string>();
+  const re = /Id="([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(rootRelsXml))) used.add(m[1]);
+  let n = 100;
+  while (used.has(`rId${n}`)) n++;
+  const rId = `rId${n}`;
+  const rel =
+    `<Relationship Id="${rId}" ` +
+    `Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" ` +
+    `Target="docProps/core.xml"/>`;
+  return rootRelsXml.replace('</Relationships>', rel + '</Relationships>');
+}
+
+function unescapeXmlBasic(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 // ───── Validation ────────────────────────────────────────────────────────

@@ -10,7 +10,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { unzipSync, strFromU8 } from 'fflate';
 import { inspectTemplate, type TextFrame } from '../src/event/titleSlides/templateInspect';
-import { buildTitleDeck, titleDeckHyperlinkTarget, type DeckBuildInput } from '../src/event/titleSlides/pptxBuild';
+import {
+  buildTitleDeck,
+  computeDeckHashes,
+  nextDeckVersion,
+  readDeckFingerprint,
+  titleDeckHyperlinkTarget,
+  type DeckBuildInput,
+  type DeckFingerprint,
+} from '../src/event/titleSlides/pptxBuild';
 import { splitSpeakers } from '../src/event/titleSlides/pagination';
 import type { TitleSlidesBinding } from '../src/event/titleSlides/binding';
 import type { EventSession, SessionSpeakerSlot } from '../src/event/schedule';
@@ -18,8 +26,8 @@ import type { EventSession, SessionSpeakerSlot } from '../src/event/schedule';
 const SAMPLES = join(__dirname, '..', 'samples', 'title-templates');
 const load = (name: string): Uint8Array => new Uint8Array(readFileSync(join(SAMPLES, name)));
 
-const tests: Array<[string, () => void]> = [];
-const test = (name: string, fn: () => void): void => {
+const tests: Array<[string, () => void | Promise<void>]> = [];
+const test = (name: string, fn: () => void | Promise<void>): void => {
   tests.push([name, fn]);
 };
 
@@ -73,7 +81,7 @@ function slideText(zip: Record<string, Uint8Array>, slideKey: string): string[] 
 
 // ───── titleDeckHyperlinkTarget (pure helper) ─────────────────────────
 
-test('titleDeckHyperlinkTarget composes <timeslot>/<placeholder-filename>', () => {
+test('titleDeckHyperlinkTarget composes <timeslot>/<placeholder-filename>', async () => {
   const session = makeSession({
     day: 'MON',
     timeslot: 'A',
@@ -86,7 +94,7 @@ test('titleDeckHyperlinkTarget composes <timeslot>/<placeholder-filename>', () =
   assert.equal(target, 'A/MON ROOM1 A 1 John Smith.pptx');
 });
 
-test('titleDeckHyperlinkTarget respects custom extension', () => {
+test('titleDeckHyperlinkTarget respects custom extension', async () => {
   const session = makeSession({
     day: 'TUE',
     timeslot: 'B',
@@ -99,7 +107,7 @@ test('titleDeckHyperlinkTarget respects custom extension', () => {
 
 // ───── 2 deck sample: 1 session, single-speaker binding ────────────────
 
-test('2 deck sample: walk-in + 1 session slide; substitutes speaker name', () => {
+test('2 deck sample: walk-in + 1 session slide; substitutes speaker name', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -112,7 +120,7 @@ test('2 deck sample: walk-in + 1 session slide; substitutes speaker name', () =>
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John Smith']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'Welcome',
@@ -134,7 +142,7 @@ test('2 deck sample: walk-in + 1 session slide; substitutes speaker name', () =>
   assert.equal(out.warnings.length, 0, 'no warnings for single-frame speaker');
 });
 
-test('2 deck sample: hyperlink rels added on session slides', () => {
+test('2 deck sample: hyperlink rels added on session slides', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -146,7 +154,7 @@ test('2 deck sample: hyperlink rels added on session slides', () => {
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John Smith']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'Welcome', timeslot: 'A',
@@ -163,7 +171,7 @@ test('2 deck sample: hyperlink rels added on session slides', () => {
   assert.ok(rels.includes('TargetMode="External"'), 'external link mode set');
 });
 
-test('2 deck sample: shape-attached hyperlink lands on <p:cNvPr>', () => {
+test('2 deck sample: shape-attached hyperlink lands on <p:cNvPr>', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -176,7 +184,7 @@ test('2 deck sample: shape-attached hyperlink lands on <p:cNvPr>', () => {
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John Smith']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -197,7 +205,7 @@ test('2 deck sample: shape-attached hyperlink lands on <p:cNvPr>', () => {
 
 // ───── pagination integration: 5 speakers, capacity 1, fill mode ───────
 
-test('5 speakers @ capacity 1 produces 5 session slides + walk-in = 6 total', () => {
+test('5 speakers @ capacity 1 produces 5 session slides + walk-in = 6 total', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -209,7 +217,7 @@ test('5 speakers @ capacity 1 produces 5 session slides + walk-in = 6 total', ()
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -231,7 +239,7 @@ test('5 speakers @ capacity 1 produces 5 session slides + walk-in = 6 total', ()
 
 // ───── 3 slide sample: supplementary preserved at end ──────────────────
 
-test('3 slide sample: supplementary slide appended after session slides', () => {
+test('3 slide sample: supplementary slide appended after session slides', async () => {
   const tpl = load('3 slide sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -243,7 +251,7 @@ test('3 slide sample: supplementary slide appended after session slides', () => 
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -263,7 +271,7 @@ test('3 slide sample: supplementary slide appended after session slides', () => 
 
 // ───── 1 deck sample: no walk-in, no supplementary ─────────────────────
 
-test('1 deck sample: no walk-in; 1 session = 1 slide total', () => {
+test('1 deck sample: no walk-in; 1 session = 1 slide total', async () => {
   const tpl = load('1 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -275,7 +283,7 @@ test('1 deck sample: no walk-in; 1 session = 1 slide total', () => {
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -291,7 +299,7 @@ test('1 deck sample: no walk-in; 1 session = 1 slide total', () => {
 
 // ───── multi-field binding: sessionTitle + roomName + speaker ──────────
 
-test('Multi-field binding substitutes all roles', () => {
+test('Multi-field binding substitutes all roles', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const titleFrame = frameIdx(inspection.textFrames, "Today’s agenda");
@@ -309,7 +317,7 @@ test('Multi-field binding substitutes all roles', () => {
     day: 'MON', timeslot: 'A', roomId: 'breakout-1',
     speakers: makeSpeakers(['Jane Doe']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'Opening Keynote', timeslot: 'A',
@@ -327,7 +335,7 @@ test('Multi-field binding substitutes all roles', () => {
 
 // ───── scaffolding rebuilt correctly ───────────────────────────────────
 
-test('Content_Types has Override for each output slide; no orphan notes', () => {
+test('Content_Types has Override for each output slide; no orphan notes', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -339,7 +347,7 @@ test('Content_Types has Override for each output slide; no orphan notes', () => 
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John', 'Jane']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -366,7 +374,7 @@ test('Content_Types has Override for each output slide; no orphan notes', () => 
     'no orphan notesSlide3 override');
 });
 
-test('presentation.xml sldIdLst rebuilt with one entry per output slide', () => {
+test('presentation.xml sldIdLst rebuilt with one entry per output slide', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -378,7 +386,7 @@ test('presentation.xml sldIdLst rebuilt with one entry per output slide', () => 
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['A', 'B', 'C']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -400,7 +408,7 @@ test('presentation.xml sldIdLst rebuilt with one entry per output slide', () => 
 
 // ───── line-bound speaker bindings — substitute + warn (no hyperlink) ──
 
-test('Line-bound speaker binding substitutes line text + emits warning', () => {
+test('Line-bound speaker binding substitutes line text + emits warning', async () => {
   // The 2 deck sample doesn't have a natural multi-line speaker frame,
   // but we can synthesise the case by binding a speaker to line 0 of a
   // single-line frame. The substitution should still target that line
@@ -416,7 +424,7 @@ test('Line-bound speaker binding substitutes line text + emits warning', () => {
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['John Smith']),
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -439,7 +447,7 @@ test('Line-bound speaker binding substitutes line text + emits warning', () => {
 
 // ───── partial-page substitution: trailing slot empty when speakers < cap ──
 
-test('Last page with fewer speakers than capacity blanks trailing slots', () => {
+test('Last page with fewer speakers than capacity blanks trailing slots', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   // Set up 2 speaker frames (capacity=2). 3 speakers will paginate to [2, 1].
@@ -462,7 +470,7 @@ test('Last page with fewer speakers than capacity blanks trailing slots', () => 
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -486,7 +494,7 @@ test('Last page with fewer speakers than capacity blanks trailing slots', () => 
 
 // ───── explicit positions drive speaker→frame assignment ───────────────
 
-test('Speaker positions assign session speakers in position order, not array order', () => {
+test('Speaker positions assign session speakers in position order, not array order', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   // Pick two distinct frames as speakers. We deliberately put them in
@@ -509,7 +517,7 @@ test('Speaker positions assign session speakers in position order, not array ord
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -531,7 +539,7 @@ test('Speaker positions assign session speakers in position order, not array ord
 
 // ───── unused speaker frame on partial page is blanked (not template text) ──
 
-test('Partial page: unused speaker frames render empty <a:t>, not the template sample text', () => {
+test('Partial page: unused speaker frames render empty <a:t>, not the template sample text', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   // Two speaker frames @ capacity 2; only 1 speaker → page 1 has the
@@ -551,7 +559,7 @@ test('Partial page: unused speaker frames render empty <a:t>, not the template s
   const session = makeSession({
     day: 'MON', timeslot: 'A', roomId: 'room-1', speakers,
   });
-  const out = buildTitleDeck({
+  const out = await buildTitleDeck({
     templateBytes: tpl, inspection, binding,
     sessions: [{
       title: 'X', timeslot: 'A',
@@ -583,7 +591,7 @@ function extractFirstATInShape(slideXml: string, shapeId: number): string {
 
 // ───── deterministic output ────────────────────────────────────────────
 
-test('Same inputs produce byte-identical output (deterministic)', () => {
+test('Same inputs produce byte-identical output (deterministic)', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
@@ -604,8 +612,8 @@ test('Same inputs produce byte-identical output (deterministic)', () => {
     }],
     day: 'MON', roomName: 'Room 1',
   };
-  const a = buildTitleDeck(input);
-  const b = buildTitleDeck(input);
+  const a = await buildTitleDeck(input);
+  const b = await buildTitleDeck(input);
   assert.equal(a.bytes.length, b.bytes.length, 'byte lengths match');
   for (let i = 0; i < a.bytes.length; i++) {
     if (a.bytes[i] !== b.bytes[i]) {
@@ -614,9 +622,231 @@ test('Same inputs produce byte-identical output (deterministic)', () => {
   }
 });
 
+// ───── fingerprint: compute, embed, read back, version-bump ────────────
+
+test('Output carries a fingerprint with deck-version, template-sha256, data-sha256', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+  };
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1',
+    speakers: makeSpeakers(['John']),
+  });
+  const out = await buildTitleDeck({
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(session.speakers, 1, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+  });
+  assert.equal(out.fingerprint.formatVersion, 1);
+  assert.equal(out.fingerprint.deckVersion, 1, 'first generation defaults to v1');
+  assert.match(out.fingerprint.templateHash, /^[0-9a-f]{64}$/, 'sha256 hex');
+  assert.match(out.fingerprint.dataHash, /^[0-9a-f]{64}$/, 'sha256 hex');
+  assert.notEqual(out.fingerprint.templateHash, out.fingerprint.dataHash,
+    'template and data hashes are independent');
+});
+
+test('readDeckFingerprint round-trips the embedded block', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+  };
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1',
+    speakers: makeSpeakers(['John']),
+  });
+  const out = await buildTitleDeck({
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(session.speakers, 1, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+    deckVersion: 7,
+    generatedAt: '2026-05-29T12:00:00Z',
+  });
+  const fp = readDeckFingerprint(out.bytes);
+  assert.ok(fp, 'fingerprint readable');
+  assert.equal(fp!.formatVersion, 1);
+  assert.equal(fp!.deckVersion, 7, 'caller-supplied deck version preserved');
+  assert.equal(fp!.templateHash, out.fingerprint.templateHash);
+  assert.equal(fp!.dataHash, out.fingerprint.dataHash);
+  assert.equal(fp!.generatedAt, '2026-05-29T12:00:00Z');
+});
+
+test('readDeckFingerprint returns null for files without an embedded block', () => {
+  // The raw template has no fingerprint — should return null cleanly.
+  const tpl = load('2 deck sample.pptx');
+  assert.equal(readDeckFingerprint(tpl), null);
+});
+
+test('readDeckFingerprint returns null for non-pptx bytes (corrupt zip)', () => {
+  assert.equal(readDeckFingerprint(new Uint8Array([0, 1, 2, 3])), null);
+});
+
+test('dataHash is independent of generatedAt and deckVersion (byte-deterministic core)', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+  };
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1',
+    speakers: makeSpeakers(['John']),
+  });
+  const baseInput: DeckBuildInput = {
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(session.speakers, 1, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+  };
+  const a = await buildTitleDeck({ ...baseInput, deckVersion: 1, generatedAt: '2026-05-29T01:00Z' });
+  const b = await buildTitleDeck({ ...baseInput, deckVersion: 9, generatedAt: '2099-01-01T00:00Z' });
+  assert.equal(a.fingerprint.dataHash, b.fingerprint.dataHash,
+    'data hash same regardless of version/timestamp');
+  assert.equal(a.fingerprint.templateHash, b.fingerprint.templateHash);
+});
+
+test('dataHash differs when any output-affecting input changes', async () => {
+  const tpl = load('2 deck sample.pptx');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const binding: TitleSlidesBinding = {
+    templatePath: 't.pptx',
+    fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+  };
+  const session = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1',
+    speakers: makeSpeakers(['John']),
+  });
+  const sessionAlt = makeSession({
+    day: 'MON', timeslot: 'A', roomId: 'room-1',
+    speakers: makeSpeakers(['Jane']),   // different speaker → different hash
+  });
+  const baseInput: DeckBuildInput = {
+    templateBytes: tpl, inspection, binding,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(session.speakers, 1, false),
+      session,
+    }],
+    day: 'MON', roomName: 'Room 1',
+  };
+  const baseHashes = (await computeDeckHashes(baseInput));
+  // Different speaker
+  const altSpeaker = (await computeDeckHashes({
+    ...baseInput,
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(sessionAlt.speakers, 1, false),
+      session: sessionAlt,
+    }],
+  }));
+  assert.notEqual(altSpeaker.dataHash, baseHashes.dataHash,
+    'changing the speaker name flips the data hash');
+  // Different roomName
+  const altRoom = (await computeDeckHashes({ ...baseInput, roomName: 'Plenary Hall' }));
+  assert.notEqual(altRoom.dataHash, baseHashes.dataHash,
+    'changing roomName flips the data hash');
+  // Different day
+  const altDay = (await computeDeckHashes({ ...baseInput, day: 'TUE' }));
+  assert.notEqual(altDay.dataHash, baseHashes.dataHash,
+    'changing day flips the data hash');
+});
+
+test('nextDeckVersion: no previous → v1 changed', () => {
+  const { version, changed } = nextDeckVersion(null, {
+    templateHash: 'a'.repeat(64),
+    dataHash: 'b'.repeat(64),
+  });
+  assert.equal(version, 1);
+  assert.equal(changed, true);
+});
+
+test('nextDeckVersion: identical hashes → same version, NOT changed', () => {
+  const prev: DeckFingerprint = {
+    formatVersion: 1, deckVersion: 5,
+    templateHash: 'a'.repeat(64), dataHash: 'b'.repeat(64),
+  };
+  const { version, changed } = nextDeckVersion(prev, {
+    templateHash: 'a'.repeat(64),
+    dataHash: 'b'.repeat(64),
+  });
+  assert.equal(version, 5, 'no bump when nothing changed');
+  assert.equal(changed, false);
+});
+
+test('nextDeckVersion: any hash change → version + 1, changed', () => {
+  const prev: DeckFingerprint = {
+    formatVersion: 1, deckVersion: 3,
+    templateHash: 'a'.repeat(64), dataHash: 'b'.repeat(64),
+  };
+  const dataChange = nextDeckVersion(prev, {
+    templateHash: 'a'.repeat(64),
+    dataHash: 'c'.repeat(64),
+  });
+  assert.deepEqual(dataChange, { version: 4, changed: true });
+  const tplChange = nextDeckVersion(prev, {
+    templateHash: 'z'.repeat(64),
+    dataHash: 'b'.repeat(64),
+  });
+  assert.deepEqual(tplChange, { version: 4, changed: true });
+});
+
+test('docProps/core.xml is created from scratch when absent in template', async () => {
+  const tpl = load('2 deck sample.pptx');
+  // Verify the sample really has no core.xml.
+  const tplZip = unzipSync(tpl);
+  assert.ok(!tplZip['docProps/core.xml'],
+    'precondition: sample has no docProps/core.xml');
+  const inspection = inspectTemplate(tpl);
+  const speakerFrame = frameIdx(inspection.textFrames, 'First Person');
+  const out = await buildTitleDeck({
+    templateBytes: tpl,
+    inspection,
+    binding: {
+      templatePath: 't.pptx',
+      fields: [{ role: 'speaker', frame: speakerFrame, position: 1 }],
+    },
+    sessions: [{
+      title: 'X', timeslot: 'A',
+      speakerPages: splitSpeakers(makeSpeakers(['John']), 1, false),
+      session: makeSession({
+        day: 'MON', timeslot: 'A', roomId: 'room-1',
+        speakers: makeSpeakers(['John']),
+      }),
+    }],
+    day: 'MON', roomName: 'Room 1',
+  });
+  const outZip = unzipSync(out.bytes);
+  assert.ok(outZip['docProps/core.xml'], 'core.xml created');
+  const ct = strFromU8(outZip['[Content_Types].xml']);
+  assert.ok(ct.includes('PartName="/docProps/core.xml"'),
+    'Content_Types Override added');
+  const rootRels = strFromU8(outZip['_rels/.rels']);
+  assert.ok(rootRels.includes('relationships/metadata/core-properties'),
+    'root rels Relationship added');
+});
+
 // ───── validation: out-of-range frame → throw ──────────────────────────
 
-test('Binding referencing an out-of-range frame throws at build time', () => {
+test('Binding referencing an out-of-range frame throws at build time', async () => {
   const tpl = load('2 deck sample.pptx');
   const inspection = inspectTemplate(tpl);
   const binding: TitleSlidesBinding = {
@@ -627,8 +857,8 @@ test('Binding referencing an out-of-range frame throws at build time', () => {
     day: 'MON', timeslot: 'A', roomId: 'room-1',
     speakers: makeSpeakers(['X']),
   });
-  assert.throws(
-    () => buildTitleDeck({
+  await assert.rejects(
+    buildTitleDeck({
       templateBytes: tpl, inspection, binding,
       sessions: [{
         title: 'X', timeslot: 'A',
@@ -638,25 +868,28 @@ test('Binding referencing an out-of-range frame throws at build time', () => {
       day: 'MON', roomName: 'Room 1',
     }),
     /frame 9999/,
-    'throws with clear message about the invalid frame index',
+    'rejects with clear message about the invalid frame index',
   );
 });
 
 // ───── run ─────────────────────────────────────────────────────────────
 
-let failed = 0;
-for (const [name, fn] of tests) {
-  try {
-    fn();
-    console.log(`  ok: ${name}`);
-  } catch (err) {
-    failed++;
-    console.error(`  FAIL: ${name}`);
-    console.error(`    ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+async function run(): Promise<void> {
+  let failed = 0;
+  for (const [name, fn] of tests) {
+    try {
+      await fn();
+      console.log(`  ok: ${name}`);
+    } catch (err) {
+      failed++;
+      console.error(`  FAIL: ${name}`);
+      console.error(`    ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+    }
   }
+  if (failed > 0) {
+    console.error(`\n${failed} test(s) failed`);
+    process.exit(1);
+  }
+  console.log('all tests passed');
 }
-if (failed > 0) {
-  console.error(`\n${failed} test(s) failed`);
-  process.exit(1);
-}
-console.log('all tests passed');
+void run();
