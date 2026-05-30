@@ -46,7 +46,10 @@ import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
 import { openSearchPanel } from './search/searchPanel';
 import { registerResetState } from './resetState';
-import { registerQuickSetupCommand } from './event/quickSetup';
+import {
+  handleQuickSetupPostReload,
+  registerQuickSetupCommand,
+} from './event/quickSetup';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -60,6 +63,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   initLog(context);
   log(`activate: pptx-viewer ${packageVersion(context)} loaded`);
   logBuildInfo();
+
+  // Quick Setup wizard post-reload handoff. Runs before SnapshotStore
+  // so the flag read can't race against the snapshot writer; the
+  // auto-open + toast are deferred via setTimeout so the event editor
+  // provider has time to register (later in this function).
+  await handleQuickSetupPostReload(context);
 
   // M4.6 — silent restore must run BEFORE SyncManager.create so the
   // manager's initial reload sees the just-restored folders. If the

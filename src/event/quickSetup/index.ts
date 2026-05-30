@@ -13,6 +13,8 @@ import * as vscode from 'vscode';
 import { log } from '../../log';
 import { executeQuickSetup, runQuickSetupWizard } from './wizard';
 
+export { handleQuickSetupPostReload } from './postReload';
+
 /** Register the `event.quickSetup` palette command. */
 export function registerQuickSetupCommand(
   context: vscode.ExtensionContext,
