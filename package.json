@@ -141,11 +141,6 @@
         "category": "Folder Sync"
       },
       {
-        "command": "folderSync.probeColdRead",
-        "title": "Folder Sync: Probe Cold-Read (M4.6 diagnostic)",
-        "category": "Folder Sync"
-      },
-      {
         "command": "folderSync.showSnapshot",
         "title": "Folder Sync: Show Workspace Snapshot",
         "category": "Folder Sync"
@@ -169,11 +164,6 @@
         "command": "folderSync.resolveSnapshotConflict",
         "title": "Folder Sync: Resolve Workspace Snapshot Conflict",
         "category": "Folder Sync"
-      },
-      {
-        "command": "pptxViewer.probeUpload",
-        "title": "Pptx Info: Probe Upload (M4 diagnostic)",
-        "category": "Pptx Info"
       },
       {
         "command": "pptxSearch.openPanel",
