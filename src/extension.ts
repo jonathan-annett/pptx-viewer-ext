@@ -45,6 +45,7 @@ import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
 import { openSearchPanel } from './search/searchPanel';
+import { registerResetState } from './resetState';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -298,6 +299,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         'folderSync.adminEditor',
       );
     }),
+    registerResetState(context),
   );
   log('activate: folder sync manager initialised');
 

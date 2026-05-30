@@ -169,6 +169,11 @@
         "command": "pptxSearch.openPanel",
         "title": "Presentation Search: Open",
         "category": "Presentation Search"
+      },
+      {
+        "command": "pptxViewer.resetExtensionState",
+        "title": "Pptx Info: Reset Extension State (Factory Reset)",
+        "category": "Pptx Info"
       }
     ],
     "configuration": {
