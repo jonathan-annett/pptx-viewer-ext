@@ -245,6 +245,7 @@
     "watch-web": "node esbuild.config.js --watch",
     "watch": "node esbuild.config.js --watch",
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
+    "test:all": "node scripts/run-all-tests.mjs",
     "test:parse": "node --import tsx test/parse.test.ts",
     "test:sync-jsonc": "node --import tsx test/sync-jsonc.test.ts",
     "test:sync-config-filenames": "node --import tsx test/sync-config-filenames.test.ts",
