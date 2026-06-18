@@ -12,4 +12,4 @@ export type { UriHelper } from './uri';
 export type { WorkspaceProvider, WorkspaceRoot, RootStatus } from './workspace';
 
 export { initHost, getHost } from './current';
-export type { Host, Uri } from './current';
+export type { Host } from './current';

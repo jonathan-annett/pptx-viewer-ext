@@ -19,9 +19,9 @@ const test = (name: string, fn: () => void): void => {
 
 // Build a minimal topology with N synthetic sources. Only the count matters
 // for the detector — internal source shape is irrelevant here.
-function topologyWithSourceCount(n: number): Pick<ResolvedTopology, 'sources'> {
+function topologyWithSourceCount(n: number): Pick<ResolvedTopology<string>, 'sources'> {
   // The detector only reads `sources.length`. Empty objects are enough.
-  return { sources: Array.from({ length: n }) as ResolvedTopology['sources'] };
+  return { sources: Array.from({ length: n }) as ResolvedTopology<string>['sources'] };
 }
 
 function folder(uri: string): WorkspaceFolderLike {

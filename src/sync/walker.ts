@@ -9,14 +9,14 @@
 // Excluded directories are pruned at the walk so we don't pay the cost of
 // listing into e.g. node_modules just to discard every entry.
 
-import { FileType, type FsEntry, type FsStat, type SyncFs, type Uri } from './host';
+import { FileType, type FsEntry, type FsStat, type SyncFs } from './host';
 import { GlobSet } from './glob';
 
-export interface WalkEntry {
+export interface WalkEntry<U> {
   /** Forward-slash path relative to the walk root. */
   relPath: string;
   /** Absolute URI of the file. */
-  uri: Uri;
+  uri: U;
   /** Size in bytes. */
   size: number;
   /** Modification time in ms since epoch (0 if filesystem doesn't supply it). */
@@ -36,22 +36,22 @@ export interface WalkOptions {
  * exist (treating "no files" and "no folder" as the same outcome — the
  * planner doesn't care).
  */
-export async function walkTree(
-  fs: SyncFs<Uri>,
-  root: Uri,
+export async function walkTree<U>(
+  fs: SyncFs<U>,
+  root: U,
   options: WalkOptions,
-): Promise<WalkEntry[]> {
-  const out: WalkEntry[] = [];
+): Promise<WalkEntry<U>[]> {
+  const out: WalkEntry<U>[] = [];
   await walkInto(fs, root, '', options, out);
   return out;
 }
 
-async function walkInto(
-  fs: SyncFs<Uri>,
-  root: Uri,
+async function walkInto<U>(
+  fs: SyncFs<U>,
+  root: U,
   relDir: string,
   options: WalkOptions,
-  out: WalkEntry[],
+  out: WalkEntry<U>[],
 ): Promise<void> {
   const dirUri = relDir === '' ? root : fs.joinPath(root, relDir);
 

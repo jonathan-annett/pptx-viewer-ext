@@ -11,13 +11,9 @@
 // fast bursts of edits don't queue redundant work.
 
 import * as vscode from 'vscode';
-import { loadSyncConfig, type SourceLoad } from './config';
-import {
-  resolveTopology,
-  formatTopology,
-  type ResolvedTopology,
-  type SyncConfigConflict,
-} from './topology';
+import { loadSyncConfig } from './config';
+import { resolveTopology, formatTopology } from './topology';
+import type { ResolvedTopology, SourceLoad, SyncConfigConflict } from './coreTypes';
 import {
   SYNC_CONFIG_GLOB,
   configFilenameFromUri,

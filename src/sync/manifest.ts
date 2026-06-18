@@ -44,7 +44,7 @@
 // destination-only, making the state visible to the user via plan summary
 // rather than hiding it behind a silent fallback.
 
-import { getHost, type Uri } from './host';
+import { getHost } from './host';
 import { log } from '../log';
 import {
   emptyManifest,
@@ -81,7 +81,9 @@ export type {
  *     back would overwrite the user's prior tracking record. The viewer's
  *     informational surfaces treat this like a missing manifest.
  */
-export async function readManifest(destRootUri: Uri): Promise<ManifestReadResult> {
+export async function readManifest<U extends { toString(): string }>(
+  destRootUri: U,
+): Promise<ManifestReadResult> {
   // Find whichever manifest filename exists at this destination root. New
   // destinations land on the preferred `.syncManifest`; existing
   // destinations carrying the legacy `.foldersync-manifest.json` keep using
@@ -95,7 +97,7 @@ export async function readManifest(destRootUri: Uri): Promise<ManifestReadResult
   }
   let bytes: Uint8Array;
   try {
-    bytes = await getHost().fs.readFile(uri);
+    bytes = await getHost<U>().fs.readFile(uri);
   } catch {
     return okEmpty();
   }
@@ -141,12 +143,12 @@ function okEmpty(): ManifestReadResult {
  * the filesystem (display labels, auto-open paths). For "where is the
  * actual file" paths, call {@link resolveManifestUri} instead.
  */
-export function manifestUri(destRootUri: Uri): Uri {
+export function manifestUri<U>(destRootUri: U): U {
   return manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
 }
 
-function manifestUriAt(destRootUri: Uri, filename: ManifestFilename): Uri {
-  return getHost().uri.join(destRootUri, filename);
+function manifestUriAt<U>(destRootUri: U, filename: ManifestFilename): U {
+  return getHost<U>().uri.join(destRootUri, filename);
 }
 
 /**
@@ -155,10 +157,10 @@ function manifestUriAt(destRootUri: Uri, filename: ManifestFilename): Uri {
  * `.foldersync-manifest.json` if only that one exists; returns the
  * preferred URI with `existed: false` when neither does.
  */
-export async function resolveManifestUri(
-  destRootUri: Uri,
-): Promise<{ uri: Uri; filename: ManifestFilename; existed: boolean }> {
-  const fs = getHost().fs;
+export async function resolveManifestUri<U>(
+  destRootUri: U,
+): Promise<{ uri: U; filename: ManifestFilename; existed: boolean }> {
+  const fs = getHost<U>().fs;
   const preferred = manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
   try {
     await fs.stat(preferred);
@@ -181,15 +183,15 @@ export async function resolveManifestUri(
  * chain throws, the caller sees the failure and the destination's manifest
  * is left unchanged (the tmp file may linger; M6's orphan sweep cleans).
  */
-export async function writeManifest(
-  destRootUri: Uri,
+export async function writeManifest<U>(
+  destRootUri: U,
   manifest: Manifest,
 ): Promise<void> {
   // Write to whichever filename already exists at this destination, or to
   // the preferred new filename (`.syncManifest`) when neither exists. The
   // resolver does one stat on warm-migrated destinations, two on
   // legacy-only destinations — negligible per-sync overhead.
-  const { fs, uri } = getHost();
+  const { fs, uri } = getHost<U>();
   const resolved = await resolveManifestUri(destRootUri);
   const finalUri = resolved.uri;
   // tmp sibling of the final file: <root>/<filename>.tmp

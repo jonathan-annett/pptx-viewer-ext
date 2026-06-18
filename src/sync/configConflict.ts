@@ -30,7 +30,7 @@
 import * as vscode from 'vscode';
 import { log } from '../log';
 import type { SyncManager } from './manager';
-import type { SyncConfigConflict } from './topology';
+import type { SyncConfigConflict } from './coreTypes';
 
 const CONFLICT_CONTEXT_KEY = 'folderSync.hasConfigConflict';
 

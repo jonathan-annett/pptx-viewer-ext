@@ -30,7 +30,7 @@ function fakePlan(opts: {
   subpath?: string;
   items?: PlanItem[];
   skippedReason?: string;
-}): PlanForDestination {
+}): PlanForDestination<string> {
   const items = opts.items ?? [];
   const summary = summarisePlan(items);
   const plan = {
@@ -42,7 +42,7 @@ function fakePlan(opts: {
     summary,
     ...(opts.skippedReason ? { skippedReason: opts.skippedReason } : {}),
   };
-  return plan as unknown as PlanForDestination;
+  return plan as unknown as PlanForDestination<string>;
 }
 
 function item(kind: PlanItem['kind'], relPath: string, extras: Partial<PlanItem> = {}): PlanItem {

@@ -9,7 +9,7 @@
 // with config=null and a human-readable `error` string. Callers surface these
 // via the Output Channel.
 
-import { getHost, type Uri } from './host';
+import { getHost } from './host';
 import {
   expandRoomSyncVariable,
   parseSyncConfigText,
@@ -26,13 +26,13 @@ export type { SyncConfig, SyncDestination } from './configParse';
 export { parseSyncConfigText } from './configParse';
 
 /** Result of loading one .sync.jsonc file. */
-export interface SourceLoad {
+export interface SourceLoad<U> {
   /** URI of the .sync.jsonc file itself. */
-  configUri: Uri;
+  configUri: U;
   /** URI of the folder containing the config — the source root. */
-  sourceFolderUri: Uri;
+  sourceFolderUri: U;
   /** URI of the workspace folder this source lives inside. */
-  workspaceFolderUri: Uri;
+  workspaceFolderUri: U;
   /** Parsed and validated config, or null if the file could not be loaded. */
   config: SyncConfig | null;
   /** Populated when config is null. Human-readable. */
@@ -43,11 +43,11 @@ export interface SourceLoad {
  * Read a .sync.jsonc at the given URI and return a SourceLoad describing
  * either the parsed config or the failure reason.
  */
-export async function loadSyncConfig(
-  configUri: Uri,
-  workspaceFolderUri: Uri,
-): Promise<SourceLoad> {
-  const { fs, uri } = getHost();
+export async function loadSyncConfig<U>(
+  configUri: U,
+  workspaceFolderUri: U,
+): Promise<SourceLoad<U>> {
+  const { fs, uri } = getHost<U>();
   const sourceFolderUri = uri.dirname(configUri);
   let bytes: Uint8Array;
   try {
@@ -100,7 +100,7 @@ export async function loadSyncConfig(
   // legacy "this folder is the source" semantics where aliases are
   // optional, so the validator is gated by name + location.
   if (isWorkspaceRootNamedConfig(uri.path(configUri), uri.path(workspaceFolderUri))) {
-    const filename = configFilenameFromUri(configUri);
+    const filename = configFilenameFromUri({ path: uri.path(configUri) });
     const validation = validateWorkspaceRootConfig(parsed.config, filename);
     if (validation) {
       return {

@@ -13,7 +13,7 @@
 // into a single summary for the Output Channel + a VS Code notification.
 
 import * as vscode from 'vscode';
-import type { PlanForDestination } from './planner';
+import type { PlanForDestination } from './coreTypes';
 import type { PlanItem } from './plan';
 import { readManifest, writeManifest } from './manifest';
 import {

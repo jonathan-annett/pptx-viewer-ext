@@ -29,7 +29,7 @@ import {
   type PlaceholderRow,
 } from './adminEditorHtml';
 import { findSourceLinksForFolder } from './folderSourceLinks';
-import type { ResolvedTopology } from './topology';
+import type { ResolvedTopology } from './coreTypes';
 import {
   EMPTY_FILE_SHA256,
   KNOWN_WORKSPACE_KEYS,
@@ -47,7 +47,7 @@ import {
   toViewModel,
   type PlanTotals,
 } from './planHtml';
-import type { PlanForDestination } from './planner';
+import type { PlanForDestination } from './coreTypes';
 import { buildDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
 import {

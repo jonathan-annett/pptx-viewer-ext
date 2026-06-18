@@ -42,7 +42,7 @@ import {
   type ParseResultCache,
 } from '../sync/parseCache';
 import type { SyncManager } from '../sync/manager';
-import type { ResolvedTopology } from '../sync/topology';
+import type { ResolvedTopology } from '../sync/coreTypes';
 import { vscodeFs } from '../sync/vscodeFs';
 import { log } from '../log';
 import { fold } from './fold';

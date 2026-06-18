@@ -31,7 +31,7 @@ import {
   toViewModel,
   type PlanTotals,
 } from './planHtml';
-import type { PlanForDestination } from './planner';
+import type { PlanForDestination } from './coreTypes';
 import { buildScopedDryRunPlan } from './planner';
 import { getActivePlaceholderSet } from './placeholderRegistry';
 import { runSync, formatRunSummary } from './runSync';

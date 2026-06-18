@@ -41,8 +41,8 @@ export interface WorkspaceFolderLike {
  * Returns false when the workspace has no folders at all (no signal to
  * act on).
  */
-export function isDestinationOnlyTopology(
-  topology: Pick<ResolvedTopology, 'sources'>,
+export function isDestinationOnlyTopology<U>(
+  topology: Pick<ResolvedTopology<U>, 'sources'>,
   workspaceFolders: readonly WorkspaceFolderLike[],
   manifestPresence: ReadonlyMap<string, boolean>,
 ): boolean {

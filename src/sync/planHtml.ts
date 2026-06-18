@@ -190,9 +190,9 @@ export interface ToViewModelOpts {
  * callback resolves a source's display label — supplied by the caller so
  * this function stays vscode-free.
  */
-export function toViewModel(
-  plans: readonly PlanForDestination[],
-  labelSource: (plan: PlanForDestination) => string,
+export function toViewModel<U>(
+  plans: readonly PlanForDestination<U>[],
+  labelSource: (plan: PlanForDestination<U>) => string,
   opts: ToViewModelOpts = {},
 ): PlanViewModel {
   const interactive = opts.interactive !== false;

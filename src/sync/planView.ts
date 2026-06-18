@@ -5,9 +5,9 @@
 // vscode-touching wrapper: it builds the plan, opens a panel, wires Cancel.
 
 import * as vscode from 'vscode';
-import type { PlanForDestination, ScopedPlanOptions } from './planner';
+import type { PlanForDestination, ScopedPlanOptions } from './coreTypes';
 import { buildDryRunPlan, buildScopedDryRunPlan } from './planner';
-import type { ResolvedTopology } from './topology';
+import type { ResolvedTopology } from './coreTypes';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary, type RunSummary } from './runSync';
 import { manifestUri, resolveManifestUri } from './manifest';

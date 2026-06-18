@@ -12,7 +12,7 @@
 // pair. The dry-run command formats this for the Output Channel; M3 will
 // feed the same structure into the plan webview.
 
-import { getHost, FileType, type Uri } from './host';
+import { getHost, FileType } from './host';
 import type { ResolvedSource, ResolvedDestination, ResolvedTopology } from './topology';
 import type { AliasOrigin, FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
@@ -50,9 +50,9 @@ import {
 import { isPptxPath, validatePptxBytes } from './validators';
 import { log } from '../log';
 
-export interface PlanForDestination {
-  source: ResolvedSource;
-  destination: ResolvedDestination;
+export interface PlanForDestination<U> {
+  source: ResolvedSource<U>;
+  destination: ResolvedDestination<U>;
   items: PlanItem[];
   summary: PlanSummary;
   /** Sources that couldn't be walked (e.g. destination root URI absent). */
@@ -99,12 +99,12 @@ export interface PlanParseCacheStats {
  * with skippedReason set, so the formatter can report them rather than
  * silently dropping the configuration.
  */
-export async function buildDryRunPlan(
-  topology: ResolvedTopology,
+export async function buildDryRunPlan<U extends { toString(): string }>(
+  topology: ResolvedTopology<U>,
   opts: BuildPlanOptions = {},
-): Promise<PlanForDestination[]> {
+): Promise<PlanForDestination<U>[]> {
   const placeholders = opts.placeholders ?? new Set<string>();
-  const results: PlanForDestination[] = [];
+  const results: PlanForDestination<U>[] = [];
   for (const source of topology.sources) {
     const planned = await planForSource(source, { kind: 'none' }, placeholders);
     results.push(...planned);
@@ -137,9 +137,9 @@ export interface BuildPlanOptions {
  * `pathFilterIsFile` lets the caller skip the stat round-trip when the kind
  * is already known (e.g. the pptx viewer always passes a regular file URI).
  */
-export interface ScopedPlanOptions {
-  sourceConfigUri: Uri;
-  pathFilter?: Uri;
+export interface ScopedPlanOptions<U> {
+  sourceConfigUri: U;
+  pathFilter?: U;
   pathFilterIsFile?: boolean;
   /** See {@link BuildPlanOptions.placeholders}. */
   placeholders?: Set<string>;
@@ -151,10 +151,10 @@ export interface ScopedPlanOptions {
  * found in the topology; returns a per-destination row with `skippedReason`
  * when the path filter doesn't fall within the source folder.
  */
-export async function buildScopedDryRunPlan(
-  topology: ResolvedTopology,
-  opts: ScopedPlanOptions,
-): Promise<PlanForDestination[]> {
+export async function buildScopedDryRunPlan<U extends { toString(): string }>(
+  topology: ResolvedTopology<U>,
+  opts: ScopedPlanOptions<U>,
+): Promise<PlanForDestination<U>[]> {
   const source = topology.sources.find(
     (s) => s.configUri.toString() === opts.sourceConfigUri.toString(),
   );
@@ -162,7 +162,7 @@ export async function buildScopedDryRunPlan(
 
   let scope: Scope = { kind: 'none' };
   if (opts.pathFilter) {
-    const uri = getHost().uri;
+    const uri = getHost<U>().uri;
     const rel = relPathFromBase(uri.path(source.sourceFolderUri), uri.path(opts.pathFilter));
     if (rel === null) {
       // Path filter is outside the source folder — surface as skipped on
@@ -187,11 +187,11 @@ export async function buildScopedDryRunPlan(
  * Walks once for the source, once per destination, then applies the optional
  * scope filter to source/destination/manifest before classifying.
  */
-async function planForSource(
-  source: ResolvedSource,
+async function planForSource<U extends { toString(): string }>(
+  source: ResolvedSource<U>,
   scope: Scope,
   placeholders: Set<string>,
-): Promise<PlanForDestination[]> {
+): Promise<PlanForDestination<U>[]> {
   // The yaml's include/exclude only ever apply to the source tree —
   // the destination walk uses built-ins plus the same user excludes so
   // we don't surface destination-only entries the user has chosen to
@@ -231,7 +231,7 @@ async function planForSource(
   // One cache instance shared across source + destination walks — the
   // singleton is initialised at activation; tests / no-cache contexts get
   // undefined and walkAndHash degrades to stat+read+hash.
-  const cache = getHashCacheSingleton() as UriHashCache<Uri> | undefined;
+  const cache = getHashCacheSingleton() as UriHashCache<U> | undefined;
   // Walk-scoped hash-cache snapshot. One IDB `getAllEntries()` here replaces
   // up to N+M per-file `lookup()` calls (N source files + M files per
   // destination, summed across destinations). The snapshot is frozen at
@@ -320,7 +320,7 @@ async function planForSource(
     log(`sync: parse-cache: ${parseStats.hits}/${total} on ${sourceLabel}`);
   }
 
-  const results: PlanForDestination[] = [];
+  const results: PlanForDestination<U>[] = [];
   for (const dest of source.destinations) {
     if (!dest.destRootUri || !dest.workspaceFolderUri) {
       results.push({
@@ -437,9 +437,9 @@ function mergeStats(a: PlanHashCacheStats, b: PlanHashCacheStats): PlanHashCache
   };
 }
 
-async function pathIsFile(uri: Uri): Promise<boolean> {
+async function pathIsFile<U>(uri: U): Promise<boolean> {
   try {
-    const stat = await getHost().fs.stat(uri);
+    const stat = await getHost<U>().fs.stat(uri);
     return !!((stat.type ?? FileType.Unknown) & FileType.File);
   } catch {
     return false;
@@ -452,11 +452,11 @@ async function pathIsFile(uri: Uri): Promise<boolean> {
  * inline avoids threading the parsed config through the topology type — the
  * source folder URI is stable and the file is small.
  */
-async function loadConfigForSource(
-  source: ResolvedSource,
+async function loadConfigForSource<U>(
+  source: ResolvedSource<U>,
 ): Promise<{ include: string[]; exclude: string[]; pathAliases: Record<string, string> } | null> {
   try {
-    const { fs, uri } = getHost();
+    const { fs, uri } = getHost<U>();
     const bytes = await fs.readFile(source.configUri);
     let text = new TextDecoder().decode(bytes);
     // Resolve `${roomSync}` template tokens before parsing — same pre-parse
@@ -501,7 +501,7 @@ interface WalkAndHashOpts {
 }
 
 /** A walked entry, optionally with its source-rewrite provenance attached. */
-interface WalkAlias extends WalkEntry {
+interface WalkAlias<U> extends WalkEntry<U> {
   aliasOrigin?: AliasOrigin;
 }
 
@@ -510,9 +510,12 @@ interface WalkAlias extends WalkEntry {
  * passthrough (legacy behaviour); non-empty list → drop entries with no match
  * and rewrite the surviving entries' relpath + aliasOrigin.
  */
-function applyAliases(entries: readonly WalkEntry[], aliases: readonly CompiledAlias[]): WalkAlias[] {
+function applyAliases<U>(
+  entries: readonly WalkEntry<U>[],
+  aliases: readonly CompiledAlias[],
+): WalkAlias<U>[] {
   if (aliases.length === 0) return entries.slice();
-  const out: WalkAlias[] = [];
+  const out: WalkAlias<U>[] = [];
   for (const e of entries) {
     const match = resolveAlias(e.relPath, aliases);
     if (!match) continue;
@@ -529,28 +532,28 @@ function applyAliases(entries: readonly WalkEntry[], aliases: readonly CompiledA
   return out;
 }
 
-function displayConfigUri(configUri: Uri): string {
-  const rel = getHost().workspace.asRelativePath(configUri);
+function displayConfigUri<U extends { toString(): string }>(configUri: U): string {
+  const rel = getHost<U>().workspace.asRelativePath(configUri);
   return rel || configUri.toString();
 }
 
-async function walkAndHash(
-  root: Uri,
+async function walkAndHash<U extends { toString(): string }>(
+  root: U,
   opts: WalkAndHashOpts,
-  cache: UriHashCache<Uri> | undefined,
+  cache: UriHashCache<U> | undefined,
   stats: PlanHashCacheStats,
   parseCache?: ParseResultCache,
   parseSnapshot?: Map<string, CachedParseResult>,
   hashSnapshot?: Map<string, HashCacheEntry>,
 ): Promise<FileInfo[]> {
-  const fs = getHost().fs;
+  const fs = getHost<U>().fs;
   const rawEntries = await walkTree(fs, root, opts);
   // Apply path-alias rewrite before we read any bytes — files outside every
   // LHS drop here, saving the read+hash for paths the user didn't opt in for.
   // Rewrite preserves URI (the file lives at its on-disk location); only the
   // relpath changes, and aliasOrigin carries the pre-rewrite path for the
   // plan-view tooltip.
-  const entries: WalkAlias[] = applyAliases(rawEntries, opts.aliases ?? []);
+  const entries: WalkAlias<U>[] = applyAliases(rawEntries, opts.aliases ?? []);
   const out: FileInfo[] = [];
   for (const e of entries) {
     try {
@@ -649,7 +652,9 @@ async function runValidators(
  * Render the plan list as multi-line text for the Output Channel.
  * Includes per-file size and hash fragments so the diff is visible.
  */
-export function formatDryRunPlan(plans: readonly PlanForDestination[]): string {
+export function formatDryRunPlan<U extends { toString(): string }>(
+  plans: readonly PlanForDestination<U>[],
+): string {
   const lines: string[] = [];
   lines.push(`--- Folder Sync: dry-run plan ---`);
   lines.push(`Pairs: ${plans.length}`);

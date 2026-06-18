@@ -25,7 +25,7 @@
 
 import * as vscode from 'vscode';
 import type { SyncManager } from './manager';
-import type { ResolvedTopology } from './topology';
+import type { ResolvedTopology } from './coreTypes';
 import {
   getDestinationOnlyState,
   onDidChangeDestinationOnlyState,

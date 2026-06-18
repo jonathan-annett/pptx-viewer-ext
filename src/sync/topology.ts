@@ -9,10 +9,10 @@
 // This module does no filesystem I/O. It is a pure transform from
 // SourceLoad[] + workspaceFolders[] to ResolvedTopology.
 
-import { getHost, type Uri, type WorkspaceRoot } from './host';
+import { getHost, type WorkspaceRoot } from './host';
 import type { SourceLoad } from './config';
 
-export interface ResolvedDestination {
+export interface ResolvedDestination<U> {
   /**
    * URI of the destination workspace folder, exactly as written in the
    * config. Stable across folder renames and authoritative for matching.
@@ -28,26 +28,26 @@ export interface ResolvedDestination {
   /** Subpath within the destination workspace folder (already normalised). */
   subpath: string;
   /** Resolved workspace folder URI, or null if no workspace folder matches the URI. */
-  workspaceFolderUri: Uri | null;
+  workspaceFolderUri: U | null;
   /** Final URI of the destination root (workspaceFolderUri + subpath), or null if unresolved. */
-  destRootUri: Uri | null;
+  destRootUri: U | null;
 }
 
-export interface ResolvedSource {
-  configUri: Uri;
-  sourceFolderUri: Uri;
-  workspaceFolderUri: Uri;
+export interface ResolvedSource<U> {
+  configUri: U;
+  sourceFolderUri: U;
+  workspaceFolderUri: U;
   /** Name of the source's enclosing workspace folder. Used as the source
    * identifier in manifest keys. */
   workspaceFolderName: string;
-  destinations: ResolvedDestination[];
+  destinations: ResolvedDestination<U>[];
 }
 
-export interface Diagnostic {
+export interface Diagnostic<U> {
   severity: 'error' | 'warning';
   message: string;
   /** Config file the diagnostic is attached to, when applicable. */
-  configUri?: Uri;
+  configUri?: U;
 }
 
 /**
@@ -58,34 +58,34 @@ export interface Diagnostic {
  * still loads, and records the pair here for the resolve-conflict command
  * to walk.
  */
-export interface SyncConfigConflict {
+export interface SyncConfigConflict<U> {
   /** Parent folder both files live in. */
-  sourceFolderUri: Uri;
+  sourceFolderUri: U;
   /** URI of the `.sync.jsonc` file. */
-  legacyUri: Uri;
+  legacyUri: U;
   /** URI of the `.roomSync` file. */
-  roomSyncUri: Uri;
+  roomSyncUri: U;
 }
 
-export interface ResolvedTopology {
-  sources: ResolvedSource[];
+export interface ResolvedTopology<U> {
+  sources: ResolvedSource<U>[];
   /** Sources that failed to load. Kept for diagnostic display. */
-  failed: SourceLoad[];
-  diagnostics: Diagnostic[];
+  failed: SourceLoad<U>[];
+  diagnostics: Diagnostic<U>[];
   /** Folders with both `.sync.jsonc` and `.roomSync`. Populated by the manager. */
-  conflicts: SyncConfigConflict[];
+  conflicts: SyncConfigConflict<U>[];
 }
 
-export function resolveTopology(
-  loads: SourceLoad[],
-  roots: ReadonlyArray<WorkspaceRoot<Uri>>,
-): ResolvedTopology {
-  const { uri } = getHost();
-  const diagnostics: Diagnostic[] = [];
-  const failed: SourceLoad[] = [];
-  const sources: ResolvedSource[] = [];
+export function resolveTopology<U extends { toString(): string }>(
+  loads: SourceLoad<U>[],
+  roots: ReadonlyArray<WorkspaceRoot<U>>,
+): ResolvedTopology<U> {
+  const { uri } = getHost<U>();
+  const diagnostics: Diagnostic<U>[] = [];
+  const failed: SourceLoad<U>[] = [];
+  const sources: ResolvedSource<U>[] = [];
 
-  const byUri = new Map<string, WorkspaceRoot<Uri>>();
+  const byUri = new Map<string, WorkspaceRoot<U>>();
   for (const f of roots) {
     byUri.set(f.uri.toString(), f);
   }
@@ -101,7 +101,7 @@ export function resolveTopology(
       continue;
     }
 
-    const resolved: ResolvedDestination[] = [];
+    const resolved: ResolvedDestination<U>[] = [];
     const seenSubpaths = new Set<string>();
     for (const dest of load.config.destinations) {
       const folder = byUri.get(dest.uri);
@@ -164,7 +164,7 @@ export function resolveTopology(
   // same tree. The room editor's dropdown also filters URIs claimed
   // elsewhere — this diagnostic catches the case where a stale value is
   // already on disk or two configs were edited as raw text.
-  const sourcesByDestUri = new Map<string, ResolvedSource[]>();
+  const sourcesByDestUri = new Map<string, ResolvedSource<U>[]>();
   for (const src of sources) {
     // De-duplicate within a single source — same URI with different
     // subpaths is already caught by the intra-source check above, and we
@@ -192,7 +192,7 @@ export function resolveTopology(
   // resolved destRootUri (URI + subpath). Useful even when the
   // destination-URI uniqueness check above has fired, because the operator
   // wants to see exactly where the collision lands.
-  const claimants = new Map<string, ResolvedSource[]>();
+  const claimants = new Map<string, ResolvedSource<U>[]>();
   for (const src of sources) {
     for (const dest of src.destinations) {
       if (!dest.destRootUri) continue;
@@ -216,7 +216,9 @@ export function resolveTopology(
 }
 
 /** Render a topology as multi-line text for the Output Channel. */
-export function formatTopology(topology: ResolvedTopology): string {
+export function formatTopology<U extends { toString(): string }>(
+  topology: ResolvedTopology<U>,
+): string {
   const lines: string[] = [];
   lines.push(`Sources: ${topology.sources.length}, failed: ${topology.failed.length}`);
   for (const src of topology.sources) {
@@ -247,10 +249,10 @@ export function formatTopology(topology: ResolvedTopology): string {
   return lines.join('\n');
 }
 
-function displayUri(target: Uri): string {
+function displayUri<U extends { toString(): string }>(target: U): string {
   // Workspace-relative path is more useful than the full URI in diagnostics.
   // Falls back to the full URI string when there's no workspace folder match.
-  const rel = getHost().workspace.asRelativePath(target);
+  const rel = getHost<U>().workspace.asRelativePath(target);
   return rel || target.toString();
 }
 

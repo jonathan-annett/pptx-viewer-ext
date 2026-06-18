@@ -28,7 +28,8 @@ import {
   type PreviewSource,
   type PreviewWorkspaceFolder,
 } from './sync/previewContext';
-import { buildScopedDryRunPlan, type PlanForDestination } from './sync/planner';
+import { buildScopedDryRunPlan } from './sync/planner';
+import type { PlanForDestination } from './sync/coreTypes';
 import { getActivePlaceholderSet } from './sync/placeholderRegistry';
 import { renderPlanPairs, toViewModel } from './sync/planHtml';
 import { readManifest } from './sync/manifest';
@@ -1408,7 +1409,7 @@ function toPreviewWorkspaceFolder(f: vscode.WorkspaceFolder): PreviewWorkspaceFo
   return { uri: f.uri.toString(), path: f.uri.path, name: f.name };
 }
 
-function toPreviewSource(s: import('./sync/topology').ResolvedSource): PreviewSource {
+function toPreviewSource(s: import('./sync/coreTypes').ResolvedSource): PreviewSource {
   return {
     configUri: s.configUri.toString(),
     sourceFolderPath: s.sourceFolderUri.path,

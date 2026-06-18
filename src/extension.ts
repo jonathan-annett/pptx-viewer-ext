@@ -12,7 +12,7 @@ import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
-import type { ResolvedSource, ResolvedTopology } from './sync/topology';
+import type { ResolvedSource, ResolvedTopology } from './sync/coreTypes';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { ManifestEditorProvider } from './sync/manifestEditor';
