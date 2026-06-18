@@ -42,15 +42,77 @@ export interface SearchPanelInitialState {
   scopeFolderCount: number;
 }
 
+/** Render options. `host:'dom'` returns a script-free, CSP-free fragment for a
+ *  single-document host (the PWA) to splice into a shadow root — mirroring the
+ *  `RenderOptions.host:'dom'` mode `webview.ts` grew for the standalone PWA.
+ *  The default `'webview'` mode is unchanged (full document + nonce'd script). */
+export interface SearchPanelRenderOptions {
+  host?: 'webview' | 'dom';
+}
+
 /**
  * Render the full panel HTML. Pure: callers supply the nonce.
+ *
+ * In the default `'webview'` mode this returns a complete document with the
+ * project CSP and the nonce-gated inline `panelScript()` that drives the panel.
+ * In `'dom'` mode it returns just `<style>` + the static `<main>`/modal-host
+ * chrome (no doctype, no CSP, no script): the PWA mounts that fragment in a
+ * shadow root and re-implements the interaction as direct DOM (the inline
+ * script's webview-only `acquireVsCodeApi` bridge has no analogue there).
  */
 export function renderSearchPanelHtml(
   state: SearchPanelInitialState,
   nonce: string,
+  opts?: SearchPanelRenderOptions,
 ): string {
   const safeFooter = renderFooterText(state);
   const emptyState = renderEmptyStateMessage(state);
+  if (opts?.host === 'dom') {
+    // Script-free fragment. Same element ids/classes as the webview body so
+    // css() styles it identically and the PWA twin can wire #q, #reindex,
+    // #or-mode, #results, #footer-text and #modal-host by id.
+    return `<style>${css()}</style>
+  <main>
+    <header class="search-head">
+      <h1>Presentation Search</h1>
+      <div class="search-input-row">
+        <input
+          id="q"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search filename, author, or first-slide text…"
+          aria-label="Search query"
+        >
+        <button id="reindex" type="button" title="Re-walk source folders">Reindex</button>
+      </div>
+      <div class="search-options-row">
+        <label class="search-option" title="When off (default), every word you type must match somewhere on the file. When on, files matching any one of your words appear — useful for fishing out a known filename fragment when the metadata isn't helping.">
+          <input id="or-mode" type="checkbox">
+          <span>Any term (OR)</span>
+        </label>
+      </div>
+      <div id="multi-toolbar" class="multi-toolbar" hidden>
+        <span id="multi-status" class="multi-status" aria-live="polite">Multi-select: 0 selected</span>
+        <span class="multi-toolbar-spacer"></span>
+        <button id="multi-clear-btn" type="button" class="multi-btn multi-btn-secondary">Clear selection</button>
+        <button id="multi-update-btn" type="button" class="multi-btn" disabled
+          title="Select one file in the first group and one in another group to enable Update.">
+          Update file…
+        </button>
+      </div>
+    </header>
+
+    <section id="results" class="results" aria-live="polite" aria-busy="false">
+      <div class="empty-state">${escapeHtml(emptyState)}</div>
+    </section>
+
+    <footer class="search-foot">
+      <span id="footer-text">${escapeHtml(safeFooter)}</span>
+    </footer>
+  </main>
+  <div id="modal-host" class="modal-host" aria-hidden="true"></div>`;
+  }
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
