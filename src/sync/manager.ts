@@ -26,6 +26,7 @@ import {
   partitionConfigUris,
 } from './configFilenames';
 import { log } from '../log';
+import { toWorkspaceRoot } from './host/vscodeHost';
 
 type Listener = (topology: ResolvedTopology) => void;
 
@@ -140,7 +141,7 @@ export class SyncManager implements vscode.Disposable {
       loads.push(await loadSyncConfig(configUri, owner.uri));
     }
 
-    this.topology = resolveTopology(loads, folders);
+    this.topology = resolveTopology(loads, folders.map(toWorkspaceRoot));
     this.topology.conflicts = conflicts;
     log(
       `sync: topology resolved — ${this.topology.sources.length} source(s), ` +

@@ -9,7 +9,7 @@
 // with config=null and a human-readable `error` string. Callers surface these
 // via the Output Channel.
 
-import * as vscode from 'vscode';
+import { getHost, type Uri } from './host';
 import {
   expandRoomSyncVariable,
   parseSyncConfigText,
@@ -28,11 +28,11 @@ export { parseSyncConfigText } from './configParse';
 /** Result of loading one .sync.jsonc file. */
 export interface SourceLoad {
   /** URI of the .sync.jsonc file itself. */
-  configUri: vscode.Uri;
+  configUri: Uri;
   /** URI of the folder containing the config — the source root. */
-  sourceFolderUri: vscode.Uri;
+  sourceFolderUri: Uri;
   /** URI of the workspace folder this source lives inside. */
-  workspaceFolderUri: vscode.Uri;
+  workspaceFolderUri: Uri;
   /** Parsed and validated config, or null if the file could not be loaded. */
   config: SyncConfig | null;
   /** Populated when config is null. Human-readable. */
@@ -44,13 +44,14 @@ export interface SourceLoad {
  * either the parsed config or the failure reason.
  */
 export async function loadSyncConfig(
-  configUri: vscode.Uri,
-  workspaceFolderUri: vscode.Uri,
+  configUri: Uri,
+  workspaceFolderUri: Uri,
 ): Promise<SourceLoad> {
-  const sourceFolderUri = parentUri(configUri);
+  const { fs, uri } = getHost();
+  const sourceFolderUri = uri.dirname(configUri);
   let bytes: Uint8Array;
   try {
-    bytes = await vscode.workspace.fs.readFile(configUri);
+    bytes = await fs.readFile(configUri);
   } catch (err) {
     return {
       configUri,
@@ -79,7 +80,7 @@ export async function loadSyncConfig(
   // enclosing folder basename. Lets a generator emit one verbatim template
   // per logical destination; the editor still sees the raw text via the
   // form's own renderFor path (which bypasses this expansion on purpose).
-  const handle = roomSyncHandle(configUri.path, workspaceFolderUri.path);
+  const handle = roomSyncHandle(uri.path(configUri), uri.path(workspaceFolderUri));
   text = expandRoomSyncVariable(text, handle);
 
   const parsed = parseSyncConfigText(text);
@@ -98,7 +99,7 @@ export async function loadSyncConfig(
   // and `.sync.jsonc` at any depth — including workspace root — keep the
   // legacy "this folder is the source" semantics where aliases are
   // optional, so the validator is gated by name + location.
-  if (isWorkspaceRootNamedConfig(configUri.path, workspaceFolderUri.path)) {
+  if (isWorkspaceRootNamedConfig(uri.path(configUri), uri.path(workspaceFolderUri))) {
     const filename = configFilenameFromUri(configUri);
     const validation = validateWorkspaceRootConfig(parsed.config, filename);
     if (validation) {
@@ -118,14 +119,6 @@ export async function loadSyncConfig(
     workspaceFolderUri,
     config: parsed.config,
   };
-}
-
-function parentUri(uri: vscode.Uri): vscode.Uri {
-  // Robust to trailing slashes. URI path is always forward-slash, even on Windows.
-  const path = uri.path;
-  const idx = path.lastIndexOf('/');
-  const parent = idx <= 0 ? '/' : path.slice(0, idx);
-  return uri.with({ path: parent });
 }
 
 function errMsg(err: unknown): string {

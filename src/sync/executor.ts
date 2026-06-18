@@ -29,22 +29,11 @@ import { hasBlockingWarning, hasOverridableWarningOnly } from './plan';
 import { hashFileAtUri } from './hash';
 import type { UriHashCache } from './hashCache';
 
-/** Abstract FS contract — production wires vscode.workspace.fs, tests fake. */
-export interface SyncFs<U> {
-  /** Resolve a relative path under a root URI. Implementation owns URI shape. */
-  joinPath(root: U, relPath: string): U;
-  /**
-   * Cheap metadata lookup used by the URI hash cache (M5.2.5) to decide
-   * whether a previous hash for this file is still valid. `mtime` is ms
-   * since epoch (vscode.FileStat shape); fake implementations may return 0.
-   */
-  stat(uri: U): Promise<{ size: number; mtime: number }>;
-  readFile(uri: U): Promise<Uint8Array>;
-  writeFile(uri: U, bytes: Uint8Array): Promise<void>;
-  rename(src: U, dst: U): Promise<void>;
-  /** Throw a FileSystemError-shaped object (.code='FileNotFound') for missing. */
-  delete(uri: U): Promise<void>;
-}
+// The `SyncFs<U>` contract now lives in the host seam (`./host/fs`), extended
+// with `readDirectory` + `FileType`. Re-exported here so existing importers
+// (`vscodeFs`, `hash`, tests) keep their import path.
+import type { SyncFs } from './host/fs';
+export type { SyncFs } from './host/fs';
 
 export interface ExecuteOptions<U> {
   /** Identifier embedded in manifest keys for this source. */

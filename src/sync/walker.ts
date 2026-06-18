@@ -1,22 +1,22 @@
 // Recursive directory walker for sync sources and destinations.
 //
-// Uses vscode.workspace.fs (the only file-access surface available in the
-// web-extension host). Returns a flat list of file entries with their
-// relative paths, sizes, and mtimes — hashing is deferred to the plan engine
-// so we can short-circuit on size mismatch later without paying for hashes
-// we don't need.
+// File access goes through the injected `SyncFs` host seam (the VS Code host
+// binds it to `vscode.workspace.fs`). Returns a flat list of file entries with
+// their relative paths, sizes, and mtimes — hashing is deferred to the plan
+// engine so we can short-circuit on size mismatch later without paying for
+// hashes we don't need.
 //
 // Excluded directories are pruned at the walk so we don't pay the cost of
 // listing into e.g. node_modules just to discard every entry.
 
-import * as vscode from 'vscode';
+import { FileType, type FsEntry, type FsStat, type SyncFs, type Uri } from './host';
 import { GlobSet } from './glob';
 
 export interface WalkEntry {
   /** Forward-slash path relative to the walk root. */
   relPath: string;
   /** Absolute URI of the file. */
-  uri: vscode.Uri;
+  uri: Uri;
   /** Size in bytes. */
   size: number;
   /** Modification time in ms since epoch (0 if filesystem doesn't supply it). */
@@ -37,25 +37,27 @@ export interface WalkOptions {
  * planner doesn't care).
  */
 export async function walkTree(
-  root: vscode.Uri,
+  fs: SyncFs<Uri>,
+  root: Uri,
   options: WalkOptions,
 ): Promise<WalkEntry[]> {
   const out: WalkEntry[] = [];
-  await walkInto(root, '', options, out);
+  await walkInto(fs, root, '', options, out);
   return out;
 }
 
 async function walkInto(
-  root: vscode.Uri,
+  fs: SyncFs<Uri>,
+  root: Uri,
   relDir: string,
   options: WalkOptions,
   out: WalkEntry[],
 ): Promise<void> {
-  const dirUri = relDir === '' ? root : joinRel(root, relDir);
+  const dirUri = relDir === '' ? root : fs.joinPath(root, relDir);
 
-  let entries: [string, vscode.FileType][];
+  let entries: FsEntry[];
   try {
-    entries = await vscode.workspace.fs.readDirectory(dirUri);
+    entries = await fs.readDirectory(dirUri);
   } catch {
     // Directory may not exist — that's expected when planning a destination
     // that hasn't been written to yet.
@@ -66,15 +68,15 @@ async function walkInto(
     // Forward-slash relative path. Always use '/' regardless of host OS.
     const childRel = relDir === '' ? name : `${relDir}/${name}`;
 
-    if (fileType & vscode.FileType.Directory) {
+    if (fileType & FileType.Directory) {
       // Prune excluded directories. The glob `node_modules/**` matches both
       // the directory and its contents, so the dir itself is pruned here.
       if (options.exclude.matches(childRel)) continue;
-      await walkInto(root, childRel, options, out);
+      await walkInto(fs, root, childRel, options, out);
       continue;
     }
 
-    if (!(fileType & vscode.FileType.File)) {
+    if (!(fileType & FileType.File)) {
       // SymbolicLink, Unknown, or any other type — skip. The web FS surface
       // resolves symlinks transparently when readable.
       continue;
@@ -85,24 +87,18 @@ async function walkInto(
 
     // Stat once per file. We need size for the plan summary; mtime is for
     // diagnostics only at this stage.
-    let stat: vscode.FileStat | undefined;
+    let stat: FsStat | undefined;
     try {
-      stat = await vscode.workspace.fs.stat(joinRel(root, childRel));
+      stat = await fs.stat(fs.joinPath(root, childRel));
     } catch {
       continue;
     }
 
     out.push({
       relPath: childRel,
-      uri: joinRel(root, childRel),
+      uri: fs.joinPath(root, childRel),
       size: stat.size,
       mtime: stat.mtime,
     });
   }
-}
-
-function joinRel(base: vscode.Uri, relPath: string): vscode.Uri {
-  if (relPath === '') return base;
-  const basePath = base.path.endsWith('/') ? base.path.slice(0, -1) : base.path;
-  return base.with({ path: `${basePath}/${relPath}` });
 }

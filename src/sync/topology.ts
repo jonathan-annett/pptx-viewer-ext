@@ -9,7 +9,7 @@
 // This module does no filesystem I/O. It is a pure transform from
 // SourceLoad[] + workspaceFolders[] to ResolvedTopology.
 
-import * as vscode from 'vscode';
+import { getHost, type Uri, type WorkspaceRoot } from './host';
 import type { SourceLoad } from './config';
 
 export interface ResolvedDestination {
@@ -28,15 +28,15 @@ export interface ResolvedDestination {
   /** Subpath within the destination workspace folder (already normalised). */
   subpath: string;
   /** Resolved workspace folder URI, or null if no workspace folder matches the URI. */
-  workspaceFolderUri: vscode.Uri | null;
+  workspaceFolderUri: Uri | null;
   /** Final URI of the destination root (workspaceFolderUri + subpath), or null if unresolved. */
-  destRootUri: vscode.Uri | null;
+  destRootUri: Uri | null;
 }
 
 export interface ResolvedSource {
-  configUri: vscode.Uri;
-  sourceFolderUri: vscode.Uri;
-  workspaceFolderUri: vscode.Uri;
+  configUri: Uri;
+  sourceFolderUri: Uri;
+  workspaceFolderUri: Uri;
   /** Name of the source's enclosing workspace folder. Used as the source
    * identifier in manifest keys. */
   workspaceFolderName: string;
@@ -47,7 +47,7 @@ export interface Diagnostic {
   severity: 'error' | 'warning';
   message: string;
   /** Config file the diagnostic is attached to, when applicable. */
-  configUri?: vscode.Uri;
+  configUri?: Uri;
 }
 
 /**
@@ -60,11 +60,11 @@ export interface Diagnostic {
  */
 export interface SyncConfigConflict {
   /** Parent folder both files live in. */
-  sourceFolderUri: vscode.Uri;
+  sourceFolderUri: Uri;
   /** URI of the `.sync.jsonc` file. */
-  legacyUri: vscode.Uri;
+  legacyUri: Uri;
   /** URI of the `.roomSync` file. */
-  roomSyncUri: vscode.Uri;
+  roomSyncUri: Uri;
 }
 
 export interface ResolvedTopology {
@@ -78,14 +78,15 @@ export interface ResolvedTopology {
 
 export function resolveTopology(
   loads: SourceLoad[],
-  workspaceFolders: readonly vscode.WorkspaceFolder[],
+  roots: ReadonlyArray<WorkspaceRoot<Uri>>,
 ): ResolvedTopology {
+  const { uri } = getHost();
   const diagnostics: Diagnostic[] = [];
   const failed: SourceLoad[] = [];
   const sources: ResolvedSource[] = [];
 
-  const byUri = new Map<string, vscode.WorkspaceFolder>();
-  for (const f of workspaceFolders) {
+  const byUri = new Map<string, WorkspaceRoot<Uri>>();
+  for (const f of roots) {
     byUri.set(f.uri.toString(), f);
   }
 
@@ -142,7 +143,7 @@ export function resolveTopology(
         name: displayName,
         subpath,
         workspaceFolderUri: folder.uri,
-        destRootUri: subpath === '' ? folder.uri : appendPath(folder.uri, subpath),
+        destRootUri: subpath === '' ? folder.uri : uri.join(folder.uri, subpath),
       });
     }
 
@@ -246,17 +247,11 @@ export function formatTopology(topology: ResolvedTopology): string {
   return lines.join('\n');
 }
 
-function appendPath(base: vscode.Uri, subpath: string): vscode.Uri {
-  // Subpath has already been normalised (no leading/trailing slash, no doubles).
-  const joined = base.path.endsWith('/') ? `${base.path}${subpath}` : `${base.path}/${subpath}`;
-  return base.with({ path: joined });
-}
-
-function displayUri(uri: vscode.Uri): string {
+function displayUri(target: Uri): string {
   // Workspace-relative path is more useful than the full URI in diagnostics.
-  // Falls back to fsPath / toString() when there's no workspace folder match.
-  const rel = vscode.workspace.asRelativePath(uri, false);
-  return rel || uri.toString();
+  // Falls back to the full URI string when there's no workspace folder match.
+  const rel = getHost().workspace.asRelativePath(target);
+  return rel || target.toString();
 }
 
 /**
@@ -265,15 +260,15 @@ function displayUri(uri: vscode.Uri): string {
  * "folder name" for filesystem-style URIs (`file://`, `vscode-vfs://`, …),
  * and is what vscode.dev defaults to when adding a folder to a workspace.
  */
-function fallbackNameFromUri(uri: string): string {
+function fallbackNameFromUri(uriString: string): string {
   try {
-    const parsed = vscode.Uri.parse(uri);
-    const path = parsed.path.replace(/\/+$/, '');
+    const parsed = getHost().uri.parse(uriString);
+    const path = getHost().uri.path(parsed).replace(/\/+$/, '');
     const idx = path.lastIndexOf('/');
     const segment = idx >= 0 ? path.slice(idx + 1) : path;
     const decoded = decodeURIComponent(segment);
-    return decoded || uri;
+    return decoded || uriString;
   } catch {
-    return uri;
+    return uriString;
   }
 }

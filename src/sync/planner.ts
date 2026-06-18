@@ -12,7 +12,7 @@
 // pair. The dry-run command formats this for the Output Channel; M3 will
 // feed the same structure into the plan webview.
 
-import * as vscode from 'vscode';
+import { getHost, FileType, type Uri } from './host';
 import type { ResolvedSource, ResolvedDestination, ResolvedTopology } from './topology';
 import type { AliasOrigin, FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
@@ -35,7 +35,6 @@ import {
   type CachedParseResult,
   type ParseResultCache,
 } from './parseCache';
-import { vscodeFs } from './vscodeFs';
 import { GlobSet, BUILT_IN_IGNORES } from './glob';
 import { readManifest } from './manifest';
 import { parseSyncConfigText } from './config';
@@ -139,8 +138,8 @@ export interface BuildPlanOptions {
  * is already known (e.g. the pptx viewer always passes a regular file URI).
  */
 export interface ScopedPlanOptions {
-  sourceConfigUri: vscode.Uri;
-  pathFilter?: vscode.Uri;
+  sourceConfigUri: Uri;
+  pathFilter?: Uri;
   pathFilterIsFile?: boolean;
   /** See {@link BuildPlanOptions.placeholders}. */
   placeholders?: Set<string>;
@@ -163,7 +162,8 @@ export async function buildScopedDryRunPlan(
 
   let scope: Scope = { kind: 'none' };
   if (opts.pathFilter) {
-    const rel = relPathFromBase(source.sourceFolderUri.path, opts.pathFilter.path);
+    const uri = getHost().uri;
+    const rel = relPathFromBase(uri.path(source.sourceFolderUri), uri.path(opts.pathFilter));
     if (rel === null) {
       // Path filter is outside the source folder — surface as skipped on
       // every destination row so the caller can render a clear message.
@@ -231,7 +231,7 @@ async function planForSource(
   // One cache instance shared across source + destination walks — the
   // singleton is initialised at activation; tests / no-cache contexts get
   // undefined and walkAndHash degrades to stat+read+hash.
-  const cache = getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined;
+  const cache = getHashCacheSingleton() as UriHashCache<Uri> | undefined;
   // Walk-scoped hash-cache snapshot. One IDB `getAllEntries()` here replaces
   // up to N+M per-file `lookup()` calls (N source files + M files per
   // destination, summed across destinations). The snapshot is frozen at
@@ -437,10 +437,10 @@ function mergeStats(a: PlanHashCacheStats, b: PlanHashCacheStats): PlanHashCache
   };
 }
 
-async function pathIsFile(uri: vscode.Uri): Promise<boolean> {
+async function pathIsFile(uri: Uri): Promise<boolean> {
   try {
-    const stat = await vscode.workspace.fs.stat(uri);
-    return !!(stat.type & vscode.FileType.File);
+    const stat = await getHost().fs.stat(uri);
+    return !!((stat.type ?? FileType.Unknown) & FileType.File);
   } catch {
     return false;
   }
@@ -456,12 +456,13 @@ async function loadConfigForSource(
   source: ResolvedSource,
 ): Promise<{ include: string[]; exclude: string[]; pathAliases: Record<string, string> } | null> {
   try {
-    const bytes = await vscode.workspace.fs.readFile(source.configUri);
+    const { fs, uri } = getHost();
+    const bytes = await fs.readFile(source.configUri);
     let text = new TextDecoder().decode(bytes);
     // Resolve `${roomSync}` template tokens before parsing — same pre-parse
     // pass the manager-side loader applies. Keeps the planner's view
     // consistent with the topology already in scope.
-    const handle = roomSyncHandle(source.configUri.path, source.workspaceFolderUri.path);
+    const handle = roomSyncHandle(uri.path(source.configUri), uri.path(source.workspaceFolderUri));
     text = expandRoomSyncVariable(text, handle);
     const parsed = parseSyncConfigText(text);
     if (parsed.kind !== 'ok') return null;
@@ -528,21 +529,22 @@ function applyAliases(entries: readonly WalkEntry[], aliases: readonly CompiledA
   return out;
 }
 
-function displayConfigUri(uri: vscode.Uri): string {
-  const rel = vscode.workspace.asRelativePath(uri, false);
-  return rel || uri.toString();
+function displayConfigUri(configUri: Uri): string {
+  const rel = getHost().workspace.asRelativePath(configUri);
+  return rel || configUri.toString();
 }
 
 async function walkAndHash(
-  root: vscode.Uri,
+  root: Uri,
   opts: WalkAndHashOpts,
-  cache: UriHashCache<vscode.Uri> | undefined,
+  cache: UriHashCache<Uri> | undefined,
   stats: PlanHashCacheStats,
   parseCache?: ParseResultCache,
   parseSnapshot?: Map<string, CachedParseResult>,
   hashSnapshot?: Map<string, HashCacheEntry>,
 ): Promise<FileInfo[]> {
-  const rawEntries = await walkTree(root, opts);
+  const fs = getHost().fs;
+  const rawEntries = await walkTree(fs, root, opts);
   // Apply path-alias rewrite before we read any bytes — files outside every
   // LHS drop here, saving the read+hash for paths the user didn't opt in for.
   // Rewrite preserves URI (the file lives at its on-disk location); only the
@@ -550,7 +552,6 @@ async function walkAndHash(
   // plan-view tooltip.
   const entries: WalkAlias[] = applyAliases(rawEntries, opts.aliases ?? []);
   const out: FileInfo[] = [];
-  const fs = vscodeFs();
   for (const e of entries) {
     try {
       // Source walk needs bytes for the per-filetype validator pass; the
@@ -662,7 +663,7 @@ export function formatDryRunPlan(plans: readonly PlanForDestination[]): string {
 
   for (const plan of plans) {
     lines.push('');
-    const srcPath = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
+    const srcPath = getHost().workspace.asRelativePath(plan.source.sourceFolderUri);
     const destLabel = plan.destination.destRootUri
       ? plan.destination.destRootUri.toString()
       : `<unresolved: ${plan.destination.name}>`;

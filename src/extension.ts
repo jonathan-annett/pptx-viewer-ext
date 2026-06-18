@@ -5,6 +5,9 @@ import { PptxEditorProvider } from './provider';
 import { PdfEditorProvider } from './pdfViewer';
 import { initLog, log } from './log';
 import { isWebHost } from './host';
+import { initHost } from './sync/host';
+import { vscodeFs } from './sync/vscodeFs';
+import { vscodeUri, vscodeWorkspaceProvider } from './sync/host/vscodeHost';
 import { SyncManager } from './sync/manager';
 import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
@@ -60,7 +63,13 @@ import {
 const BUILD_INFO_RAW = '__PPTX_BUILD_INFO_PLACEHOLDER__';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  initLog(context);
+  // Install the logging sink (the "Pptx Info" Output Channel) and the sync
+  // host implementations (filesystem / URI algebra / workspace provider) before
+  // anything that logs or touches the sync engine runs.
+  const logChannel = vscode.window.createOutputChannel('Pptx Info');
+  context.subscriptions.push(logChannel);
+  initLog({ appendLine: (line) => logChannel.appendLine(line) });
+  initHost({ fs: vscodeFs(), uri: vscodeUri, workspace: vscodeWorkspaceProvider });
   log(`activate: pptx-viewer ${packageVersion(context)} loaded`);
   logBuildInfo();
 

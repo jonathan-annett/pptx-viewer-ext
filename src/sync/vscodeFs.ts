@@ -5,7 +5,7 @@
 // import between planner.ts and runSync.ts.
 
 import * as vscode from 'vscode';
-import type { SyncFs } from './executor';
+import { FileType, type SyncFs, type FsEntry } from './host/fs';
 
 export function vscodeFs(): SyncFs<vscode.Uri> {
   return {
@@ -16,10 +16,15 @@ export function vscodeFs(): SyncFs<vscode.Uri> {
     },
     async stat(uri) {
       // The FSA adapter populates size + mtime; M5.2.5 probe verified both
-      // are real and stable across browser refresh.
+      // are real and stable across browser refresh. `type` carries straight
+      // over (vscode.FileType values match the host seam's FileType enum).
       const s = await vscode.workspace.fs.stat(uri);
-      return { size: s.size, mtime: s.mtime };
+      return { size: s.size, mtime: s.mtime, type: s.type as unknown as FileType };
     },
+    // vscode.FileType's numeric values are identical to the host seam's
+    // FileType enum, so the tuple list casts straight across.
+    readDirectory: (uri) =>
+      Promise.resolve(vscode.workspace.fs.readDirectory(uri)) as Promise<FsEntry[]>,
     readFile: (uri) => Promise.resolve(vscode.workspace.fs.readFile(uri)).then(passThrough),
     writeFile: (uri, bytes) =>
       Promise.resolve(vscode.workspace.fs.writeFile(uri, bytes)).then(noop),

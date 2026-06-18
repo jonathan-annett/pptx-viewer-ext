@@ -64,6 +64,10 @@ function makeFakeFs(): FakeFs {
       }
       return { size: bytes.byteLength, mtime: 0 };
     },
+    async readDirectory() {
+      // The executor never walks directories; satisfy the SyncFs contract.
+      return [];
+    },
     async readFile(uri) {
       ops.push(`read ${uri}`);
       const err = readErrors.get(uri);

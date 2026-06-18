@@ -2,7 +2,7 @@
 // The web-extension host has crypto.subtle; we don't use Node's crypto here
 // because that module isn't available in the worker context.
 
-import type { SyncFs } from './executor';
+import type { SyncFs } from './host/fs';
 import { snapshotHashLookup, type HashCacheEntry, type UriHashCache } from './hashCache';
 
 /**

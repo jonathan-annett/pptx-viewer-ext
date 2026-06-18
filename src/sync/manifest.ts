@@ -44,7 +44,7 @@
 // destination-only, making the state visible to the user via plan summary
 // rather than hiding it behind a silent fallback.
 
-import * as vscode from 'vscode';
+import { getHost, type Uri } from './host';
 import { log } from '../log';
 import {
   emptyManifest,
@@ -81,7 +81,7 @@ export type {
  *     back would overwrite the user's prior tracking record. The viewer's
  *     informational surfaces treat this like a missing manifest.
  */
-export async function readManifest(destRootUri: vscode.Uri): Promise<ManifestReadResult> {
+export async function readManifest(destRootUri: Uri): Promise<ManifestReadResult> {
   // Find whichever manifest filename exists at this destination root. New
   // destinations land on the preferred `.syncManifest`; existing
   // destinations carrying the legacy `.foldersync-manifest.json` keep using
@@ -95,7 +95,7 @@ export async function readManifest(destRootUri: vscode.Uri): Promise<ManifestRea
   }
   let bytes: Uint8Array;
   try {
-    bytes = await vscode.workspace.fs.readFile(uri);
+    bytes = await getHost().fs.readFile(uri);
   } catch {
     return okEmpty();
   }
@@ -141,13 +141,12 @@ function okEmpty(): ManifestReadResult {
  * the filesystem (display labels, auto-open paths). For "where is the
  * actual file" paths, call {@link resolveManifestUri} instead.
  */
-export function manifestUri(destRootUri: vscode.Uri): vscode.Uri {
+export function manifestUri(destRootUri: Uri): Uri {
   return manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
 }
 
-function manifestUriAt(destRootUri: vscode.Uri, filename: ManifestFilename): vscode.Uri {
-  const base = destRootUri.path.endsWith('/') ? destRootUri.path.slice(0, -1) : destRootUri.path;
-  return destRootUri.with({ path: `${base}/${filename}` });
+function manifestUriAt(destRootUri: Uri, filename: ManifestFilename): Uri {
+  return getHost().uri.join(destRootUri, filename);
 }
 
 /**
@@ -157,18 +156,19 @@ function manifestUriAt(destRootUri: vscode.Uri, filename: ManifestFilename): vsc
  * preferred URI with `existed: false` when neither does.
  */
 export async function resolveManifestUri(
-  destRootUri: vscode.Uri,
-): Promise<{ uri: vscode.Uri; filename: ManifestFilename; existed: boolean }> {
+  destRootUri: Uri,
+): Promise<{ uri: Uri; filename: ManifestFilename; existed: boolean }> {
+  const fs = getHost().fs;
   const preferred = manifestUriAt(destRootUri, PREFERRED_MANIFEST_FILENAME);
   try {
-    await vscode.workspace.fs.stat(preferred);
+    await fs.stat(preferred);
     return { uri: preferred, filename: PREFERRED_MANIFEST_FILENAME, existed: true };
   } catch { /* try legacy */ }
   for (const filename of MANIFEST_FILENAMES) {
     if (filename === PREFERRED_MANIFEST_FILENAME) continue;
     const candidate = manifestUriAt(destRootUri, filename);
     try {
-      await vscode.workspace.fs.stat(candidate);
+      await fs.stat(candidate);
       return { uri: candidate, filename, existed: true };
     } catch { /* try next */ }
   }
@@ -182,23 +182,25 @@ export async function resolveManifestUri(
  * is left unchanged (the tmp file may linger; M6's orphan sweep cleans).
  */
 export async function writeManifest(
-  destRootUri: vscode.Uri,
+  destRootUri: Uri,
   manifest: Manifest,
 ): Promise<void> {
   // Write to whichever filename already exists at this destination, or to
   // the preferred new filename (`.syncManifest`) when neither exists. The
   // resolver does one stat on warm-migrated destinations, two on
   // legacy-only destinations — negligible per-sync overhead.
+  const { fs, uri } = getHost();
   const resolved = await resolveManifestUri(destRootUri);
   const finalUri = resolved.uri;
-  const tmpUri = destRootUri.with({ path: `${finalUri.path}.tmp` });
+  // tmp sibling of the final file: <root>/<filename>.tmp
+  const tmpUri = uri.join(destRootUri, resolved.filename + '.tmp');
   // 2-space indent keeps the file diff-friendly when the user inspects it.
   const bytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2) + '\n');
-  await vscode.workspace.fs.writeFile(tmpUri, bytes);
+  await fs.writeFile(tmpUri, bytes);
   try {
-    await vscode.workspace.fs.rename(tmpUri, finalUri, { overwrite: true });
+    await fs.rename(tmpUri, finalUri);
   } catch (err) {
-    try { await vscode.workspace.fs.delete(tmpUri); } catch { /* ignore */ }
+    try { await fs.delete(tmpUri); } catch { /* ignore */ }
     throw err;
   }
 }
