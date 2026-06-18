@@ -18,7 +18,8 @@ import * as vscode from 'vscode';
 import { unzipSync } from 'fflate';
 import { type ParseResult, type ParseTimings } from 'pptx-tools-core/pptx';
 import { getParseCacheSingleton, parsePptxCached, project } from 'pptx-tools-core/sync/parseCache';
-import { renderHtml, renderError, type RenderOptions } from './webview';
+import { renderHtml, renderError, type RenderOptions } from 'pptx-tools-core/webview';
+import { uploadModalCss } from './upload/uploadModalHtml';
 import { log } from 'pptx-tools-core/log';
 import type { SyncManager } from './sync/manager';
 import {
@@ -243,6 +244,9 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
       const placeholders = await getActivePlaceholderSet();
       const isPlaceholder = placeholders.has(result.sha256);
       const opts: RenderOptions = {};
+      // Upload-modal CSS lives with the upload feature (extension-only); inject
+      // it into the core viewer builder so the modal styles ship as before.
+      opts.extraHeadCss = uploadModalCss();
       // Skip the sync-target build entirely for placeholders. The viewer's
       // job for a stub deck is to confirm "yes, still a stub" — the workspace
       // plan view (with its [P] chip on the matching row) is the right place

@@ -52,7 +52,7 @@ import {
   type PageEmuPlacement,
   type RenderedPage,
   type BuildOptions,
-} from './pdfImport';
+} from 'pptx-tools-core/pdfImport';
 
 import {
   computePageLayout,
@@ -60,7 +60,7 @@ import {
   estimateCanvasBytes,
   type PageLayout,
   type LayoutOptions,
-} from './pdfImportLayout';
+} from 'pptx-tools-core/pdfImportLayout';
 
 import {
   renderPdfImportConfigHtml,
@@ -69,7 +69,7 @@ import {
   RESOLUTION_PRESETS,
   type PdfImportConfig,
   type ConfigRenderOptions,
-} from './pdfImportConfigHtml';
+} from 'pptx-tools-core/pdfImportConfigHtml';
 
 // Belt-and-braces: pdfjs's static initialiser only sets workerSrc on Node, but
 // some setup paths still read GlobalWorkerOptions.workerSrc. We assign an

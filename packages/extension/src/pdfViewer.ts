@@ -24,7 +24,7 @@ import * as vscode from 'vscode';
 import { humanSize, formatTime } from 'pptx-tools-core/pptx';
 import { sha256Hex } from 'pptx-tools-core/sync/hash';
 import { log } from 'pptx-tools-core/log';
-import { renderPdfViewerHtml, renderPdfViewerError } from './pdfViewerHtml';
+import { renderPdfViewerHtml, renderPdfViewerError } from 'pptx-tools-core/pdfViewerHtml';
 
 class PdfDocument implements vscode.CustomDocument {
   constructor(public readonly uri: vscode.Uri) {}

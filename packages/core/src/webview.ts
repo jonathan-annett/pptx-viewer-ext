@@ -28,11 +28,10 @@
 // src/sync/compareModalHtml.ts) and posted to the webview as a string; the
 // host container is a fixed-position overlay that the script toggles.
 
-import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from 'pptx-tools-core/pptx';
-import { compareModalCss } from 'pptx-tools-core/sync/compareModalHtml';
-import { decisionWiringScript } from 'pptx-tools-core/sync/planHtml';
+import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
+import { compareModalCss } from './sync/compareModalHtml';
+import { decisionWiringScript } from './sync/planHtml';
 import { pdfImportConfigCss } from './pdfImportConfigHtml';
-import { uploadModalCss } from './upload/uploadModalHtml';
 
 // Placeholder string. esbuild's pdfimport-webview-bundle plugin substitutes
 // the entire quoted literal (quotes included) with a JSON.stringify of the
@@ -67,6 +66,21 @@ export interface RenderOptions {
    * Resolved by the wired provider via the placeholder registry.
    */
   isPlaceholder?: boolean;
+  /**
+   * Extra CSS injected into the viewer's <style> block. The extension passes
+   * `uploadModalCss()` here so the upload-modal styling lives with the upload
+   * feature (extension-only) rather than coupling this core builder to it. The
+   * PWA omits it (no upload in v1). Empty when unset.
+   */
+  extraHeadCss?: string;
+  /**
+   * Output shape. `'webview'` (default) returns a full HTML document with the
+   * VS Code webview CSP + the inline <script> bundle, for the extension. `'dom'`
+   * returns a fragment — `<style>…</style>` + the body markup only, no doctype/
+   * head/CSP and **no scripts** — for the PWA, which mounts it into a shadow
+   * root and wires the (formerly inline-script) behaviour as direct DOM.
+   */
+  host?: 'webview' | 'dom';
 }
 
 export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = {}): string {
@@ -146,21 +160,18 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
   // before viewerScript so the latter can read window.__pptxSynthHint on init.
   const synthHint = synthHintScript(r);
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';">
-<title>${escapeHtml(r.fileName)}</title>
-<style>${css()}</style>
-</head>
-<body>
-  <main>
+  // `upload-btn` is webview-only (the upload-to-update relay is extension-only).
+  const uploadBtn =
+    opts.host === 'dom'
+      ? ''
+      : `<button id="upload-btn" class="action-btn action-btn-secondary" type="button">Upload to Update\u2026</button>`;
+
+  const bodyMarkup = `  <main>
     <h1>${escapeHtml(r.fileName)}</h1>
     <div class="actions">
       <button id="save-as-btn" class="action-btn" type="button">Save As\u2026</button>
       <button id="update-btn" class="action-btn action-btn-secondary" type="button">Browse to Update\u2026</button>
-      <button id="upload-btn" class="action-btn action-btn-secondary" type="button">Upload to Update\u2026</button>
+      ${uploadBtn}
       <span id="action-status" class="action-status" aria-live="polite">${initialStatus}</span>
     </div>
     <input id="update-input" type="file" accept=".pptx,.pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/pdf" style="display:none">
@@ -185,7 +196,24 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
       <div class="drop-overlay-title">Drop a .pptx or .pdf to compare or update</div>
       <div class="drop-overlay-sub">Hold <kbd>Shift</kbd> while dropping &mdash; otherwise VS Code opens it as a new tab</div>
     </div>
-  </div>
+  </div>`;
+
+  // PWA fragment: styles + body only. No doctype/head/CSP, no inline scripts \u2014
+  // the PWA mounts this in a shadow root and wires behaviour as direct DOM.
+  if (opts.host === 'dom') {
+    return `<style>${css(opts.extraHeadCss ?? '')}</style>\n${bodyMarkup}`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}';">
+<title>${escapeHtml(r.fileName)}</title>
+<style>${css(opts.extraHeadCss ?? '')}</style>
+</head>
+<body>
+${bodyMarkup}
   <script nonce="${nonce}">${PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER}</script>
   ${synthHint ? `<script nonce="${nonce}">${synthHint}</script>` : ''}
   <script nonce="${nonce}">${viewerScript()}</script>
@@ -1482,7 +1510,7 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function css(): string {
+function css(extraHeadCss = ''): string {
   return `
     :root { color-scheme: light dark; }
     body {
@@ -1854,8 +1882,8 @@ function css(): string {
     /* ----- PDF import config modal --------------------------------------- */
     ${pdfImportConfigCss()}
 
-    /* ----- Upload-to-Update modal (M5) ----------------------------------- */
-    ${uploadModalCss()}
+    /* ----- Host-injected extra CSS (e.g. extension's upload modal) -------- */
+    ${extraHeadCss}
   `;
 }
 
