@@ -23,5 +23,6 @@ events/
 events-by-day/
 
 # M0 XML spike for session-title-slides — scratch script + outputs.
-samples/m0-spike/
+# (Phase 2 moved samples/ into packages/core/.)
+packages/core/samples/m0-spike/
 

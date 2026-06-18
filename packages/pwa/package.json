@@ -1,0 +1,6 @@
+{
+  "name": "pptx-pwa",
+  "version": "0.1.5",
+  "description": "Standalone PWA host for pptx-tools-core (fleshed out in Phase 3+). Empty stub for now.",
+  "private": true
+}

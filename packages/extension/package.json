@@ -1,0 +1,280 @@
+{
+  "name": "pptx-sync",
+  "displayName": "Presentation Folder Sync",
+  "description": "Inspect, search, and one-way folder sync for PowerPoint decks — plus an event scheduler for the rooms, days, and speakers behind a conference. Built for vscode.dev; runs in desktop VS Code too.",
+  "version": "0.1.5",
+  "publisher": "sophtwhere",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonathan-annett/pptx-viewer-ext.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "browser": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "pptxViewer.viewer",
+        "displayName": "Pptx Info",
+        "selector": [
+          {
+            "filenamePattern": "*.pptx"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "pptxViewer.pdfViewer",
+        "displayName": "PDF Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "folderSync.configEditor",
+        "displayName": "Folder Sync configuration",
+        "selector": [
+          {
+            "filenamePattern": ".sync.jsonc"
+          },
+          {
+            "filenamePattern": ".roomSync"
+          },
+          {
+            "filenamePattern": "*.roomSync"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "folderSync.adminEditor",
+        "displayName": "Folder Sync workspace snapshot",
+        "selector": [
+          {
+            "filenamePattern": ".admin-sync.jsonc"
+          },
+          {
+            "filenamePattern": ".eventSync"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "folderSync.manifestEditor",
+        "displayName": "Folder Sync manifest",
+        "selector": [
+          {
+            "filenamePattern": "**/.foldersync-manifest.json"
+          },
+          {
+            "filenamePattern": "**/.syncManifest"
+          }
+        ],
+        "priority": "default"
+      },
+      {
+        "viewType": "pptxViewer.eventEditor",
+        "displayName": "Event schedule",
+        "selector": [
+          {
+            "filenamePattern": "*.eventSchedule"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.sync.jsonc",
+        "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/.roomSync",
+        "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/*.roomSync",
+        "url": "./schemas/sync.schema.json"
+      },
+      {
+        "fileMatch": "**/*.eventSchedule",
+        "url": "./schemas/event-schedule.schema.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "folderSync.showTopology",
+        "title": "Folder Sync: Show Topology",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.dryRunPlan",
+        "title": "Folder Sync: Dry-Run Plan",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.openPlan",
+        "title": "Folder Sync: Show Plan",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.syncThisFolder",
+        "title": "Folder Sync: Sync This Folder",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.showSnapshot",
+        "title": "Folder Sync: Show Workspace Snapshot",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.clearSnapshot",
+        "title": "Folder Sync: Clear Workspace Snapshot",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.openAdminConfig",
+        "title": "Folder Sync: Open Admin Config",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.resolveConfigConflict",
+        "title": "Folder Sync: Resolve Config Conflict",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "folderSync.resolveSnapshotConflict",
+        "title": "Folder Sync: Resolve Workspace Snapshot Conflict",
+        "category": "Folder Sync"
+      },
+      {
+        "command": "pptxSearch.openPanel",
+        "title": "Presentation Search: Open",
+        "category": "Presentation Search"
+      },
+      {
+        "command": "pptxViewer.resetExtensionState",
+        "title": "Pptx Info: Reset Extension State (Factory Reset)",
+        "category": "Pptx Info"
+      },
+      {
+        "command": "event.quickSetup",
+        "title": "Event: Quick Setup New Event…",
+        "category": "Event"
+      }
+    ],
+    "configuration": {
+      "title": "Pptx Info",
+      "properties": {
+        "pptxViewer.dropboxBaseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Override the dropbox-server base URL used by the upload-to-update flow. Leave empty to use the default `https://vscode.sophtwhere.com/dropbox`. Set to e.g. `http://127.0.0.1:3030` to point at a local dev instance. The WebSocket endpoint is derived by appending `/ws` and rewriting the scheme."
+        }
+      }
+    },
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "folderSync.syncThisFolder",
+          "when": "explorerResourceIsFolder && folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace",
+          "group": "7_modification@10"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "folderSync.openPlan",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.syncThisFolder",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.openAdminConfig",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.resolveConfigConflict",
+          "when": "folderSync.hasConfigConflict"
+        },
+        {
+          "command": "folderSync.resolveSnapshotConflict",
+          "when": "folderSync.hasSnapshotConflict"
+        },
+        {
+          "command": "folderSync.showTopology",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.dryRunPlan",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.showSnapshot",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        },
+        {
+          "command": "folderSync.clearSnapshot",
+          "when": "folderSync.hasAnySource && !folderSync.destinationOnlyWorkspace"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "bundle": "node esbuild.config.js",
+    "compile-web": "node esbuild.config.js",
+    "watch-web": "node esbuild.config.js --watch",
+    "watch": "node esbuild.config.js --watch",
+    "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
+    "test:pdf-import": "node --import tsx test/pdf-import.test.ts",
+    "test:pdf-import-layout": "node --import tsx test/pdf-import-layout.test.ts",
+    "test:pdf-import-config-html": "node --import tsx test/pdf-import-config-html.test.ts",
+    "test:upload-protocol": "node --import tsx test/upload-protocol.test.ts",
+    "test:upload-modal-html": "node --import tsx test/upload-modal-html.test.ts",
+    "test:sync-status-bar-operator": "node --import tsx test/sync-status-bar-operator.test.ts",
+    "test:viewer-render": "node --import tsx test/viewer-render.test.ts",
+    "package": "node --require ./scripts/fix-cpus.cjs ../../node_modules/@vscode/vsce/vsce package --allow-missing-repository",
+    "publish:web": "node scripts/publish-web.cjs",
+    "publish:marketplace": "node scripts/publish-marketplace.cjs",
+    "open-in-browser": "node --require ./scripts/fix-platform.cjs --require ./scripts/fix-koa-proxy.cjs ../../node_modules/@vscode/test-web/out/server/index.js --browserType=none --extensionDevelopmentPath=. --port=3001"
+  },
+  "webPublish": {
+    "repo": "jonathan-annett/jonathan-annett.github.io",
+    "branch": "main",
+    "folder": "vscode-ext-dev/pptx-viewer-ext"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "jsonc-parser": "^3.3.1",
+    "pdfjs-dist": "^5.7.284",
+    "pptx-tools-core": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-web": "^0.0.80",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

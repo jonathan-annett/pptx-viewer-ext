@@ -1,0 +1,217 @@
+// SyncManager — owns the lifecycle of the resolved topology.
+//
+// Responsibilities:
+// - Discover all .sync.jsonc files across the workspace at activation
+// - Watch for create/change/delete of .sync.jsonc files
+// - Watch for workspace-folder changes (add/remove)
+// - Recompute the topology when either kind of change fires
+// - Expose the current topology to commands and UI surfaces
+//
+// Recomputation is async and serialized — overlapping requests coalesce so
+// fast bursts of edits don't queue redundant work.
+
+import * as vscode from 'vscode';
+import { loadSyncConfig } from 'pptx-tools-core/sync/config';
+import { resolveTopology, formatTopology } from 'pptx-tools-core/sync/topology';
+import type { ResolvedTopology, SourceLoad, SyncConfigConflict } from './coreTypes';
+import {
+  SYNC_CONFIG_GLOB,
+  configFilenameFromUri,
+  isNamedRoomSyncFilename,
+  isWorkspaceRootNamedConfig,
+  partitionConfigUris,
+} from 'pptx-tools-core/sync/configFilenames';
+import { log } from 'pptx-tools-core/log';
+import { toWorkspaceRoot } from './host/vscodeHost';
+
+type Listener = (topology: ResolvedTopology) => void;
+
+const CONFIG_GLOB = SYNC_CONFIG_GLOB;
+
+export class SyncManager implements vscode.Disposable {
+  private topology: ResolvedTopology = {
+    sources: [],
+    failed: [],
+    diagnostics: [],
+    conflicts: [],
+  };
+  private listeners = new Set<Listener>();
+  private watcher: vscode.FileSystemWatcher | undefined;
+  private folderListener: vscode.Disposable | undefined;
+  private reloading = false;
+  private reloadPending = false;
+
+  /** Create, start watching, and run the first load. */
+  static async create(context: vscode.ExtensionContext): Promise<SyncManager> {
+    const mgr = new SyncManager();
+    mgr.start(context);
+    await mgr.reload();
+    return mgr;
+  }
+
+  private start(context: vscode.ExtensionContext): void {
+    this.watcher = vscode.workspace.createFileSystemWatcher(CONFIG_GLOB);
+    const trigger = (uri: vscode.Uri, kind: string): void => {
+      log(`sync: ${kind} ${uri.toString()} — scheduling topology reload`);
+      void this.reload();
+    };
+    this.watcher.onDidCreate((u) => trigger(u, 'config created'));
+    this.watcher.onDidChange((u) => trigger(u, 'config changed'));
+    this.watcher.onDidDelete((u) => trigger(u, 'config deleted'));
+
+    this.folderListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      log('sync: workspace folders changed — scheduling topology reload');
+      void this.reload();
+    });
+
+    context.subscriptions.push(this);
+  }
+
+  /** Coalescing reload. If a reload is already in flight, mark pending and exit. */
+  async reload(): Promise<void> {
+    if (this.reloading) {
+      this.reloadPending = true;
+      return;
+    }
+    this.reloading = true;
+    try {
+      do {
+        this.reloadPending = false;
+        await this.doReload();
+      } while (this.reloadPending);
+    } finally {
+      this.reloading = false;
+    }
+  }
+
+  private async doReload(): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      this.topology = { sources: [], failed: [], diagnostics: [], conflicts: [] };
+      log('sync: no workspace folders — topology is empty');
+      this.emit();
+      return;
+    }
+
+    // Find every recognised source-config file. `findFiles` respects the
+    // user's files.exclude settings but ignores .gitignore by default —
+    // fine for our purposes. The glob honours `.sync.jsonc`, `.roomSync`,
+    // and named `<dest>.roomSync` (M3). Named variants are workspace-root
+    // only; the post-discovery filter below drops nested ones with a log
+    // line so a stray file deep in the tree doesn't silently become a
+    // ghost source.
+    const allConfigUris = await vscode.workspace.findFiles(CONFIG_GLOB);
+    const configUris: vscode.Uri[] = [];
+    for (const u of allConfigUris) {
+      const filename = configFilenameFromUri(u);
+      if (isNamedRoomSyncFilename(filename)) {
+        const owner = workspaceFolderOf(u, folders);
+        if (!owner || !isWorkspaceRootNamedConfig(u.path, owner.uri.path)) {
+          log(
+            `sync: ignoring named .roomSync outside a workspace folder root: ` +
+              u.toString() +
+              ` (M3 logical-destination handles only apply at the workspace root)`,
+          );
+          continue;
+        }
+      }
+      configUris.push(u);
+    }
+    const { keep, conflicts: rawConflicts } = partitionConfigUris(configUris);
+    // Marshal the pure-helper output into vscode.Uri-shaped conflict
+    // records that the rest of the extension consumes.
+    const conflicts: SyncConfigConflict[] = rawConflicts.map((c) => ({
+      sourceFolderUri: c.roomSync.with({ path: c.parentPath }),
+      legacyUri: c.legacy,
+      roomSyncUri: c.roomSync,
+    }));
+    const loads: SourceLoad[] = [];
+    for (const configUri of keep) {
+      const owner = workspaceFolderOf(configUri, folders);
+      if (!owner) {
+        // Shouldn't happen — findFiles searches within workspace folders.
+        // Guard anyway so an oddly-scoped result doesn't crash the load.
+        log(`sync: ignoring config outside any workspace folder: ${configUri.toString()}`);
+        continue;
+      }
+      loads.push(await loadSyncConfig(configUri, owner.uri));
+    }
+
+    this.topology = resolveTopology(loads, folders.map(toWorkspaceRoot));
+    this.topology.conflicts = conflicts;
+    log(
+      `sync: topology resolved — ${this.topology.sources.length} source(s), ` +
+        `${this.topology.failed.length} failed, ` +
+        `${this.topology.diagnostics.length} diagnostic(s), ` +
+        `${conflicts.length} config conflict(s)`,
+    );
+    for (const d of this.topology.diagnostics) {
+      log(`sync: [${d.severity}] ${d.message}`);
+    }
+    for (const c of conflicts) {
+      log(
+        `sync: [conflict] ${displayFolder(c.sourceFolderUri)} contains both ` +
+          `.sync.jsonc and .roomSync — using .roomSync; ` +
+          `run "Folder Sync: Resolve Config Conflict" to fix`,
+      );
+    }
+    this.emit();
+  }
+
+  getTopology(): ResolvedTopology {
+    return this.topology;
+  }
+
+  dumpTopology(): string {
+    return formatTopology(this.topology);
+  }
+
+  /** Subscribe to topology changes. Returns a disposable. */
+  onDidChange(listener: Listener): vscode.Disposable {
+    this.listeners.add(listener);
+    // Fire once immediately so subscribers can render initial state.
+    listener(this.topology);
+    return new vscode.Disposable(() => this.listeners.delete(listener));
+  }
+
+  private emit(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(this.topology);
+      } catch (err) {
+        log(`sync: listener threw — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  dispose(): void {
+    this.watcher?.dispose();
+    this.folderListener?.dispose();
+    this.listeners.clear();
+  }
+}
+
+function displayFolder(uri: vscode.Uri): string {
+  const rel = vscode.workspace.asRelativePath(uri, false);
+  return rel || uri.toString();
+}
+
+function workspaceFolderOf(
+  uri: vscode.Uri,
+  folders: readonly vscode.WorkspaceFolder[],
+): vscode.WorkspaceFolder | undefined {
+  // A config belongs to the workspace folder whose URI is a prefix of its URI.
+  // Compare on `toString()` of the folder URI with a trailing slash to avoid
+  // false matches between e.g. /work/foo and /work/foobar.
+  const target = uri.toString();
+  let best: vscode.WorkspaceFolder | undefined;
+  let bestLen = -1;
+  for (const folder of folders) {
+    const prefix = folder.uri.toString().replace(/\/+$/, '') + '/';
+    if (target.startsWith(prefix) && prefix.length > bestLen) {
+      best = folder;
+      bestLen = prefix.length;
+    }
+  }
+  return best;
+}
