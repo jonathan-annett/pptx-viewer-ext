@@ -28,10 +28,32 @@ export interface BindingPanelViewModel {
 
 // ───── Top-level renderer ────────────────────────────────────────────────
 
+/** Render options. `host:'dom'` returns a script-free, CSP-free fragment for a
+ *  single-document host (the PWA) to splice into a shadow root — mirroring the
+ *  `host:'dom'` mode the other view builders grew for the PWA. The default
+ *  `'webview'` mode is unchanged (full document + nonce'd init JSON + script). */
+export interface BindingPanelRenderOptions {
+  host?: 'webview' | 'dom';
+}
+
 export function renderBindingPanelHtml(
   vm: BindingPanelViewModel,
   nonce: string,
+  opts?: BindingPanelRenderOptions,
 ): string {
+  if (opts?.host === 'dom') {
+    // Script-free fragment. Same `#root` + `#binding-init` JSON node + ids so
+    // pageCss() styles it identically and the PWA twin reads the init payload
+    // and re-wires the dropdown/save interactions as direct DOM.
+    const initJsonDom = escapeForScript(JSON.stringify({
+      templatePath: vm.templatePath,
+      inspection: vm.inspection,
+      existing: vm.existing ?? null,
+    }));
+    return `<style>${pageCss()}</style>
+<main id="root">${renderBody(vm)}</main>
+<script id="binding-init" type="application/json">${initJsonDom}</script>`;
+  }
   const initJson = escapeForScript(JSON.stringify({
     templatePath: vm.templatePath,
     inspection: vm.inspection,

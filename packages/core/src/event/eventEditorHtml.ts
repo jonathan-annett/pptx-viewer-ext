@@ -1,9 +1,14 @@
-// Pure HTML renderer for the `.eventSchedule` custom editor.
+// Pure HTML renderer for the `.eventSchedule` editor.
 //
 // Mirrors the structure used by the sync feature's pure renderers
 // (configEditorHtml, adminEditorHtml, manifestEditorHtml): take a fully-
-// resolved view model, return a string, never import vscode. The webview
-// posts typed action messages back to the wired layer in eventEditor.ts.
+// resolved view model, return a string, never import vscode.
+//
+// Two hosts consume this: the VS Code custom editor (eventEditor.ts) renders
+// the default `'webview'` document (CSP + nonce'd inline script that posts
+// typed action messages back to the wired layer); the PWA renders the
+// `host:'dom'` script-free fragment into a shadow root and re-wires the
+// interactions as direct DOM (pptx-distro-kit src/views/eventEditor.ts).
 //
 // Sections:
 //   - Parse-error banner (when present)
@@ -14,10 +19,9 @@
 //   - Vacancies (read-only derived list)
 //   - Tools — Regenerate from config (visible only on placeholder files)
 //
-// The webview state lives entirely in the DOM; the extension re-renders
-// the full body on every docChanged message. No client-side framework.
+// The view state lives entirely in the DOM; the host re-renders the full body
+// on every mutation. No client-side framework.
 
-import type { EventEditorViewModel } from './eventEditor';
 import type {
   EventConfig,
   EventRoom,
@@ -25,19 +29,54 @@ import type {
   EventSession,
   EventSpeaker,
   EventVacancy,
-} from 'pptx-tools-core/event/schedule';
+} from './schedule';
 import {
   displayTitleForSession,
   eligibleSpeakersForSession,
   resolveLayout,
   timeslotsForDayResolved,
-} from 'pptx-tools-core/event/scheduleData';
+} from './scheduleData';
+
+/**
+ * Fully-resolved view model for the event editor. Pure data — no vscode types.
+ * Both hosts build it: the VS Code custom editor (eventEditor.ts) and the PWA
+ * shadow-root view (pptx-distro-kit src/views/eventEditor.ts).
+ */
+export interface EventEditorViewModel {
+  schedule: EventSchedule;
+  parseErrors: string[];
+  /** True when the document text is empty (whitespace-only). */
+  isEmpty: boolean;
+  /**
+   * True when the file is safe to overwrite via "Generate sample schedule" —
+   * either the file is empty, its sha256 is in the active placeholder registry,
+   * or it's structurally empty. Drives that button's visibility.
+   */
+  isPlaceholder: boolean;
+}
+
+/** Render options. `host:'dom'` returns a script-free, CSP-free fragment for a
+ *  single-document host (the PWA) to splice into a shadow root — mirroring the
+ *  `host:'dom'` mode `webview.ts` / `searchPanelHtml.ts` grew for the PWA. The
+ *  default `'webview'` mode is unchanged (full document + nonce'd script). */
+export interface EventEditorRenderOptions {
+  host?: 'webview' | 'dom';
+}
 
 export function renderEventEditorHtml(
   vm: EventEditorViewModel,
   nonce: string,
+  opts?: EventEditorRenderOptions,
 ): string {
   const css = pageCss();
+  if (opts?.host === 'dom') {
+    // Script-free fragment. Same `#root` element + ids/classes as the webview
+    // body so pageCss() styles it identically and the PWA twin can re-wire the
+    // interactions (the inline script's `acquireVsCodeApi` bridge has no
+    // analogue in a single-document host).
+    return `<style>${css}</style>
+<main id="root">${renderBody(vm)}</main>`;
+  }
   return `<!doctype html>
 <html>
 <head>

@@ -54,7 +54,7 @@ import {
   setTitleSlidesBinding,
   swapSessionsInRoom,
 } from 'pptx-tools-core/event/scheduleData';
-import { renderBody, renderEventEditorHtml } from './eventEditorHtml';
+import { renderBody, renderEventEditorHtml, type EventEditorViewModel } from 'pptx-tools-core/event/eventEditorHtml';
 import type { EventConfig, EventSchedule, SessionKind, TitleSlidesBinding } from 'pptx-tools-core/event/schedule';
 import { planEventFolders } from 'pptx-tools-core/event/eventFolders';
 import { openBindingPanel } from './titleSlides/bindingUi';
@@ -687,18 +687,7 @@ async function buildViewModel(document: vscode.TextDocument): Promise<EventEdito
   };
 }
 
-export interface EventEditorViewModel {
-  schedule: EventSchedule;
-  parseErrors: string[];
-  /** True when the document text is empty (whitespace-only). */
-  isEmpty: boolean;
-  /**
-   * True when the file is safe to overwrite via Regenerate — either the
-   * file is empty, or its sha256 is in the active placeholder registry.
-   * Drives the Regenerate button's visibility.
-   */
-  isPlaceholder: boolean;
-}
+export type { EventEditorViewModel } from 'pptx-tools-core/event/eventEditorHtml';
 
 type WebviewMessage =
   | { type: 'setEventName'; name: string }
