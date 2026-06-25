@@ -333,8 +333,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     const indexer = startSearchIndexer({ engine, store, manager });
     context.subscriptions.push(indexer);
-    // Explorer badge for placeholder stubs (bubbles up through folders).
-    context.subscriptions.push(registerPlaceholderDecorations(engine, indexer));
     if (store) {
       context.subscriptions.push({ dispose: () => store.close() });
     }
@@ -353,6 +351,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `search-index: init failed — ${err instanceof Error ? err.message : String(err)} (search disabled this session)`,
     );
   }
+
+  // Explorer placeholder badges — independent of the search index (its own
+  // crawler), so it runs even when the search IDB is unavailable.
+  context.subscriptions.push(registerPlaceholderDecorations());
 
   // M3 — auto-open the canonical manifest in operator mode. Fire-and-
   // forget: the helper checks operator-mode + canonical-manifest
