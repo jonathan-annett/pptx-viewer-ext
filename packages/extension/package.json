@@ -27,6 +27,18 @@
     }
   },
   "contributes": {
+    "colors": [
+      {
+        "id": "pptxSync.placeholderResourceForeground",
+        "description": "Foreground colour for placeholder (empty/stub) decks in the Explorer.",
+        "defaults": {
+          "dark": "#cca700",
+          "light": "#bb8800",
+          "highContrast": "#ffcc00",
+          "highContrastLight": "#9a7000"
+        }
+      }
+    ],
     "customEditors": [
       {
         "viewType": "pptxViewer.viewer",

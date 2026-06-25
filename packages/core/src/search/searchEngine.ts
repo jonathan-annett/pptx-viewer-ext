@@ -1,22 +1,32 @@
 // In-memory search engine.
 //
-// Holds the full projection set in three coordinated maps:
-//   - sha → SearchProjection   (the content index; one entry per unique
-//                               content, even if many URIs reference it)
-//   - uri → sha                (reverse map: which sha does this URI's
-//                               bytes hash to right now)
-//   - sha → Set<uri>           (forward map: which URIs reference this
-//                               sha; used to dedupe hits and to decide
-//                               when a projection can be dropped on
-//                               removal)
+// Holds the full projection set in three coordinated maps, keyed by an
+// internal "index key" (see keyFor):
+//   - key → SearchProjection   (the content index; one entry per unique
+//                               key, even if many URIs reference it)
+//   - uri → key                (reverse map: which key does this URI map to)
+//   - key → Set<uri>           (forward map: which URIs reference this key;
+//                               used to dedupe hits and to decide when a
+//                               projection can be dropped on removal)
+//
+// The index key is normally the content sha256 — so identical content at
+// many paths dedupes to ONE hit with many URIs. The EXCEPTION is
+// placeholder files (zero-byte stubs and any registered placeholder
+// hashes): these are byte-identical by design but their meaningful
+// identity is their FILENAME, not their content. Deduping them by sha
+// would collapse every placeholder into one entry and lose all but one
+// filename. So a placeholder is keyed per-URI (`sha\0uri`) — each keeps
+// its own projection + filename and surfaces as its own hit. The active
+// placeholder sha-set is injected via `setPlaceholderShas` (keeps this
+// module vscode/IDB-free; the wired indexer feeds it from the registry).
 //
 // The three maps move together. `addOrUpdate` is the only path that
-// *adds* a sha→projection entry; `removeUri` is the only path that
-// *drops* one (and only when the last URI referencing the sha is
+// *adds* a key→projection entry; `removeUri` is the only path that
+// *drops* one (and only when the last URI referencing the key is
 // removed). Both maintain the invariants:
-//   I1.  Every uri in uriToSha has a corresponding sha in projections.
-//   I2.  Every sha in shaToUris has a corresponding sha in projections.
-//   I3.  shaToUris.get(sha).has(uri)  iff  uriToSha.get(uri) === sha.
+//   I1.  Every uri in uriToKey has a corresponding key in projections.
+//   I2.  Every key in keyToUris has a corresponding key in projections.
+//   I3.  keyToUris.get(key).has(uri)  iff  uriToKey.get(uri) === key.
 //
 // Pure module — no vscode, no IDB, no I/O. tsx-testable. The wired
 // layer (indexer.ts) converts vscode.Uri → string before calling in.
@@ -49,9 +59,15 @@ export interface SearchEngine {
    *  the user clearing + re-indexing) and the existing in-memory state
    *  is discarded. */
   load(projections: SearchProjection[]): void;
+  /** Set the active placeholder sha-set. Files whose content sha is in
+   *  this set are indexed per-URI (not content-deduped) so each keeps its
+   *  own filename. Injected by the wired indexer from the placeholder
+   *  registry; re-callable when the registry changes (the indexer re-walks
+   *  to re-key affected files). Defaults to empty (everything deduped). */
+  setPlaceholderShas(shas: ReadonlySet<string>): void;
   /** Upsert a projection for `uri`. If `uri` previously mapped to a
-   *  different sha, the old sha's URI set drops `uri` and — if that was
-   *  the last URI for the old sha — the old projection is dropped too. */
+   *  different key, the old key's URI set drops `uri` and — if that was
+   *  the last URI for the old key — the old projection is dropped too. */
   addOrUpdate(uri: string, projection: SearchProjection): void;
   /** Remove `uri` from the engine. When that was the last URI mapped to
    *  the underlying sha, the projection is dropped as well. */
@@ -110,38 +126,52 @@ export function parseQuery(raw: string, op: SearchOp = 'and'): SearchQuery {
 
 export function createSearchEngine(): SearchEngine {
   // Three coordinated maps — see invariants I1/I2/I3 in the module header.
+  // Keyed by the internal index key (sha for normal content, `sha\0uri`
+  // for placeholders), NOT the raw sha.
   const projections = new Map<string, SearchProjection>();
-  const uriToSha = new Map<string, string>();
-  const shaToUris = new Map<string, Set<string>>();
+  const uriToKey = new Map<string, string>();
+  const keyToUris = new Map<string, Set<string>>();
+  let placeholderShas: ReadonlySet<string> = new Set<string>();
 
-  function getOrCreateUriSet(sha: string): Set<string> {
-    let s = shaToUris.get(sha);
+  // The per-URI key separator. NUL never appears in a sha (hex) or a URI,
+  // so `sha\0uri` can't collide with a bare sha or another file's key.
+  const KEY_SEP = String.fromCharCode(0); // NUL — engine-internal
+
+  /** The index key for a (uri, sha) pair: per-URI for placeholders so each
+   *  keeps its own projection; the bare sha otherwise so identical real
+   *  content dedupes. */
+  function keyFor(uri: string, sha: string): string {
+    return placeholderShas.has(sha) ? `${sha}${KEY_SEP}${uri}` : sha;
+  }
+
+  function getOrCreateUriSet(key: string): Set<string> {
+    let s = keyToUris.get(key);
     if (!s) {
       s = new Set<string>();
-      shaToUris.set(sha, s);
+      keyToUris.set(key, s);
     }
     return s;
   }
 
-  function dropUriFromSha(uri: string, sha: string): void {
-    const set = shaToUris.get(sha);
+  function dropUriFromKey(uri: string, key: string): void {
+    const set = keyToUris.get(key);
     if (!set) return;
     set.delete(uri);
     if (set.size === 0) {
-      // Last URI for this sha went away — projection is no longer
+      // Last URI for this key went away — projection is no longer
       // referenced by anything in the engine, so drop it. This is the
       // "removal cascade" the M3 DoD calls out: the projection map only
       // shrinks here.
-      shaToUris.delete(sha);
-      projections.delete(sha);
+      keyToUris.delete(key);
+      projections.delete(key);
     }
   }
 
   return {
     load(initial) {
       projections.clear();
-      uriToSha.clear();
-      shaToUris.clear();
+      uriToKey.clear();
+      keyToUris.clear();
       // Loading from IDB doesn't tell us which URIs back each sha — the
       // engine learns those as the indexer hands them in via
       // `addOrUpdate`. Until then we keep the projection set seeded so
@@ -149,51 +179,85 @@ export function createSearchEngine(): SearchEngine {
       // hits will surface with an empty `uris[]` until the indexer
       // catches up. The indexer is expected to run on every activation,
       // so this transient state is short-lived.
+      //
+      // Placeholder projections can't be keyed per-URI here (no URIs yet),
+      // and the indexer re-walks on every activation and re-keys them via
+      // addOrUpdate — so we skip seeding placeholders to avoid a stale
+      // bare-sha entry that would surface as an empty-`uris[]` hit.
       for (const p of initial) {
         if (!p || !p.sha256) continue;
+        if (placeholderShas.has(p.sha256)) continue;
         projections.set(p.sha256, p);
       }
     },
 
+    setPlaceholderShas(shas) {
+      placeholderShas = new Set(shas);
+    },
+
     addOrUpdate(uri, projection) {
-      const newSha = projection.sha256;
-      const oldSha = uriToSha.get(uri);
-      if (oldSha && oldSha !== newSha) {
-        // URI's content changed — detach from the old sha (potentially
-        // dropping its projection if it was the last URI).
-        dropUriFromSha(uri, oldSha);
+      const newKey = keyFor(uri, projection.sha256);
+      const oldKey = uriToKey.get(uri);
+      if (oldKey && oldKey !== newKey) {
+        // URI's content (or placeholder-ness) changed — detach from the
+        // old key (potentially dropping its projection if it was the last
+        // URI).
+        dropUriFromKey(uri, oldKey);
+      }
+      // If this is a placeholder (composite key) clean up any stale
+      // bare-sha projection that `load()` may have seeded before the set
+      // was known, but only when no URIs reference it (a real deck sharing
+      // the sha would be keyed by sha and keep its URI set).
+      if (newKey !== projection.sha256 && !keyToUris.has(projection.sha256)) {
+        projections.delete(projection.sha256);
       }
       // Set/replace the projection. Replacing is intentional: a re-parse
       // with a tokeniser bump or a new author can land an updated
-      // projection for the same sha (unlikely but cheap to handle).
-      projections.set(newSha, projection);
-      uriToSha.set(uri, newSha);
-      getOrCreateUriSet(newSha).add(uri);
+      // projection for the same key (unlikely but cheap to handle).
+      projections.set(newKey, projection);
+      uriToKey.set(uri, newKey);
+      getOrCreateUriSet(newKey).add(uri);
     },
 
     removeUri(uri) {
-      const sha = uriToSha.get(uri);
-      if (!sha) return;
-      uriToSha.delete(uri);
-      dropUriFromSha(uri, sha);
+      const key = uriToKey.get(uri);
+      if (!key) return;
+      uriToKey.delete(uri);
+      dropUriFromKey(uri, key);
     },
 
     getProjection(sha256) {
-      return projections.get(sha256);
+      // Exact (non-placeholder) key first; else find any projection whose
+      // content sha matches (placeholders are keyed `sha\0uri`). Callers
+      // use this as "does ANY projection with this sha still exist?" — e.g.
+      // the indexer's IDB-record-retention check after a removeUri.
+      const direct = projections.get(sha256);
+      if (direct) return direct;
+      for (const p of projections.values()) {
+        if (p.sha256 === sha256) return p;
+      }
+      return undefined;
     },
 
     getUrisForSha(sha256) {
-      const set = shaToUris.get(sha256);
-      if (!set) return undefined;
-      return [...set];
+      // Union of URIs across every key carrying this content sha (one key
+      // for normal content; N per-URI keys for placeholders).
+      const out: string[] = [];
+      for (const [key, set] of keyToUris) {
+        if (key === sha256 || key.startsWith(`${sha256}${KEY_SEP}`)) {
+          for (const u of set) out.push(u);
+        }
+      }
+      return out.length > 0 ? out : undefined;
     },
 
     getShaForUri(uri) {
-      return uriToSha.get(uri);
+      const p = projections.get(uriToKey.get(uri) ?? '');
+      return p?.sha256;
     },
 
     getAllUris() {
-      return [...uriToSha.keys()];
+      return [...uriToKey.keys()];
     },
 
     search(rawQuery, op) {
@@ -205,10 +269,10 @@ export function createSearchEngine(): SearchEngine {
       void fold(rawQuery);
 
       const hits: SearchHit[] = [];
-      for (const projection of projections.values()) {
+      for (const [key, projection] of projections) {
         const { score, matchedFields } = scoreProjection(projection, query);
         if (score <= 0) continue;
-        const uriSet = shaToUris.get(projection.sha256);
+        const uriSet = keyToUris.get(key);
         // Sort URIs deterministically so two engines holding the same
         // state produce identical hit objects (test stability). Set
         // insertion order is otherwise stable but depends on the order
@@ -223,6 +287,7 @@ export function createSearchEngine(): SearchEngine {
           displayAuthor: projection.displayAuthor,
           score,
           matchedFields: matchedFields.slice() as SearchField[],
+          isPlaceholder: placeholderShas.has(projection.sha256),
         });
       }
 
@@ -241,7 +306,7 @@ export function createSearchEngine(): SearchEngine {
     },
 
     stats() {
-      return { projections: projections.size, uris: uriToSha.size };
+      return { projections: projections.size, uris: uriToKey.size };
     },
   };
 }

@@ -47,6 +47,7 @@ import {
 import { createSearchEngine } from 'pptx-tools-core/search/searchEngine';
 import { openSearchIndexStore } from 'pptx-tools-core/search/indexStore';
 import { startSearchIndexer } from './search/indexer';
+import { registerPlaceholderDecorations } from './search/placeholderDecorations';
 import { openSearchPanel } from './search/searchPanel';
 import { registerResetState } from './resetState';
 import {
@@ -359,6 +360,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `search-index: init failed — ${err instanceof Error ? err.message : String(err)} (search disabled this session)`,
     );
   }
+
+  // Explorer placeholder badges — independent of the search index (its own
+  // crawler), so it runs even when the search IDB is unavailable.
+  context.subscriptions.push(registerPlaceholderDecorations());
 
   // M3 — auto-open the canonical manifest in operator mode. Fire-and-
   // forget: the helper checks operator-mode + canonical-manifest

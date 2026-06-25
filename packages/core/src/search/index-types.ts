@@ -77,6 +77,12 @@ export interface SearchHit {
   displayAuthor: string;
   score: number;
   matchedFields: SearchField[];
+  /** True when this hit's content sha is in the active placeholder set
+   *  (zero-byte stubs + any registered placeholder hashes). Placeholder
+   *  files are indexed per-URI rather than deduped by content, so each
+   *  keeps its own filename; the panel marks them so they're
+   *  distinguishable from real decks. Absent/false for normal content. */
+  isPlaceholder?: boolean;
 }
 
 /** Combinator across query terms. Default 'and' (every term must hit

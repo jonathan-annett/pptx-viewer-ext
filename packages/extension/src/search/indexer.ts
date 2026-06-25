@@ -43,6 +43,10 @@ import {
 } from 'pptx-tools-core/sync/parseCache';
 import type { SyncManager } from '../sync/manager';
 import type { ResolvedTopology } from '../sync/coreTypes';
+import {
+  getActivePlaceholderSetSync,
+  onDidChangePlaceholderSet,
+} from '../sync/placeholderRegistry';
 import { vscodeFs } from '../sync/vscodeFs';
 import { log } from 'pptx-tools-core/log';
 import { fold } from 'pptx-tools-core/search/fold';
@@ -562,6 +566,17 @@ export function startSearchIndexer(
     updateScope(topology);
   });
 
+  // Placeholder set: files whose content sha is in this set are indexed
+  // per-URI (not content-deduped) so each keeps its own filename. Seed it
+  // now, and re-walk when the registry changes (admin edits to the snapshot
+  // placeholder list) so affected files get re-keyed.
+  opts.engine.setPlaceholderShas(getActivePlaceholderSetSync());
+  const placeholderSub = onDidChangePlaceholderSet((set) => {
+    if (disposed) return;
+    opts.engine.setPlaceholderShas(set);
+    void runFullPass();
+  });
+
   // FileSystemWatcher fires for every workspace folder, not just sources.
   // We filter inside the handlers via `isUnderScope`. The brace-glob
   // mirrors the findFiles pattern so create/change/delete events for both
@@ -654,6 +669,7 @@ export function startSearchIndexer(
       if (disposed) return;
       disposed = true;
       managerSub.dispose();
+      placeholderSub.dispose();
       onCreate.dispose();
       onChange.dispose();
       onDelete.dispose();

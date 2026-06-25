@@ -338,13 +338,42 @@ h1 {
   margin-bottom: 12px;
   padding: 6px 8px;
   border-radius: 4px;
+  /* Coloured left rail keys the group to its kind: accent for the top
+     workspace folder, muted for additional folders. Overridden per kind
+     below. */
+  border-left: 3px solid transparent;
 }
 
-.hit-group:nth-of-type(even) {
+/* Zebra only among the secondary folders, so it never competes with the
+   primary folder's accent treatment. */
+.hit-group.is-secondary:nth-of-type(even) {
   background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.07));
 }
 
+/* ── Top / workspace folder: accent-coded, prominent ───────────────────── */
+.hit-group.is-primary {
+  border-left-color: var(--vscode-textLink-foreground, #3794ff);
+  background: var(--vscode-editor-selectionHighlightBackground, rgba(55, 148, 255, 0.10));
+}
+.hit-group.is-primary .hit-group-header {
+  color: var(--vscode-textLink-foreground, #3794ff);
+  border-bottom-color: var(--vscode-textLink-foreground, #3794ff);
+}
+.hit-group.is-primary .hit-group-tag {
+  background: var(--vscode-textLink-foreground, #3794ff);
+  color: var(--vscode-editor-background, #1e1e1e);
+  border-color: transparent;
+}
+
+/* ── Additional folders: muted rail ────────────────────────────────────── */
+.hit-group.is-secondary {
+  border-left-color: var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+}
+
 .hit-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.85em;
   font-weight: 600;
   color: var(--vscode-descriptionForeground);
@@ -356,12 +385,33 @@ h1 {
   margin-bottom: 6px;
 }
 
+.hit-group-label {
+  /* The folder name itself — don't let a long path crowd the tag/count. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The definite kind tag ("workspace folder" / "other folder"). */
+.hit-group-tag {
+  flex: 0 0 auto;
+  font-size: 0.82em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.45));
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.9;
+}
+
 .hit-group-count {
+  flex: 0 0 auto;
+  margin-left: auto;
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
   opacity: 0.75;
-  margin-left: 6px;
 }
 
 .hit-list {
@@ -562,6 +612,26 @@ h1 {
      glyphs above the baseline rather than dropping below them. */
   position: relative;
   top: -1px;
+}
+
+.placeholder-badge {
+  font-size: 0.72em;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  opacity: 0.85;
+  position: relative;
+  top: -1px;
+}
+/* Placeholder rows read a touch dimmer so real decks stand out in a list
+   that mixes both (an event tree is mostly placeholders pre-handover). */
+.hit.placeholder .hit-filename-text {
+  opacity: 0.7;
 }
 
 .hit-meta {
@@ -904,11 +974,23 @@ function panelScript(): string {
   }
 
   function renderGroup(group, query, groupIndex, shaColors, shaCounts) {
+    // groupIndex 0 is the top/canonical workspace folder (same signal the
+    // update-priming uses); give it a distinct, clearly-labelled header so it
+    // reads apart from additional folders.
+    const isPrimary = groupIndex === 0;
     const section = document.createElement('section');
-    section.className = 'hit-group';
+    section.className = 'hit-group' + (isPrimary ? ' is-primary' : ' is-secondary');
     const header = document.createElement('h2');
     header.className = 'hit-group-header';
-    header.textContent = group.folderLabel || group.folderUri || '(unknown)';
+    const label = document.createElement('span');
+    label.className = 'hit-group-label';
+    label.textContent = group.folderLabel || group.folderUri || '(unknown)';
+    header.appendChild(label);
+    // Definite tag delineating the top workspace folder from the rest.
+    const tag = document.createElement('span');
+    tag.className = 'hit-group-tag';
+    tag.textContent = isPrimary ? 'workspace folder' : 'other folder';
+    header.appendChild(tag);
     const count = document.createElement('span');
     count.className = 'hit-group-count';
     count.textContent = group.hits.length + ' match' + (group.hits.length === 1 ? '' : 'es');
@@ -964,6 +1046,17 @@ function panelScript(): string {
       badge.title =
         'sha256 ' + sha + ' — appears in ' + n + ' result' + (n === 1 ? '' : 's');
       filename.appendChild(badge);
+    }
+    // Placeholder marker: this hit is a zero-byte / registered-placeholder
+    // stub, indexed by its filename. Tag it so it reads distinctly from a
+    // real deck (they carry no author / slide text to search anyway).
+    if (hit.isPlaceholder) {
+      row.classList.add('placeholder');
+      const ph = document.createElement('span');
+      ph.className = 'placeholder-badge';
+      ph.textContent = 'placeholder';
+      ph.title = 'Placeholder stub — no deck content yet; matched on filename';
+      filename.appendChild(ph);
     }
     row.appendChild(filename);
 
