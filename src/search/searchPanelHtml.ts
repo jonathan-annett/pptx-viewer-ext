@@ -502,6 +502,26 @@ h1 {
   top: -1px;
 }
 
+.placeholder-badge {
+  font-size: 0.72em;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  opacity: 0.85;
+  position: relative;
+  top: -1px;
+}
+/* Placeholder rows read a touch dimmer so real decks stand out in a list
+   that mixes both (an event tree is mostly placeholders pre-handover). */
+.hit.placeholder .hit-filename-text {
+  opacity: 0.7;
+}
+
 .hit-meta {
   font-size: 0.9em;
   color: var(--vscode-descriptionForeground);
@@ -902,6 +922,17 @@ function panelScript(): string {
       badge.title =
         'sha256 ' + sha + ' — appears in ' + n + ' result' + (n === 1 ? '' : 's');
       filename.appendChild(badge);
+    }
+    // Placeholder marker: this hit is a zero-byte / registered-placeholder
+    // stub, indexed by its filename. Tag it so it reads distinctly from a
+    // real deck (they carry no author / slide text to search anyway).
+    if (hit.isPlaceholder) {
+      row.classList.add('placeholder');
+      const ph = document.createElement('span');
+      ph.className = 'placeholder-badge';
+      ph.textContent = 'placeholder';
+      ph.title = 'Placeholder stub — no deck content yet; matched on filename';
+      filename.appendChild(ph);
     }
     row.appendChild(filename);
 

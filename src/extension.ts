@@ -44,6 +44,7 @@ import {
 import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
+import { registerPlaceholderDecorations } from './search/placeholderDecorations';
 import { openSearchPanel } from './search/searchPanel';
 import { registerResetState } from './resetState';
 import {
@@ -332,6 +333,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     const indexer = startSearchIndexer({ engine, store, manager });
     context.subscriptions.push(indexer);
+    // Explorer badge for placeholder stubs (bubbles up through folders).
+    context.subscriptions.push(registerPlaceholderDecorations(engine, indexer));
     if (store) {
       context.subscriptions.push({ dispose: () => store.close() });
     }
