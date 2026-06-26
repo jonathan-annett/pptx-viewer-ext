@@ -159,6 +159,15 @@ export function startSearchIndexer(
   let scope: SearchScope = { folderUris: [] };
   let disposed = false;
   let inFlight: Promise<void> | undefined;
+  // Folders flagged by a `.search-ignore` marker file — their entire subtree
+  // (the folder and everything below) is excluded from the index. Recomputed
+  // each full pass (see collectIgnoreDirs) and consulted by the file watcher
+  // so live create/change events under an ignored folder are dropped too.
+  // Each entry is a folder URI string WITH a trailing slash so a prefix match
+  // can't leak across siblings (`…/bar/` must not match `…/barbaz/`).
+  let ignoreDirs: string[] = [];
+  const isUnderIgnoredDir = (uriStr: string): boolean =>
+    ignoreDirs.some((d) => uriStr.startsWith(d));
   let queued = false;
   let firstPassReady: Promise<void>;
   let resolveFirstPass: () => void = () => {};
@@ -270,6 +279,45 @@ export function startSearchIndexer(
     }
   }
 
+  /**
+   * Scan every in-scope folder for `.search-ignore` marker files. The marker's
+   * mere existence flags its containing folder — and everything below it — as
+   * excluded from search; the file itself is never opened or read. Returns the
+   * containing-folder URIs, each with a trailing slash so prefix matching can't
+   * leak across siblings. Operators drop a `.search-ignore` into an event
+   * folder to hide cancelled/completed events without moving the files.
+   */
+  async function collectIgnoreDirs(folders: readonly string[]): Promise<string[]> {
+    const dirs = new Set<string>();
+    for (const folderUriStr of folders) {
+      if (disposed) return [...dirs];
+      const folder = (vscode.workspace.workspaceFolders ?? []).find(
+        (f) => f.uri.toString() === folderUriStr,
+      );
+      if (!folder) continue;
+      try {
+        const markers = await vscode.workspace.findFiles(
+          new vscode.RelativePattern(folder, '**/.search-ignore'),
+          // Pass null (not undefined) so the marker scan ignores the user's
+          // files.exclude/search.exclude — a control file must always be seen.
+          null,
+        );
+        for (const m of markers) {
+          let dir = vscode.Uri.joinPath(m, '..').toString();
+          if (!dir.endsWith('/')) dir += '/';
+          dirs.add(dir);
+        }
+      } catch (err) {
+        log(
+          `search-indexer: .search-ignore scan failed for ${folderUriStr} — ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    return [...dirs];
+  }
+
   async function doFullPass(): Promise<void> {
     if (disposed) return;
     const folders = scope.folderUris;
@@ -293,7 +341,7 @@ export function startSearchIndexer(
     // scope) and they can't be valid targets (the update flow only
     // writes PPTX), so we don't index them. Every other in-scope folder
     // walks both extensions.
-    const allUris: vscode.Uri[] = [];
+    let allUris: vscode.Uri[] = [];
     for (let i = 0; i < folders.length; i++) {
       if (disposed) return;
       const folderUriStr = folders[i];
@@ -317,6 +365,19 @@ export function startSearchIndexer(
           }`,
         );
       }
+    }
+
+    // Apply `.search-ignore` exclusions BEFORE the stale-sweep so that files
+    // which just became ignored (a marker was added under them) fall out of
+    // foundSet and get removed from the engine exactly as if they were deleted.
+    ignoreDirs = await collectIgnoreDirs(folders);
+    if (ignoreDirs.length > 0) {
+      const before = allUris.length;
+      allUris = allUris.filter((u) => !isUnderIgnoredDir(u.toString()));
+      log(
+        `search-indexer: .search-ignore — ${ignoreDirs.length} folder(s) flagged, ` +
+          `${before - allUris.length} file(s) excluded`,
+      );
     }
 
     const total = allUris.length;
@@ -604,6 +665,10 @@ export function startSearchIndexer(
     if (base.startsWith('~$')) return false;
     const uriStr = uri.toString();
     if (!isUnderScope(scope, uriStr)) return false;
+    // Drop live events for files under a `.search-ignore`-flagged folder.
+    // (ignoreDirs is refreshed each full pass and whenever a marker is added
+    // or removed — see the .search-ignore watcher below.)
+    if (isUnderIgnoredDir(uriStr)) return false;
     // First-folder rule: drop PDF events under the canonical folder.
     // Mirrors the per-folder glob choice in doFullPass.
     if (isPdfBasename(basenameOf(uriStr)) && isUnderFirstScopeFolder(scope, uriStr)) {
@@ -647,6 +712,21 @@ export function startSearchIndexer(
       );
     });
   });
+
+  // A `.search-ignore` marker appearing or disappearing changes which files
+  // belong in the index, but the pptx/pdf watcher above never sees it (wrong
+  // glob). Watch the markers directly and kick a full pass — it recomputes
+  // ignoreDirs, the stale-sweep drops any now-ignored files, and an un-ignore
+  // re-adds the files the folder brought back.
+  const ignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.search-ignore');
+  const onIgnoreChanged = (uri: vscode.Uri): void => {
+    if (disposed) return;
+    if (!isUnderScope(scope, uri.toString())) return;
+    log(`search-indexer: .search-ignore changed (${uri.toString()}) — re-walking`);
+    void runFullPass();
+  };
+  const onIgnoreCreate = ignoreWatcher.onDidCreate(onIgnoreChanged);
+  const onIgnoreDelete = ignoreWatcher.onDidDelete(onIgnoreChanged);
 
   // If the initial onDidChange already kicked a pass off, runFullPass is
   // either running or queued — we just await it. If scope was empty (no
@@ -695,6 +775,9 @@ export function startSearchIndexer(
       onChange.dispose();
       onDelete.dispose();
       watcher.dispose();
+      onIgnoreCreate.dispose();
+      onIgnoreDelete.dispose();
+      ignoreWatcher.dispose();
       progressListeners.clear();
     },
   };
