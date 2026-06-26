@@ -28,10 +28,21 @@ export interface SearchUpdateModalInput {
   targetFolderLabel: string;
   /** Display label for the candidate's containing folder ("Dropbox-In", etc.). */
   candidateFolderLabel: string;
+  /**
+   * Whether to offer the "Update & remove source" button. Gated on an archive
+   * folder being configured (the removed source is copied there first) — when
+   * no archive is set the button is omitted so a remove can never silently
+   * lose the source file.
+   */
+  showRemoveOption?: boolean;
 }
 
 export function renderSearchUpdateModalHtml(input: SearchUpdateModalInput): string {
   const { target, candidate, targetFolderLabel, candidateFolderLabel } = input;
+  const removeBtn = input.showRemoveOption
+    ? `<button type="button" class="action-btn action-btn-secondary" id="search-update-remove-btn" title="Copy the incoming file to the archive folder, overwrite the canonical file with it, then delete the incoming file from its source folder.">Update &amp; remove source</button>
+    `
+    : '';
   return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="search-update-title">
   <h2 id="search-update-title" class="modal-title">Update canonical file?</h2>
   <p class="modal-sub">Replace the file on the left with the file on the right.</p>
@@ -48,8 +59,7 @@ export function renderSearchUpdateModalHtml(input: SearchUpdateModalInput): stri
   <div class="modal-actions">
     <span class="modal-actions-spacer"></span>
     <button type="button" class="action-btn action-btn-secondary" id="search-update-cancel-btn">Cancel</button>
-    <button type="button" class="action-btn action-btn-secondary" id="search-update-remove-btn" title="Overwrite the canonical file with the incoming file, then delete the incoming file from its folder.">Update &amp; remove source</button>
-    <button type="button" class="action-btn" id="search-update-confirm-btn">Update file</button>
+    ${removeBtn}<button type="button" class="action-btn" id="search-update-confirm-btn">Update file</button>
   </div>
 </div>`;
 }

@@ -29,7 +29,9 @@ import {
   renderSearchUpdateModalHtml,
   renderSearchUpdateIdenticalModalHtml,
 } from './updateModalHtml';
+import { disambiguateFileName } from './archiveName';
 import { getParseCacheSingleton, parsePptxCached } from '../sync/parseCache';
+import { getWorkspaceArchiveFolderUri } from '../sync/snapshotStore';
 import { requestPdfImportIntoViewer } from '../provider';
 
 export interface OpenSearchPanelDeps {
@@ -200,6 +202,12 @@ interface PendingUpdate {
   candidateSha: string;
   candidateFileName: string;
   targetFileName: string;
+  /**
+   * Archive folder resolved at modal-build time, or undefined when none is
+   * configured. When set, the update-remove path copies the source here before
+   * deleting it; when undefined the modal never offers the remove button.
+   */
+  archiveFolder?: vscode.Uri;
 }
 
 async function handleUpdateFile(
@@ -345,11 +353,16 @@ async function handleUpdateFile(
     return null;
   }
 
+  // Resolve the configured archive folder. The "Update & remove source" button
+  // is only offered when one is set — a remove must always archive first, so a
+  // removed deck can never be silently lost.
+  const archiveFolder = await getWorkspaceArchiveFolderUri();
   const html = renderSearchUpdateModalHtml({
     target: targetParse.result,
     candidate: candidateParse.result,
     targetFolderLabel,
     candidateFolderLabel,
+    showRemoveOption: !!archiveFolder,
   });
   void panel.webview.postMessage({ type: 'updateModal', html });
   log(
@@ -365,6 +378,7 @@ async function handleUpdateFile(
     candidateSha: candidateParse.result.sha256,
     candidateFileName,
     targetFileName,
+    archiveFolder,
   };
 }
 
@@ -467,6 +481,33 @@ async function handleUpdateConfirm(
 
     let removed = false;
     if (mode === 'update-remove') {
+      // Archive the source BEFORE deleting it. If the archive copy fails we
+      // leave the source in place (never lose the only copy) — the target
+      // write already succeeded, so report a plain 'updated' and warn.
+      if (slot.archiveFolder) {
+        try {
+          const archived = await archiveSourceFile(
+            slot.archiveFolder,
+            slot.sourceUri,
+            slot.candidateBytes,
+          );
+          log(`pptxSearch: update — archived source → ${archived.toString()}`);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log(`pptxSearch: update — archive copy failed, NOT deleting source — ${message}`);
+          void vscode.window.showWarningMessage(
+            `Updated ${slot.targetFileName}, but could not archive the source — it was left in place: ${message}`,
+          );
+          void panel.webview.postMessage({
+            type: 'updateResult',
+            outcome: 'updated',
+            targetUri: slot.targetUri.toString(),
+            sourceUri: slot.sourceUri.toString(),
+          });
+          await openTargetInViewer(slot.targetUri);
+          return;
+        }
+      }
       try {
         await vscode.workspace.fs.delete(slot.sourceUri, { useTrash: false });
         removed = true;
@@ -539,6 +580,34 @@ function basenameFromUri(uri: vscode.Uri): string {
   } catch {
     return tail || uri.toString();
   }
+}
+
+/**
+ * Copy the removed source deck into the archive folder before it's deleted.
+ * A name clash keeps both files via a numbered suffix (never overwrite). The
+ * captured candidate bytes are written rather than re-reading the source, so
+ * the archived copy is exactly what the user saw/promoted. Returns the URI the
+ * archive copy was written to. Throws on any failure so the caller can abort
+ * the delete and leave the source in place.
+ */
+async function archiveSourceFile(
+  archiveFolder: vscode.Uri,
+  sourceUri: vscode.Uri,
+  sourceBytes: Uint8Array,
+): Promise<vscode.Uri> {
+  // Read the archive folder's current entries to disambiguate the name. If the
+  // folder is missing, create it and proceed with no taken names.
+  let taken = new Set<string>();
+  try {
+    const entries = await vscode.workspace.fs.readDirectory(archiveFolder);
+    taken = new Set(entries.map(([name]) => name));
+  } catch {
+    await vscode.workspace.fs.createDirectory(archiveFolder);
+  }
+  const destName = disambiguateFileName(basenameFromUri(sourceUri), taken);
+  const dest = vscode.Uri.joinPath(archiveFolder, destName);
+  await vscode.workspace.fs.writeFile(dest, sourceBytes);
+  return dest;
 }
 
 function longestScopePrefix(folderUris: readonly string[], fileUri: string): string | null {

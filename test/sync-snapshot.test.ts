@@ -41,6 +41,27 @@ test('marshal then parse round-trips the canonical snapshot', () => {
   assert.deepEqual(parsed, snapshot);
 });
 
+test('marshal then parse round-trips a snapshot with an archiveFolder', () => {
+  const snapshot: Snapshot = {
+    folders: [{ uri: 'file:///Speakers%20Prep', name: 'Speakers Prep' }],
+    settings: {},
+    placeholders: [],
+    archiveFolder: 'file:///Archive%20Bin',
+    capturedAt: '2026-05-19T03:13:45.955Z',
+  };
+  const text = marshalSnapshot(snapshot);
+  assert.match(text, /"archiveFolder"/);
+  const { snapshot: parsed, errors } = parseSnapshot(text);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(parsed, snapshot);
+  assert.equal(parsed.archiveFolder, 'file:///Archive%20Bin');
+});
+
+test('parse omits archiveFolder entirely when the field is absent', () => {
+  const { snapshot } = parseSnapshot('{ "folders": [], "settings": {}, "capturedAt": "x" }');
+  assert.ok(!('archiveFolder' in snapshot), 'absent archiveFolder must not appear as a key');
+});
+
 test('marshal includes the managed-by-extension header comment', () => {
   const text = marshalSnapshot(emptySnapshot());
   assert.match(text, /managed automatically/);
