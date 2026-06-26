@@ -71,9 +71,41 @@ interface State {
    * true` transition, never on `undefined → true`.
    */
   lastCanonicalManifestPresent: boolean | undefined;
+  /**
+   * Signature of the last emitted state (result + counts + canonical lastSync).
+   * A recompute whose signature matches the previous one is a no-op for every
+   * observer — the context key, the state event, and the log line all carry
+   * identical content — so we skip re-issuing them. During a sync the atomic
+   * manifest writes to each destination fire several create/change events that
+   * all recompute to the same `false`/operator state; this collapses that
+   * 4×-per-sync churn to a single emit.
+   */
+  lastSignature: string | undefined;
 }
 
 let current: State | undefined;
+
+// Debounce window for event-driven recomputes. The manifest watcher fires a
+// burst of create/change events for a single sync (atomic tmp+rename per
+// destination, ×N destinations); coalescing them into one trailing recompute
+// avoids re-running the full manifest scan (stat across every workspace
+// folder) once per event. The initial activation recompute stays immediate.
+const RECOMPUTE_DEBOUNCE_MS = 200;
+let recomputeTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Coalesce rapid recompute triggers. Each call restarts the timer, so a burst
+ * of watcher events settles into a single recompute that sees the final FS
+ * state. {@link recompute} additionally skips its outputs when the result is
+ * unchanged, so even non-coalesced identical recomputes stay silent.
+ */
+function scheduleRecompute(): void {
+  if (recomputeTimer !== undefined) clearTimeout(recomputeTimer);
+  recomputeTimer = setTimeout(() => {
+    recomputeTimer = undefined;
+    void recompute();
+  }, RECOMPUTE_DEBOUNCE_MS);
+}
 
 /**
  * State broadcast to subscribers (currently just the status bar). Contains
@@ -190,7 +222,6 @@ async function recompute(): Promise<void> {
     folders,
     current.manifestPresence,
   );
-  void vscode.commands.executeCommand('setContext', CONTEXT_KEY, result);
 
   // Read the canonical manifest when operator mode is active AND the
   // canonical folder (workspaceFolders[0]) carries a root manifest. Skipping
@@ -205,9 +236,29 @@ async function recompute(): Promise<void> {
     }
   }
 
+  // Skip the observable outputs (context key, state event, log) when nothing
+  // an observer can see has changed. The status bar / manifest editor render
+  // purely from this state, so an identical re-emit is a no-op for them; the
+  // signature includes the canonical manifest's lastSync so an operator-mode
+  // sync that rolls it forward still fires. The gated transitions below run
+  // unconditionally — their own guards already no-op when nothing changed.
+  const signature = [
+    result,
+    current.manager.getTopology().sources.length,
+    folders.length,
+    countTrue(current.manifestPresence),
+    canonicalManifest ? (canonicalManifest.lastSync ?? 'null') : 'none',
+  ].join('|');
+  const changed = signature !== current.lastSignature;
+  current.lastSignature = signature;
+
+  if (changed) {
+    void vscode.commands.executeCommand('setContext', CONTEXT_KEY, result);
+  }
+
   const state: DestinationOnlyState = { isDestinationOnly: result, canonicalManifest };
   current.lastState = state;
-  stateEmitter.fire(state);
+  if (changed) stateEmitter.fire(state);
 
   // M5 — canonical-manifest-arrival auto-open. Fires only on a true
   // false→true transition (the operator was running in a manifest-less
@@ -240,13 +291,15 @@ async function recompute(): Promise<void> {
     current.lastWroteFolderRestore = noSources;
   }
 
-  log(
-    `destination-only: setContext ${CONTEXT_KEY}=${result} ` +
-      `(sources=${current.manager.getTopology().sources.length}, ` +
-      `folders=${folders.length}, ` +
-      `manifestsPresent=${countTrue(current.manifestPresence)}, ` +
-      `canonicalManifest=${canonicalManifest ? `lastSync=${canonicalManifest.lastSync ?? 'null'}` : 'none'})`,
-  );
+  if (changed) {
+    log(
+      `destination-only: setContext ${CONTEXT_KEY}=${result} ` +
+        `(sources=${current.manager.getTopology().sources.length}, ` +
+        `folders=${folders.length}, ` +
+        `manifestsPresent=${countTrue(current.manifestPresence)}, ` +
+        `canonicalManifest=${canonicalManifest ? `lastSync=${canonicalManifest.lastSync ?? 'null'}` : 'none'})`,
+    );
+  }
 }
 
 async function writeOperatorRestoreCapture(
@@ -443,7 +496,7 @@ function handleManifestEvent(uri: vscode.Uri, kind: 'create' | 'delete'): void {
       if (kind === 'create') {
         current.manifestPresence.set(folder.uri.toString(), true);
       }
-      void recompute();
+      scheduleRecompute();
       return;
     }
   }
@@ -466,7 +519,7 @@ function handleManifestChange(uri: vscode.Uri): void {
     ? folders[0].uri.path.slice(0, -1)
     : folders[0].uri.path;
   if (parentPath === canonicalFolderPath) {
-    void recompute();
+    scheduleRecompute();
   }
 }
 
@@ -491,6 +544,7 @@ export function activateDestinationOnlyContextKey(
     context,
     lastWroteFolderRestore: undefined,
     lastCanonicalManifestPresent: undefined,
+    lastSignature: undefined,
   };
 
   const watcher = vscode.workspace.createFileSystemWatcher(MANIFEST_GLOB);
@@ -502,11 +556,11 @@ export function activateDestinationOnlyContextKey(
   watcher.onDidChange((u) => handleManifestChange(u));
 
   const foldersSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
-    void recompute();
+    scheduleRecompute();
   });
 
   const managerSub = manager.onDidChange(() => {
-    void recompute();
+    scheduleRecompute();
   });
 
   // Backup trigger — FSA-backed filesystems can skip onDidCreate when a
@@ -516,7 +570,7 @@ export function activateDestinationOnlyContextKey(
   // re-stats from scratch via scanAll() so the missed event is recovered.
   const docOpenSub = vscode.workspace.onDidOpenTextDocument((doc) => {
     if (pathEndsWithManifestFilename(doc.uri.path)) {
-      void recompute();
+      scheduleRecompute();
     }
   });
 
@@ -527,6 +581,10 @@ export function activateDestinationOnlyContextKey(
 
   const disposable: vscode.Disposable = {
     dispose(): void {
+      if (recomputeTimer !== undefined) {
+        clearTimeout(recomputeTimer);
+        recomputeTimer = undefined;
+      }
       watcher.dispose();
       foldersSub.dispose();
       managerSub.dispose();
