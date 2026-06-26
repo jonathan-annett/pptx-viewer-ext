@@ -21,6 +21,31 @@ import {
 } from './parseCache';
 import type { PlanWarning } from './plan';
 
+/**
+ * Cache-only validation: derive warnings for a file from a previously-cached
+ * parse result keyed by `sha256`, WITHOUT needing the file's bytes. Returns:
+ *   - `[]` for a non-pptx path (nothing to validate, no read needed),
+ *   - the warnings on a parse-cache/snapshot hit (no read needed),
+ *   - `undefined` on a miss — signalling the caller to read the bytes and call
+ *     {@link validatePptxBytes}.
+ *
+ * This is the read-skipping half of the sync plan walk: an unchanged source
+ * file (hash-cache hit → sha known without a read) whose parse result is also
+ * cached produces its warnings with zero file I/O. Only genuinely new/changed
+ * files (parse-cache miss) get read.
+ */
+export async function validatePptxBySha(
+  relPath: string,
+  sha256: string,
+  opts: { cache?: ParseResultCache; snapshot?: Map<string, CachedParseResult> },
+): Promise<PlanWarning[] | undefined> {
+  if (!isPptxPath(relPath)) return [];
+  if (!opts.snapshot && !opts.cache) return undefined;
+  const cached = await snapshotLookup(opts.snapshot, opts.cache, sha256);
+  if (!cached) return undefined;
+  return warningsFromCachedFlags(cached);
+}
+
 /** True for paths the pptx validator should run against. */
 export function isPptxPath(relPath: string): boolean {
   return /\.pptx$/i.test(relPath);

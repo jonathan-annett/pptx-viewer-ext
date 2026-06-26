@@ -46,10 +46,11 @@ import {
   type Scope,
   filterFilesToScope,
   filterManifestToScope,
+  inScope,
   relPathFromBase,
   scopeFromRelPath,
 } from './scopedPlan';
-import { isPptxPath, validatePptxBytes } from './validators';
+import { isPptxPath, validatePptxBytes, validatePptxBySha } from './validators';
 import { log } from '../log';
 
 export interface PlanForDestination {
@@ -273,11 +274,11 @@ async function planForSource(
       {
         exclude: sourceExclude,
         include: sourceInclude,
-        // Source walk validates each known file type from the same bytes used
-        // for hashing — one read per source file, validators see the same content
-        // we will (or won't) sync.
+        // Source walk validates each known file type. With the cache warm this
+        // is read-free (validatePptxBySha); only new/changed files are read.
         validate: true,
         aliases: compiledAliases,
+        scope,
       },
       cache,
       sourceStats,
@@ -352,6 +353,7 @@ async function planForSource(
         {
           exclude: destExclude,
           include: destInclude,
+          scope,
         },
         cache,
         destStats,
@@ -522,6 +524,16 @@ interface WalkAndHashOpts {
    * reused for every walked file.
    */
   aliases?: readonly CompiledAlias[];
+  /**
+   * Scope filter, applied to entries *before* any stat/hash/read. A scoped
+   * "Sync This Folder" walk would otherwise enumerate, stat and (on the
+   * source side) read every file in the source folder only to discard the
+   * out-of-scope ones afterwards. Pruning here turns a full-source walk into
+   * a walk of just the in-scope subtree. `{ kind: 'none' }` (or omitted)
+   * keeps the whole tree. Matched on the pre-alias source relpath, the same
+   * key {@link filterFilesToScope} uses, so the result set is identical.
+   */
+  scope?: Scope;
 }
 
 /** A walked entry, optionally with its source-rewrite provenance attached. */
@@ -573,31 +585,33 @@ async function walkAndHash(
   // Rewrite preserves URI (the file lives at its on-disk location); only the
   // relpath changes, and aliasOrigin carries the pre-rewrite path for the
   // plan-view tooltip.
-  const entries: WalkAlias[] = applyAliases(rawEntries, opts.aliases ?? []);
+  const aliased: WalkAlias[] = applyAliases(rawEntries, opts.aliases ?? []);
+  // Fix #2 (scope-pruned walk): drop out-of-scope entries before any
+  // stat/hash/read. A scoped "Sync This Folder" otherwise walks the whole
+  // source folder and discards the rest afterwards. Matched on the pre-alias
+  // source relpath — the same key `filterFilesToScope` uses — so the surviving
+  // set is identical, just reached without touching the excluded files.
+  const entries: WalkAlias[] =
+    opts.scope && opts.scope.kind !== 'none'
+      ? aliased.filter((e) => inScope(e.aliasOrigin?.sourceRelPath ?? e.relPath, opts.scope!))
+      : aliased;
   const out: FileInfo[] = [];
   const fs = vscodeFs();
   for (const e of entries) {
     try {
-      // Source walk needs bytes for the per-filetype validator pass; the
-      // destination walk doesn't, so passing needBytes=opts.validate gives
-      // the read-skip win on the destination side without sacrificing
-      // validation coverage on the source side.
+      // Fix #1 (skip the read on unchanged files): never force a byte read up
+      // front. hashFileAtUri with needBytes=false returns the sha for free on
+      // a hash-cache hit (no read); we only read bytes if validation actually
+      // misses the parse cache for that sha below. The validate path used to
+      // read EVERY source file every plan build — that read was 92–96% of
+      // plan-build time at 100% cache hit. Now an unchanged file (hash hit +
+      // parse hit) costs zero file I/O.
       //
-      // Even with needBytes=true, a cache hit still skips the sha256
-      // compute — that's a non-trivial saving on big decks (~73% of the
-      // parse cost on the 137MB sample per M5.2 timings).
-      const needBytes = !!opts.validate;
-      // Per-walk hit accounting: hashFileAtUri bumps the underlying cache's
-      // stats on lookup-tier hits but a snapshot hit bypasses lookup, so
-      // before/after delta on cache.stats wouldn't catch snapshot hits.
-      // Diff our own counter against the path the call returned: if we
-      // didn't have to read bytes (or we did, but the byte size matches
-      // the cache key shape), we know we got a sha out without re-hashing.
-      // Approximation: `bytes` undefined when needBytes=false and cache hit;
-      // any other shape means a fresh hash compute happened.
+      // Hit accounting: a snapshot hit bypasses the cache's lookup counter, so
+      // we combine the cache.stats() delta with an explicit snapshot compare.
       const beforeHits = cache?.stats().hits ?? 0;
       const result = await hashFileAtUri(fs, e.uri, cache, {
-        needBytes,
+        needBytes: false,
         snapshot: hashSnapshot,
       });
       const afterHits = cache?.stats().hits ?? 0;
@@ -608,7 +622,7 @@ async function walkAndHash(
       stats.walked++;
       if (wasHit) {
         stats.hits++;
-        if (!needBytes) stats.bytesSaved += result.size;
+        stats.bytesSaved += result.size;
       } else {
         stats.misses++;
       }
@@ -618,17 +632,18 @@ async function walkAndHash(
         sha256: result.sha256,
         ...(e.aliasOrigin ? { aliasOrigin: e.aliasOrigin } : {}),
       };
-      if (opts.validate && result.bytes) {
-        // Pass sha256 + parseCache + parseSnapshot through. The snapshot
-        // (when present) serves snapshot hits without an IDB round-trip;
-        // parseCache is the per-file fallback for snapshot misses.
-        const warnings = await runValidators(
-          e.relPath,
-          result.bytes,
-          result.sha256,
-          parseCache,
-          parseSnapshot,
-        );
+      if (opts.validate) {
+        // Cache-only validation first: derive warnings from the cached parse
+        // result for this sha without touching the bytes. `undefined` means a
+        // parse-cache miss (genuinely new/changed file) — only then do we read.
+        let warnings = await validatePptxBySha(e.relPath, result.sha256, {
+          cache: parseCache,
+          snapshot: parseSnapshot,
+        });
+        if (warnings === undefined) {
+          const bytes = result.bytes ?? (await fs.readFile(e.uri));
+          warnings = await runValidators(e.relPath, bytes, result.sha256, parseCache, parseSnapshot);
+        }
         if (warnings.length > 0) info.warnings = warnings;
       }
       out.push(info);

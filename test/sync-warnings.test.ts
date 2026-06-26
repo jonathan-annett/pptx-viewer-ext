@@ -10,7 +10,7 @@
 import { strict as assert } from 'node:assert';
 import { zipSync, strToU8 } from 'fflate';
 import { webcrypto } from 'node:crypto';
-import { isPptxPath, validatePptxBytes } from '../src/sync/validators';
+import { isPptxPath, validatePptxBytes, validatePptxBySha } from '../src/sync/validators';
 import { InMemoryParseCache } from '../src/sync/parseCache';
 import { sha256Hex } from '../src/sync/hash';
 
@@ -241,6 +241,56 @@ test('parse cache: no cache supplied → same behaviour as pre-Phase-C', async (
   });
   const warnings = await validatePptxBytes('clean.pptx', bytes);
   assert.deepEqual(warnings, []);
+});
+
+// ───── validatePptxBySha — cache-only (read-skipping) path ───────────────
+//
+// The planner uses this to derive warnings from the parse cache keyed by sha
+// WITHOUT reading the file's bytes. A hit means an unchanged source file
+// produces its warnings with zero file I/O — the read-skip that collapses the
+// source-walk cost. A miss returns undefined, signalling the caller to read.
+
+const KIOSK_PARTS = {
+  '[Content_Types].xml': TYPES_EMPTY,
+  'docProps/core.xml': core(),
+  'ppt/presentation.xml': presentation(),
+  'ppt/presProps.xml': presProps('<p:showPr><p:kiosk/></p:showPr>'),
+  'ppt/slides/slide1.xml': slide(),
+};
+
+test('validatePptxBySha: non-pptx path returns [] with no cache and no read', async () => {
+  assert.deepEqual(await validatePptxBySha('notes.txt', 'deadbeef', {}), []);
+});
+
+test('validatePptxBySha: no cache supplied returns undefined (caller must read)', async () => {
+  assert.equal(await validatePptxBySha('deck.pptx', 'deadbeef', {}), undefined);
+});
+
+test('validatePptxBySha: cache miss returns undefined', async () => {
+  const cache = new InMemoryParseCache();
+  assert.equal(await validatePptxBySha('deck.pptx', 'never-recorded', { cache }), undefined);
+});
+
+test('validatePptxBySha: warm cache yields warnings with no bytes (the read-skip win)', async () => {
+  const bytes = makePptx(KIOSK_PARTS);
+  const sha = await sha256Hex(bytes);
+  const cache = new InMemoryParseCache();
+  // Prime the cache (a prior plan build / viewer open recorded this sha).
+  await validatePptxBytes('kiosk.pptx', bytes, { sha256: sha, cache });
+  // A later walk has the sha (from the hash cache) but NOT the bytes.
+  const out = await validatePptxBySha('kiosk.pptx', sha, { cache });
+  assert.deepEqual(out?.map((w) => w.code), ['show-type']);
+  assert.equal(cache.stats().hits, 1, 'resolved from cache, no re-parse, no read');
+});
+
+test('validatePptxBySha: snapshot hit resolves without an IDB-tier lookup', async () => {
+  const bytes = makePptx(KIOSK_PARTS);
+  const sha = await sha256Hex(bytes);
+  const cache = new InMemoryParseCache();
+  await validatePptxBytes('kiosk.pptx', bytes, { sha256: sha, cache });
+  const snapshot = await cache.snapshot();
+  const out = await validatePptxBySha('kiosk.pptx', sha, { snapshot });
+  assert.deepEqual(out?.map((w) => w.code), ['show-type']);
 });
 
 // ───── runner ────────────────────────────────────────────────────────────
