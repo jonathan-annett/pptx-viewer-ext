@@ -184,7 +184,16 @@ export function parseSnapshot(text: string): ParseSnapshotResult {
   const capturedAt = readString(tree, 'capturedAt') ?? '';
 
   return {
-    snapshot: { folders, settings, placeholders, archiveFolder, capturedAt },
+    // Omit archiveFolder when unset (mirrors marshalSnapshot) so a snapshot
+    // without an archive round-trips to a key-for-key identical object rather
+    // than carrying an explicit `archiveFolder: undefined`.
+    snapshot: {
+      folders,
+      settings,
+      placeholders,
+      ...(archiveFolder ? { archiveFolder } : {}),
+      capturedAt,
+    },
     errors,
   };
 }
