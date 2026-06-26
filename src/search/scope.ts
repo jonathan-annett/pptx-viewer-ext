@@ -126,6 +126,14 @@ export function urisLeavingScope(
 export interface HitGroup {
   folderUri: string;
   folderLabel: string;
+  /**
+   * User-friendly folder name — the workspace-folder display name as renamed
+   * via the admin editor (what the VS Code treeview shows), supplied by the
+   * wired layer's `folderNames` map. Falls back to `folderLabel` (the URI
+   * basename) when no name is known. The panel shows this prominently with
+   * `folderLabel` as the small secondary path.
+   */
+  folderName?: string;
   hits: SearchHit[];
 }
 
@@ -161,6 +169,8 @@ export interface HitGroup {
 export function groupHitsByFolder(
   hits: readonly SearchHit[],
   scope: SearchScope,
+  folderNames?: ReadonlyMap<string, string>,
+  options?: { includeEmpty?: boolean },
 ): HitGroup[] {
   // Pre-compute trailing-slash variants once. Same rule as `isUnderScope`:
   // a URI matches a folder if it equals it or starts with `folder + '/'`.
@@ -178,6 +188,7 @@ export function groupHitsByFolder(
     buckets.set(folder, {
       folderUri: folder,
       folderLabel: folderLabelFor(folder),
+      folderName: folderNames?.get(folder) ?? folderLabelFor(folder),
       hits: [],
     });
   }
@@ -218,14 +229,19 @@ export function groupHitsByFolder(
       buckets.get(folderUri)!.hits.push({ ...hit, uris });
     }
     if (orphans.length > 0) {
-      if (!other) other = { folderUri: '', folderLabel: '(other)', hits: [] };
+      if (!other) other = { folderUri: '', folderLabel: '(other)', folderName: '(other)', hits: [] };
       other.hits.push({ ...hit, uris: orphans });
     }
   }
 
+  // By default empty buckets are dropped (no header for a folder with no
+  // hits). The search panel passes `includeEmpty` so every scope folder gets a
+  // header — that's what lets the user collapse a known-noisy folder
+  // persistently even on a search where it currently has no matches.
+  const includeEmpty = options?.includeEmpty ?? false;
   const out: HitGroup[] = [];
   for (const group of buckets.values()) {
-    if (group.hits.length > 0) out.push(group);
+    if (includeEmpty || group.hits.length > 0) out.push(group);
   }
   if (other) out.push(other);
   return out;

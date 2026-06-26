@@ -324,9 +324,19 @@ h1 {
 }
 
 .hit-group-label {
-  /* The folder name itself — don't let a long path crowd the tag/count. */
+  /* The friendly folder name — don't let a long name crowd the tag/count. */
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Small secondary path (the URI basename) shown beside the friendly name when
+   the folder has been renamed, so the literal on-disk location stays visible. */
+.hit-group-path {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
   white-space: nowrap;
 }
 
@@ -350,6 +360,59 @@ h1 {
   text-transform: none;
   letter-spacing: 0;
   opacity: 0.75;
+}
+
+/* The whole folder header is a collapse toggle. */
+.hit-group-header {
+  cursor: pointer;
+  user-select: none;
+}
+.hit-group-header:hover {
+  color: var(--vscode-foreground);
+}
+.hit-group-header:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #007fd4);
+  outline-offset: 2px;
+}
+
+/* Disclosure triangle; rotates when the group is collapsed. */
+.hit-group-chevron {
+  flex: 0 0 auto;
+  width: 0.9em;
+  text-align: center;
+  opacity: 0.7;
+  transition: transform 120ms ease;
+}
+.hit-group.collapsed .hit-group-chevron {
+  transform: rotate(-90deg);
+}
+
+/* Collapsed: hide the rows entirely. */
+.hit-group.collapsed .hit-list {
+  display: none;
+}
+
+/* "N results hidden" pill — only shown while the group is collapsed (and only
+   rendered at all when the folder actually has hits to hide). It takes the
+   right-hand slot in place of the now-redundant match count. */
+.hit-group-hidden {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: none;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.9em;
+  padding: 1px 8px;
+  border-radius: 8px;
+  background: var(--vscode-badge-background, rgba(127, 127, 127, 0.3));
+  color: var(--vscode-badge-foreground, inherit);
+}
+.hit-group.collapsed .hit-group-hidden {
+  display: inline-block;
+}
+.hit-group.collapsed .hit-group-count {
+  display: none;
 }
 
 .hit-list {
@@ -581,6 +644,14 @@ h1 {
   align-items: center;
 }
 
+/* Author — the speaker name is the primary human-in-the-loop matching signal,
+   so make it pop: bold and full-strength foreground (bright on dark themes)
+   rather than the muted meta colour the rest of the row uses. */
+.hit-author {
+  font-weight: 700;
+  color: var(--vscode-foreground);
+}
+
 .hit-badges {
   display: inline-flex;
   gap: 4px;
@@ -653,6 +724,10 @@ function panelScript(): string {
 
   let latestQuery = '';
   let debounceHandle = null;
+  // Set when the user clicks Reindex; consumed by the next indexComplete so
+  // we re-run the term currently in the box (not just the last debounced
+  // query) once the freshly-walked index is ready.
+  let reindexRequested = false;
 
   // ── Multi-select state ────────────────────────────────────────────────
   //
@@ -684,6 +759,31 @@ function panelScript(): string {
   let currentGroups = [];
   let lastRenderedQuery = '';
 
+  // ── Per-folder collapse state ─────────────────────────────────────────
+  //
+  // collapsedFolders holds the folder keys (folderUri, or '(other)' for the
+  // synthetic orphan bucket) the user has collapsed. Collapsing hides a
+  // folder's rows behind a "N results hidden" badge so a folder prone to
+  // false positives can be tucked away. The state is PERSISTENT: it survives
+  // re-searches (renderGroup reads it on every render) and webview reloads
+  // (mirrored into vscode.getState/setState), so a folder stays collapsed
+  // until the user expands it again.
+  function loadCollapsed() {
+    try {
+      const st = vscode.getState();
+      if (st && Array.isArray(st.collapsedFolders)) return new Set(st.collapsedFolders);
+    } catch (_e) { /* no persisted state yet */ }
+    return new Set();
+  }
+  const collapsedFolders = loadCollapsed();
+  function persistCollapsed() {
+    try {
+      const st = vscode.getState() || {};
+      st.collapsedFolders = Array.from(collapsedFolders);
+      vscode.setState(st);
+    } catch (_e) { /* setState unavailable — in-memory state still works */ }
+  }
+
   // Palette for the hash-pairing badge. Pastel hues that work over both light
   // and dark themes; yellow + lime are deliberately omitted to avoid visual
   // collision with the .selected (yellow) and .selected.primed (lime) row
@@ -704,6 +804,19 @@ function panelScript(): string {
 
   function rowKey(hit) {
     return (hit && Array.isArray(hit.uris) && hit.uris[0]) || '';
+  }
+
+  // Decoded basename of a URI — the actual on-disk filename. Used so each
+  // folder group shows the file's real name in THAT folder, not the deduped
+  // index-time name (the same content can be saved under different names).
+  function basenameOf(uri) {
+    if (!uri) return '';
+    var s = String(uri);
+    var cut = s.search(/[?#]/);
+    if (cut >= 0) s = s.slice(0, cut);
+    if (s.endsWith('/')) s = s.slice(0, -1);
+    var seg = s.slice(s.lastIndexOf('/') + 1);
+    try { return decodeURIComponent(seg); } catch (_) { return seg; }
   }
 
   function currentOp() {
@@ -732,6 +845,7 @@ function panelScript(): string {
   });
 
   reindex.addEventListener('click', function () {
+    reindexRequested = true;
     vscode.postMessage({ type: 'reindex' });
   });
 
@@ -773,10 +887,15 @@ function panelScript(): string {
       updateFooter(msg);
     } else if (msg.type === 'indexComplete') {
       updateFooter(msg);
-      // If user has typed something already, re-run the search now that
-      // more files might be in the index.
-      if (latestQuery && latestQuery.trim() !== '') {
-        vscode.postMessage({ type: 'search', query: latestQuery, op: currentOp() });
+      // Re-run the active query now that the index may have grown. An explicit
+      // Reindex click refreshes whatever's in the box right now (covers a
+      // pending-debounce edit the user never let settle); passive passes
+      // (file-watcher) re-run only the last committed query.
+      const requested = reindexRequested;
+      reindexRequested = false;
+      const q = requested ? qInput.value : latestQuery;
+      if (q && q.trim() !== '') {
+        postSearch(q);
       }
     } else if (msg.type === 'emptyState') {
       // Used by the extension to push a custom empty-state message after a
@@ -896,8 +1015,13 @@ function panelScript(): string {
 
     const frag = document.createDocumentFragment();
     let groupIndex = 0;
+    // Render EVERY folder, empty ones included — the extension sends all scope
+    // folders (includeEmpty) so each has a persistent collapse toggle. Keeping
+    // empties in the loop also keeps groupIndex aligned with scope order, so
+    // groupIndex 0 is always the canonical workspace folder (the signal the
+    // update-priming relies on).
     for (const group of currentGroups) {
-      if (!group || !group.hits || !group.hits.length) {
+      if (!group) {
         groupIndex++;
         continue;
       }
@@ -916,30 +1040,93 @@ function panelScript(): string {
     // update-priming uses); give it a distinct, clearly-labelled header so it
     // reads apart from additional folders.
     const isPrimary = groupIndex === 0;
+    const hitCount = (group.hits || []).length;
+    // Key collapse state on the folder URI; the synthetic orphan bucket has an
+    // empty folderUri, so fall back to a stable sentinel.
+    const folderKey = group.folderUri || '(other)';
+    const collapsed = collapsedFolders.has(folderKey);
+
     const section = document.createElement('section');
-    section.className = 'hit-group' + (isPrimary ? ' is-primary' : ' is-secondary');
+    section.className =
+      'hit-group' + (isPrimary ? ' is-primary' : ' is-secondary') + (collapsed ? ' collapsed' : '');
+    section.dataset.folderKey = folderKey;
+
     const header = document.createElement('h2');
     header.className = 'hit-group-header';
+    // The whole header is the collapse toggle.
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.setAttribute('aria-expanded', String(!collapsed));
+    header.title = (collapsed ? 'Expand' : 'Collapse') + ' this folder';
+
+    const chevron = document.createElement('span');
+    chevron.className = 'hit-group-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '▾';
+    header.appendChild(chevron);
+
     const label = document.createElement('span');
     label.className = 'hit-group-label';
-    label.textContent = group.folderLabel || group.folderUri || '(unknown)';
+    // Friendly (renamed) workspace-folder name prominent; fall back to basename.
+    label.textContent = group.folderName || group.folderLabel || group.folderUri || '(unknown)';
     header.appendChild(label);
+    // Show the literal path basename in small font only when it differs from
+    // the friendly name (i.e. the folder was renamed) — no redundancy otherwise.
+    if (group.folderLabel && group.folderLabel !== (group.folderName || group.folderLabel)) {
+      const path = document.createElement('span');
+      path.className = 'hit-group-path';
+      path.textContent = group.folderLabel;
+      header.appendChild(path);
+    }
     // Definite tag delineating the top workspace folder from the rest.
     const tag = document.createElement('span');
     tag.className = 'hit-group-tag';
     tag.textContent = isPrimary ? 'workspace folder' : 'other folder';
     header.appendChild(tag);
+
+    // "N results hidden" pill — only meaningful when the folder actually has
+    // hits behind it; CSS reveals it only while the group is collapsed.
+    if (hitCount > 0) {
+      const hidden = document.createElement('span');
+      hidden.className = 'hit-group-hidden';
+      hidden.textContent = hitCount + ' result' + (hitCount === 1 ? '' : 's') + ' hidden';
+      header.appendChild(hidden);
+    }
+
     const count = document.createElement('span');
     count.className = 'hit-group-count';
-    count.textContent = group.hits.length + ' match' + (group.hits.length === 1 ? '' : 'es');
+    count.textContent =
+      hitCount === 0 ? 'no matches' : hitCount + ' match' + (hitCount === 1 ? '' : 'es');
     header.appendChild(count);
-    section.appendChild(header);
-    const list = document.createElement('div');
-    list.className = 'hit-list';
-    for (const hit of group.hits) {
-      list.appendChild(renderHit(hit, query, groupIndex, shaColors, shaCounts));
+
+    function toggleCollapse() {
+      const nowCollapsed = section.classList.toggle('collapsed');
+      if (nowCollapsed) collapsedFolders.add(folderKey);
+      else collapsedFolders.delete(folderKey);
+      header.setAttribute('aria-expanded', String(!nowCollapsed));
+      header.title = (nowCollapsed ? 'Expand' : 'Collapse') + ' this folder';
+      persistCollapsed();
     }
-    section.appendChild(list);
+    header.addEventListener('click', toggleCollapse);
+    header.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleCollapse();
+      }
+    });
+
+    section.appendChild(header);
+
+    // Rows always render (so collapse is a pure CSS hide and expanding is
+    // instant); an empty folder gets no list at all.
+    if (hitCount > 0) {
+      const list = document.createElement('div');
+      list.className = 'hit-list';
+      for (const hit of group.hits) {
+        list.appendChild(renderHit(hit, query, groupIndex, shaColors, shaCounts));
+      }
+      section.appendChild(list);
+    }
     return section;
   }
 
@@ -961,7 +1148,11 @@ function panelScript(): string {
     // Prefer the display-form field (URI-decoded, case preserved); fall
     // back to the folded match form if an older indexer record doesn't
     // carry one — schema-mismatch eviction should make that transient.
-    const displayName = hit.displayFilename || hit.filename || '(unknown)';
+    // Show the actual on-disk name for THIS folder (basename of the group's
+    // URI), not the deduped index-time name — the same content can be saved
+    // under different names in different folders. Fall back to the indexed
+    // name only when there's no URI to read a basename from.
+    const displayName = basenameOf(rowKey(hit)) || hit.displayFilename || hit.filename || '(unknown)';
     // Wrap the filename text in its own span so flex layout treats it as a
     // single inline item, with the hash badge floating beside it. Without
     // this wrapper, the highlight() fragment's individual text nodes and
