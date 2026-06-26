@@ -18,6 +18,7 @@ import type { AliasOrigin, FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree, type WalkEntry } from './walker';
 import { hashFileAtUri } from './hash';
+import { nowMs, fmtMs } from './timing';
 import {
   aliasesFromRecord,
   compileAliases,
@@ -265,6 +266,7 @@ async function planForSource(
 
   let sourceFiles: FileInfo[] = [];
   const sourceStats = freshStats();
+  const srcWalkStart = nowMs();
   try {
     sourceFiles = await walkAndHash(
       source.sourceFolderUri,
@@ -286,6 +288,14 @@ async function planForSource(
   } catch (err) {
     log(`sync: source walk failed for ${source.configUri.toString()} — ${errMsg(err)}`);
   }
+  const srcWalkMs = nowMs() - srcWalkStart;
+  // sync-timing: the source walk is paid once per source (before fanning out
+  // to destinations). walked/hits/misses make the cache hit-rate visible so a
+  // slow walk at 100% hit points at enumeration/stat cost, not hashing.
+  log(
+    `sync-timing: source-walk ${source.workspaceFolderName} — ${fmtMs(srcWalkMs)} ` +
+      `(${sourceStats.walked} file(s), ${sourceStats.hits} hit / ${sourceStats.misses} miss)`,
+  );
 
   // Surface alias-driven dest-relpath collisions to the Output Channel.
   // Logged once per source walk (the rewrite is paid once, before fanning
@@ -335,6 +345,7 @@ async function planForSource(
 
     let destFiles: FileInfo[] = [];
     const destStats = freshStats();
+    const destWalkStart = nowMs();
     try {
       destFiles = await walkAndHash(
         dest.destRootUri,
@@ -351,12 +362,15 @@ async function planForSource(
     } catch (err) {
       log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
     }
+    const destWalkMs = nowMs() - destWalkStart;
     const scopedDestFiles = filterFilesToScope(destFiles, scope);
 
     // The manifest lives at the destination workspace folder root, not at
     // the subpath. A single workspace-folder destination shares one manifest
     // even when multiple sources write into different subpaths under it.
+    const manifestStart = nowMs();
     const manifestResult = await readManifest(dest.workspaceFolderUri);
+    const manifestMs = nowMs() - manifestStart;
     if (manifestResult.kind === 'version-mismatch') {
       // Refuse to plan this destination — sync would overwrite an unknown
       // schema. Surface as a skipped row so the plan webview / Output
@@ -376,6 +390,7 @@ async function planForSource(
     const manifest = manifestResult.manifest;
     const scopedManifest = filterManifestToScope(manifest, source.workspaceFolderName, scope);
 
+    const classifyStart = nowMs();
     const items = classifyFiles(
       source.workspaceFolderName,
       scopedSourceFiles,
@@ -384,6 +399,16 @@ async function planForSource(
       placeholders,
     );
     const summary = summarisePlan(items);
+    const classifyMs = nowMs() - classifyStart;
+    // sync-timing: the destination walk is the per-destination multiplier — a
+    // source mirrored to N destinations pays it N times. Pairing it with the
+    // once-per-source srcWalk above (and manifest read + classify) shows where
+    // plan-build latency actually goes.
+    log(
+      `sync-timing: dest-walk ${dest.name}${dest.subpath ? `/${dest.subpath}` : ''} — ` +
+        `destWalk=${fmtMs(destWalkMs)} manifest=${fmtMs(manifestMs)} classify=${fmtMs(classifyMs)} ` +
+        `(${destStats.walked} file(s), ${destStats.hits} hit / ${destStats.misses} miss)`,
+    );
     // Diagnostics: merge the source-walk stats (paid once for this pair) with
     // this destination's walk stats. The destination walk is the multiplier;
     // surfacing it per-destination lets the user see where the wins land.

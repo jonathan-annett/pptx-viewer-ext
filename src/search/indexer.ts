@@ -581,8 +581,27 @@ export function startSearchIndexer(
   // We filter inside the handlers via `isUnderScope`. The brace-glob
   // mirrors the findFiles pattern so create/change/delete events for both
   // pptx and pdf files reach the indexer.
+  // A file mid-copy/update (the sync writing a deck, or an app saving over it)
+  // reads back as NotReadableError / not-found until the write settles, then
+  // fires another change event we DO process. Logging each transient miss just
+  // spams the channel — swallow them so only genuine, persistent failures
+  // surface. The file gets indexed on the next (successful) event.
+  const isTransientFsError = (err: unknown): boolean => {
+    const name = err instanceof Error ? err.name : '';
+    const msg = err instanceof Error ? err.message : String(err);
+    return (
+      name === 'NotReadableError' ||
+      /NotReadableError|EntryNotFound|FileNotFound|ENOENT|No such file|could not be read/i.test(msg)
+    );
+  };
   const watcher = vscode.workspace.createFileSystemWatcher('**/*.{pptx,pdf}');
   const acceptForWatcher = (uri: vscode.Uri): boolean => {
+    // Office owner/lock files (`~$Deck.pptx`) are transient siblings of an
+    // open deck — never real content. They fire create/change/delete churn
+    // and read failures, so drop them before anything else. `uri.path` is
+    // percent-decoded, so the `~$` prefix appears literally.
+    const base = uri.path.slice(uri.path.lastIndexOf('/') + 1);
+    if (base.startsWith('~$')) return false;
     const uriStr = uri.toString();
     if (!isUnderScope(scope, uriStr)) return false;
     // First-folder rule: drop PDF events under the canonical folder.
@@ -596,6 +615,7 @@ export function startSearchIndexer(
     if (disposed) return;
     if (!acceptForWatcher(uri)) return;
     void processUri(uri).catch((err) => {
+      if (isTransientFsError(err)) return;
       stats.errors++;
       log(
         `search-indexer: onDidCreate ${uri.toString()} — ${
@@ -608,6 +628,7 @@ export function startSearchIndexer(
     if (disposed) return;
     if (!acceptForWatcher(uri)) return;
     void processUri(uri).catch((err) => {
+      if (isTransientFsError(err)) return;
       stats.errors++;
       log(
         `search-indexer: onDidChange ${uri.toString()} — ${

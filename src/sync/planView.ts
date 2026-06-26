@@ -20,6 +20,7 @@ import {
 import { copyDestToSource } from './reverseFlow';
 import { vscodeFs } from './vscodeFs';
 import { sha256Hex } from './hash';
+import { nowMs, fmtMs } from './timing';
 import { getActivePlaceholderSet } from './placeholderRegistry';
 import { log } from '../log';
 
@@ -79,10 +80,15 @@ export async function openPlanPanel(
       : 'sync: openPlan invoked',
   );
   const buildPlans = async (): Promise<PlanForDestination[]> => {
+    const t0 = nowMs();
     const placeholders = await getActivePlaceholderSet();
-    return opts?.scope
+    const out = opts?.scope
       ? await buildScopedDryRunPlan(topology, { ...opts.scope, placeholders })
       : await buildDryRunPlan(topology, { placeholders });
+    // sync-timing: end-to-end plan build (placeholder set + walk/classify for
+    // every pair). The per-source/per-dest breakdown is logged by planner.ts.
+    log(`sync-timing: plan-build — total=${fmtMs(nowMs() - t0)} (${out.length} pair(s))`);
+    return out;
   };
 
   // `plans` is reassigned by `refresh()` after a reverse-flow copy mutates a

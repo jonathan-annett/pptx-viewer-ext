@@ -26,6 +26,7 @@ import {
 import type { RowDecision } from './decisions';
 import { manifestKey } from './manifest-types';
 import { sha256Hex } from './hash';
+import { nowMs, fmtMs } from './timing';
 import { getHashCacheSingleton } from './hashCache';
 import { vscodeFs } from './vscodeFs';
 import { sweepOrphanTmpFiles } from './orphanSweep';
@@ -152,6 +153,14 @@ export async function runSync(
     manifestVersionMismatches: [],
   };
 
+  // sync-timing accumulators (execute phase). Separates the actual file copy
+  // (executePlan) from the manifest read/write IO so a slow run points at the
+  // right culprit. The plan-build walk is timed separately in planner.ts.
+  const runStart = nowMs();
+  let manifestReadMs = 0;
+  let execMs = 0;
+  let manifestWriteMs = 0;
+
   // Group by destination workspace folder URI. A single manifest is shared
   // across all sources writing into the same workspace folder; reading and
   // writing it once per group keeps the I/O bounded.
@@ -229,7 +238,9 @@ export async function runSync(
   let progressDone = 0;
 
   for (const group of groups) {
+    const manifestReadStart = nowMs();
     const manifestResult = await readManifest(group.destWorkspaceFolderUri);
+    manifestReadMs += nowMs() - manifestReadStart;
     if (manifestResult.kind === 'version-mismatch') {
       // Refuse the whole group. Writing v1 over an unknown version would
       // clobber the user's prior tracking. The planner already surfaced the
@@ -266,6 +277,7 @@ export async function runSync(
       // checkboxes before the executor sees them.
       const items = includedItems(plan.items, pairIndex, excluded);
 
+      const execStart = nowMs();
       const result = await executePlan({
         sourceWorkspaceFolderName: plan.source.workspaceFolderName,
         sourceRootUri: plan.source.sourceFolderUri,
@@ -292,6 +304,7 @@ export async function runSync(
             }
           : undefined,
       });
+      execMs += nowMs() - execStart;
 
       for (const r of result.results) {
         if (r.status === 'ok') summary.ok++;
@@ -320,6 +333,7 @@ export async function runSync(
     // write fails, the in-memory mutations are lost — the user will see
     // the same plan next run. That's acceptable; manifests are recoverable
     // (the destination files are still there) but we surface the failure.
+    const manifestWriteStart = nowMs();
     try {
       await writeManifest(group.destWorkspaceFolderUri, manifest);
     } catch (err) {
@@ -327,7 +341,19 @@ export async function runSync(
       log(`sync: manifest write FAILED for ${group.destWorkspaceFolderUri.toString()} — ${message}`);
       summary.manifestWriteFailures.push(`${group.destWorkspaceFolderUri.toString()}: ${message}`);
     }
+    manifestWriteMs += nowMs() - manifestWriteStart;
   }
+
+  // sync-timing: execute phase. total is the whole runSync wall time; exec is
+  // the actual file copies (executePlan), the rest is manifest IO + the
+  // pre-run orphan-tmp sweep. Compare against the planner's plan-build timing
+  // to see whether a slow sync is the walk or the copy.
+  const totalMs = nowMs() - runStart;
+  log(
+    `sync-timing: execute — total=${fmtMs(totalMs)} ` +
+      `manifestRead=${fmtMs(manifestReadMs)} exec=${fmtMs(execMs)} manifestWrite=${fmtMs(manifestWriteMs)} ` +
+      `(${summary.ok} ok / ${summary.failed} failed across ${plans.length} pair(s))`,
+  );
 
   return summary;
 }
