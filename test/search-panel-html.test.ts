@@ -356,6 +356,34 @@ function test_script_reacts_to_scope_change(): void {
   console.log('  ok: panel script reacts to scope-changed-to-zero topology updates');
 }
 
+// ───── per-folder collapse ──────────────────────────────────────────────
+
+function test_collapse_css_defined(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  assert.match(html, /\.hit-group\.collapsed \.hit-list/, 'collapsed hides the hit list');
+  assert.match(html, /\.hit-group-chevron/, 'chevron disclosure element styled');
+  assert.match(html, /\.hit-group\.collapsed \.hit-group-hidden/, '"N hidden" pill shown when collapsed');
+  console.log('  ok: per-folder collapse CSS defined');
+}
+
+function test_script_wires_collapse(): void {
+  const html = renderSearchPanelHtml(
+    { indexedDone: 0, indexedTotal: 0, scopeFolderCount: 1 },
+    NONCE,
+  );
+  // Collapse state persists via getState/setState and toggles per folder key.
+  assert.match(html, /collapsedFolders/, 'collapse state set present');
+  assert.match(html, /vscode\.getState\(\)/, 'collapse state loaded from getState');
+  assert.match(html, /vscode\.setState\(/, 'collapse state persisted via setState');
+  assert.match(html, /classList\.toggle\('collapsed'\)/, 'header toggles the collapsed class');
+  assert.match(html, /results? hidden/, 'renderGroup emits a "results hidden" badge');
+  assert.match(html, /aria-expanded/, 'header exposes aria-expanded for the toggle');
+  console.log('  ok: panel script wires persistent per-folder collapse');
+}
+
 // ───── runner ────────────────────────────────────────────────────────────
 
 const tests: Array<[string, () => void]> = [
@@ -385,6 +413,8 @@ const tests: Array<[string, () => void]> = [
   ['script threads op field into search message', test_script_wires_op_field],
   ['script surfaces indexer error count', test_script_surfaces_error_count],
   ['script reacts to scope changing to zero', test_script_reacts_to_scope_change],
+  ['per-folder collapse CSS defined', test_collapse_css_defined],
+  ['script wires persistent per-folder collapse', test_script_wires_collapse],
 ];
 
 let failed = 0;

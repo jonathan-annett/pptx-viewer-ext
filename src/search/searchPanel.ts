@@ -579,7 +579,12 @@ function handleSearch(
   // Bucket by scope folder before sending. The pure helper preserves scope
   // order, which is the workspace-folder declaration order — what the user
   // sees in the explorer matches what they see here.
-  const groups = groupHitsByFolder(trimmed, indexer.getScope(), workspaceFolderNames());
+  // includeEmpty: surface every scope folder as a group — even one with no
+  // hits this search — so the panel can offer a persistent collapse toggle on
+  // each folder (a folder full of false positives can be hidden for good).
+  const groups = groupHitsByFolder(trimmed, indexer.getScope(), workspaceFolderNames(), {
+    includeEmpty: true,
+  });
   void panel.webview.postMessage({
     type: 'results',
     query,

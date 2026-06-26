@@ -170,6 +170,7 @@ export function groupHitsByFolder(
   hits: readonly SearchHit[],
   scope: SearchScope,
   folderNames?: ReadonlyMap<string, string>,
+  options?: { includeEmpty?: boolean },
 ): HitGroup[] {
   // Pre-compute trailing-slash variants once. Same rule as `isUnderScope`:
   // a URI matches a folder if it equals it or starts with `folder + '/'`.
@@ -233,9 +234,14 @@ export function groupHitsByFolder(
     }
   }
 
+  // By default empty buckets are dropped (no header for a folder with no
+  // hits). The search panel passes `includeEmpty` so every scope folder gets a
+  // header — that's what lets the user collapse a known-noisy folder
+  // persistently even on a search where it currently has no matches.
+  const includeEmpty = options?.includeEmpty ?? false;
   const out: HitGroup[] = [];
   for (const group of buckets.values()) {
-    if (group.hits.length > 0) out.push(group);
+    if (includeEmpty || group.hits.length > 0) out.push(group);
   }
   if (other) out.push(other);
   return out;
