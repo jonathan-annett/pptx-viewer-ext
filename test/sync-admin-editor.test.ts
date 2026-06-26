@@ -36,6 +36,7 @@ function baseVm(overrides: Partial<AdminEditorViewModel> = {}): AdminEditorViewM
     placeholders: [
       { sha256: EMPTY_FILE_SHA256, locked: true, label: '(default — zero-byte file)' },
     ],
+    archive: null,
     capturedAt: '',
     pointerInfo: null,
     parseError: null,
@@ -216,6 +217,27 @@ test('renders the Placeholders card section + add button', () => {
   assert.match(html, /id="placeholder-list"/);
   assert.match(html, /id="add-placeholder"/);
   assert.match(html, /Add placeholder/);
+});
+
+test('renders the Archive folder card with Set + Clear buttons', () => {
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  assert.match(html, /id="archive-card"/);
+  assert.match(html, /id="set-archive"/);
+  assert.match(html, /id="clear-archive"/);
+  assert.match(html, /Set archive folder/);
+});
+
+test('init payload carries archive info when configured', () => {
+  const html = renderAdminEditorHtml(
+    baseVm({ archive: { uri: 'file:///work/Archive', displayName: 'Archive' } }),
+    'n',
+  );
+  assert.match(html, /"archive":\{"uri":"file:\/\/\/work\/Archive","displayName":"Archive"\}/);
+});
+
+test('init payload archive is null when unset', () => {
+  const html = renderAdminEditorHtml(baseVm(), 'n');
+  assert.match(html, /"archive":null/);
 });
 
 test('init payload carries the locked default row even when no user entries exist', () => {

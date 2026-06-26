@@ -80,11 +80,23 @@ export interface PlaceholderRow {
   label?: string;
 }
 
+/**
+ * The configured archive folder, or null when none is set. `uri` is the
+ * workspace-folder URI string stored in the snapshot; `displayName` is the
+ * friendly name (the matching workspace folder's name, or the URI basename).
+ */
+export interface AdminEditorArchive {
+  uri: string;
+  displayName: string;
+}
+
 export interface AdminEditorViewModel {
   folders: AdminEditorFolder[];
   settings: AdminEditorSettingSummary[];
   /** Placeholders card rows (locked default first, then user entries). */
   placeholders: PlaceholderRow[];
+  /** Archive folder for "Update & remove source", or null when unset. */
+  archive: AdminEditorArchive | null;
   /** ISO timestamp from the snapshot body. Empty when unavailable. */
   capturedAt: string;
   /** GlobalState pointer info, or null when there is no pointer. */
@@ -105,6 +117,7 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
     folders: vm.folders,
     settings: vm.settings,
     placeholders: vm.placeholders,
+    archive: vm.archive,
     capturedAt: vm.capturedAt,
     pointerInfo: vm.pointerInfo,
     parseError: vm.parseError,
@@ -154,6 +167,16 @@ export function renderAdminEditorHtml(vm: AdminEditorViewModel, nonce: string): 
     <ul id="placeholder-list" class="placeholder-list"></ul>
     <div class="placeholder-actions">
       <button id="add-placeholder" class="btn btn-secondary btn-sm" type="button" title="Pick a sample .pptx — its sha256 is added to the placeholders list">Add placeholder…</button>
+    </div>
+  </section>
+
+  <section class="card" id="archive-card">
+    <h2>Archive folder</h2>
+    <p class="hint">When set, the search panel's <strong>Update &amp; remove source</strong> button copies the removed source deck into this folder <em>before</em> deleting it (a name clash keeps both files with a numbered suffix). When unset, that button is hidden entirely in the search panel.</p>
+    <p id="archive-current" class="mono small"></p>
+    <div class="placeholder-actions">
+      <button id="set-archive" class="btn btn-secondary btn-sm" type="button" title="Pick a workspace folder to archive removed source decks into">Set archive folder…</button>
+      <button id="clear-archive" class="btn btn-secondary btn-sm" type="button" title="Clear the archive folder — the remove button is then hidden in the search panel" hidden>Clear</button>
     </div>
   </section>
 
@@ -575,6 +598,8 @@ const CLIENT_JS = `
   const settingEmptyEl = document.getElementById('setting-empty');
   const placeholderListEl = document.getElementById('placeholder-list');
   const placeholdersHeadingEl = document.getElementById('placeholders-heading');
+  const archiveCurrentEl = document.getElementById('archive-current');
+  const clearArchiveBtn = document.getElementById('clear-archive');
 
   function renderAll() {
     if (state.parseError) {
@@ -613,6 +638,15 @@ const CLIENT_JS = `
       placeholderListEl.appendChild(empty);
     } else {
       placeholders.forEach((p) => placeholderListEl.appendChild(renderPlaceholderRow(p)));
+    }
+
+    const archive = state.archive || null;
+    if (archive) {
+      archiveCurrentEl.textContent = 'Archiving removed sources to: ' + archive.displayName + '  (' + archive.uri + ')';
+      clearArchiveBtn.hidden = false;
+    } else {
+      archiveCurrentEl.textContent = 'No archive folder set — "Update & remove source" is hidden in the search panel.';
+      clearArchiveBtn.hidden = true;
     }
   }
 
@@ -796,6 +830,12 @@ const CLIENT_JS = `
 
   document.getElementById('add-placeholder').addEventListener('click', () => {
     vscode.postMessage({ type: 'addPlaceholderFromSample' });
+  });
+  document.getElementById('set-archive').addEventListener('click', () => {
+    vscode.postMessage({ type: 'setArchiveFolder' });
+  });
+  clearArchiveBtn.addEventListener('click', () => {
+    vscode.postMessage({ type: 'clearArchiveFolder' });
   });
   document.getElementById('refresh').addEventListener('click', () => {
     vscode.postMessage({ type: 'refreshSnapshot' });

@@ -15,6 +15,7 @@ import { isWebHost } from '../host';
 import {
   captureCurrent,
   emptySnapshot,
+  readArchiveFolderFromDisk,
   readPlaceholdersFromDisk,
   resolveSnapshotUri,
   SnapshotStore,
@@ -378,10 +379,12 @@ export async function captureAndWriteSnapshot(store: SnapshotStore): Promise<Sna
     return undefined;
   }
   const targetUri = folders[0].uri;
-  // Preserve any user-added placeholder hashes; they're not derivable from
-  // vscode state and would otherwise be wiped on every Refresh.
+  // Preserve any user-added placeholder hashes + the configured archive
+  // folder; neither is derivable from vscode state, so both would otherwise be
+  // wiped on every Refresh / auto-regeneration of the snapshot file.
   const existingPlaceholders = await readPlaceholdersFromDisk(targetUri);
-  const captured = captureCurrent(existingPlaceholders);
+  const existingArchiveFolder = await readArchiveFolderFromDisk(targetUri);
+  const captured = captureCurrent(existingPlaceholders, existingArchiveFolder);
   if (!captured) {
     log('snapshot: captureAndWriteSnapshot — no workspace folders, nothing to capture');
     return undefined;
@@ -457,10 +460,12 @@ export function startSnapshotWriter(
       log(`snapshot: ensureWorkspaceLockSettings threw — ${errMsg(err)}`);
     }
     const target = folders[0].uri;
-    // Preserve any user-added placeholder hashes across recapture; they live
-    // only on disk and are not derivable from vscode state.
+    // Preserve any user-added placeholder hashes + the configured archive
+    // folder across recapture; both live only on disk and are not derivable
+    // from vscode state.
     const existingPlaceholders = await readPlaceholdersFromDisk(target);
-    const captured = captureCurrent(existingPlaceholders);
+    const existingArchiveFolder = await readArchiveFolderFromDisk(target);
+    const captured = captureCurrent(existingPlaceholders, existingArchiveFolder);
     if (!captured) {
       log('snapshot: no workspace folders — skipping write');
       return;

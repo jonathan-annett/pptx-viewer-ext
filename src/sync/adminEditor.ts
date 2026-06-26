@@ -22,6 +22,7 @@ import * as vscode from 'vscode';
 import { log } from '../log';
 import {
   renderAdminEditorHtml,
+  type AdminEditorArchive,
   type AdminEditorFolder,
   type AdminEditorFolderSource,
   type AdminEditorSettingSummary,
@@ -215,6 +216,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
           await this.addPlaceholderFromSample(document);
         } else if (msg.type === 'removePlaceholder') {
           await this.removePlaceholder(document, msg.sha256);
+        } else if (msg.type === 'setArchiveFolder') {
+          await this.setArchiveFolder(document);
+        } else if (msg.type === 'clearArchiveFolder') {
+          await this.clearArchiveFolder(document);
         } else if (msg.type === 'refreshSnapshot') {
           await this.refreshSnapshot(panel, document);
           // Also kick off a plan rebuild — the snapshot capture itself doesn't
@@ -463,9 +468,7 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
 
   /**
    * Read the current document text, run a mutation on the placeholders
-   * array, marshal a fresh snapshot, and write through the store. Routes
-   * through writeSnapshot's open-document path (applyEdit + save) so this
-   * editor panel stays alive across the rewrite.
+   * array, marshal a fresh snapshot, and write through the store.
    */
   private async mutatePlaceholders(
     document: vscode.TextDocument,
@@ -475,11 +478,56 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
     const text = document.getText();
     const { snapshot, errors } = parseSnapshot(text);
     for (const e of errors) log(`admin-editor: parse warning during placeholder mutation — ${e}`);
+    const nextPlaceholders = mutate(snapshot.placeholders);
     const next: Snapshot = {
       ...snapshot,
-      placeholders: mutate(snapshot.placeholders),
+      placeholders: nextPlaceholders,
       capturedAt: new Date().toISOString(),
     };
+    await this.commitSnapshot(
+      next,
+      `placeholders ${logSummary} (now ${nextPlaceholders.length} entr${nextPlaceholders.length === 1 ? 'y' : 'ies'})`,
+    );
+  }
+
+  /**
+   * Pick a workspace folder via showWorkspaceFolderPick and record it as the
+   * snapshot's archiveFolder. Stored as the folder URI string so it survives
+   * the file's auto-regeneration (the recapture path reads it back — see
+   * restoreFlow). Cancelling the pick is a no-op.
+   */
+  private async setArchiveFolder(document: vscode.TextDocument): Promise<void> {
+    const picked = await vscode.window.showWorkspaceFolderPick({
+      placeHolder: 'Pick a workspace folder to archive removed source decks into',
+    });
+    if (!picked) return; // cancelled
+    const text = document.getText();
+    const { snapshot, errors } = parseSnapshot(text);
+    for (const e of errors) log(`admin-editor: parse warning during archive-folder set — ${e}`);
+    const next: Snapshot = {
+      ...snapshot,
+      archiveFolder: picked.uri.toString(),
+      capturedAt: new Date().toISOString(),
+    };
+    await this.commitSnapshot(next, `archive folder set → ${picked.name}`);
+  }
+
+  /** Drop the snapshot's archiveFolder (the search panel's remove button hides). */
+  private async clearArchiveFolder(document: vscode.TextDocument): Promise<void> {
+    const text = document.getText();
+    const { snapshot, errors } = parseSnapshot(text);
+    for (const e of errors) log(`admin-editor: parse warning during archive-folder clear — ${e}`);
+    const next: Snapshot = { ...snapshot, capturedAt: new Date().toISOString() };
+    delete next.archiveFolder;
+    await this.commitSnapshot(next, 'archive folder cleared');
+  }
+
+  /**
+   * Marshal a fresh snapshot and write it through the store. Routes through
+   * writeSnapshot's open-document path (applyEdit + save) so this editor panel
+   * stays alive across the rewrite; the resulting doc-change re-posts the VM.
+   */
+  private async commitSnapshot(next: Snapshot, logSummary: string): Promise<void> {
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (folders.length === 0) {
       void vscode.window.showWarningMessage('No workspace folders open — cannot write snapshot.');
@@ -492,10 +540,10 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
         uri: finalUri.toString(),
         lastWriteAt: next.capturedAt,
       });
-      log(`admin-editor: placeholders ${logSummary} (now ${next.placeholders.length} entr${next.placeholders.length === 1 ? 'y' : 'ies'})`);
+      log(`admin-editor: ${logSummary}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log(`admin-editor: placeholder write FAILED — ${message}`);
+      log(`admin-editor: snapshot write FAILED — ${message}`);
       void vscode.window.showErrorMessage(`Could not write snapshot: ${message}`);
     }
   }
@@ -514,6 +562,8 @@ type WebviewMessage =
   | { type: 'runSync' }
   | { type: 'addPlaceholderFromSample' }
   | { type: 'removePlaceholder'; sha256: string }
+  | { type: 'setArchiveFolder' }
+  | { type: 'clearArchiveFolder' }
   | { type: 'decision'; id?: unknown; kind?: unknown; relPath?: unknown; accepted?: unknown; remember?: unknown };
 
 /**
@@ -591,10 +641,37 @@ async function buildViewModel(
     folders: folderRows.map((r) => r.base),
     settings: summariseSettings(snapshot),
     placeholders: buildPlaceholderRows(snapshot),
+    archive: buildArchiveInfo(snapshot, workspaceFolders),
     capturedAt: snapshot.capturedAt,
     pointerInfo: pointer ? { uri: pointer.uri, lastWriteAt: pointer.lastWriteAt } : null,
     parseError: errors.length > 0 ? errors.join('; ') : null,
   };
+}
+
+/**
+ * Resolve the snapshot's archiveFolder into display info, or null when unset.
+ * The friendly name comes from the matching open workspace folder when there
+ * is one; otherwise it falls back to the URI's decoded basename.
+ */
+function buildArchiveInfo(
+  snapshot: Snapshot,
+  workspaceFolders: readonly vscode.WorkspaceFolder[],
+): AdminEditorArchive | null {
+  const raw = snapshot.archiveFolder;
+  if (!raw) return null;
+  const match = workspaceFolders.find((f) => f.uri.toString() === raw);
+  let displayName: string;
+  if (match) {
+    displayName = match.name;
+  } else {
+    try {
+      const segs = vscode.Uri.parse(raw).path.split('/').filter(Boolean);
+      displayName = segs.length > 0 ? decodeURIComponent(segs[segs.length - 1]) : raw;
+    } catch {
+      displayName = raw;
+    }
+  }
+  return { uri: raw, displayName };
 }
 
 /** Workspace-relative display path for a source folder URI; falls back to the URI itself. */
