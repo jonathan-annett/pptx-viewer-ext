@@ -671,6 +671,10 @@ function panelScript(): string {
 
   let latestQuery = '';
   let debounceHandle = null;
+  // Set when the user clicks Reindex; consumed by the next indexComplete so
+  // we re-run the term currently in the box (not just the last debounced
+  // query) once the freshly-walked index is ready.
+  let reindexRequested = false;
 
   // ── Multi-select state ────────────────────────────────────────────────
   //
@@ -763,6 +767,7 @@ function panelScript(): string {
   });
 
   reindex.addEventListener('click', function () {
+    reindexRequested = true;
     vscode.postMessage({ type: 'reindex' });
   });
 
@@ -804,10 +809,15 @@ function panelScript(): string {
       updateFooter(msg);
     } else if (msg.type === 'indexComplete') {
       updateFooter(msg);
-      // If user has typed something already, re-run the search now that
-      // more files might be in the index.
-      if (latestQuery && latestQuery.trim() !== '') {
-        vscode.postMessage({ type: 'search', query: latestQuery, op: currentOp() });
+      // Re-run the active query now that the index may have grown. An explicit
+      // Reindex click refreshes whatever's in the box right now (covers a
+      // pending-debounce edit the user never let settle); passive passes
+      // (file-watcher) re-run only the last committed query.
+      const requested = reindexRequested;
+      reindexRequested = false;
+      const q = requested ? qInput.value : latestQuery;
+      if (q && q.trim() !== '') {
+        postSearch(q);
       }
     } else if (msg.type === 'emptyState') {
       // Used by the extension to push a custom empty-state message after a

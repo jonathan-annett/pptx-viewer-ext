@@ -187,6 +187,15 @@ function test_script_drives_panel(): void {
   assert.match(html, /'results'/, 'results message handler present');
   assert.match(html, /'indexProgress'/, 'indexProgress message handler present');
   assert.match(html, /'indexComplete'/, 'indexComplete message handler present');
+  // Clicking Reindex flags an explicit re-search; the indexComplete handler
+  // then refreshes the term currently in the box (qInput.value) rather than
+  // only the last debounced query.
+  assert.match(html, /reindexRequested\s*=\s*true/, 'reindex click sets the explicit-refresh flag');
+  assert.match(
+    html,
+    /requested\s*\?\s*qInput\.value\s*:\s*latestQuery/,
+    'indexComplete re-runs the box value after an explicit reindex',
+  );
   console.log('  ok: panel script contains the expected wiring + message names');
 }
 
