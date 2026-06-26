@@ -324,9 +324,19 @@ h1 {
 }
 
 .hit-group-label {
-  /* The folder name itself — don't let a long path crowd the tag/count. */
+  /* The friendly folder name — don't let a long name crowd the tag/count. */
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Small secondary path (the URI basename) shown beside the friendly name when
+   the folder has been renamed, so the literal on-disk location stays visible. */
+.hit-group-path {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.8em;
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
   white-space: nowrap;
 }
 
@@ -581,6 +591,14 @@ h1 {
   align-items: center;
 }
 
+/* Author — the speaker name is the primary human-in-the-loop matching signal,
+   so make it pop: bold and full-strength foreground (bright on dark themes)
+   rather than the muted meta colour the rest of the row uses. */
+.hit-author {
+  font-weight: 700;
+  color: var(--vscode-foreground);
+}
+
 .hit-badges {
   display: inline-flex;
   gap: 4px;
@@ -704,6 +722,19 @@ function panelScript(): string {
 
   function rowKey(hit) {
     return (hit && Array.isArray(hit.uris) && hit.uris[0]) || '';
+  }
+
+  // Decoded basename of a URI — the actual on-disk filename. Used so each
+  // folder group shows the file's real name in THAT folder, not the deduped
+  // index-time name (the same content can be saved under different names).
+  function basenameOf(uri) {
+    if (!uri) return '';
+    var s = String(uri);
+    var cut = s.search(/[?#]/);
+    if (cut >= 0) s = s.slice(0, cut);
+    if (s.endsWith('/')) s = s.slice(0, -1);
+    var seg = s.slice(s.lastIndexOf('/') + 1);
+    try { return decodeURIComponent(seg); } catch (_) { return seg; }
   }
 
   function currentOp() {
@@ -922,8 +953,17 @@ function panelScript(): string {
     header.className = 'hit-group-header';
     const label = document.createElement('span');
     label.className = 'hit-group-label';
-    label.textContent = group.folderLabel || group.folderUri || '(unknown)';
+    // Friendly (renamed) workspace-folder name prominent; fall back to basename.
+    label.textContent = group.folderName || group.folderLabel || group.folderUri || '(unknown)';
     header.appendChild(label);
+    // Show the literal path basename in small font only when it differs from
+    // the friendly name (i.e. the folder was renamed) — no redundancy otherwise.
+    if (group.folderLabel && group.folderLabel !== (group.folderName || group.folderLabel)) {
+      const path = document.createElement('span');
+      path.className = 'hit-group-path';
+      path.textContent = group.folderLabel;
+      header.appendChild(path);
+    }
     // Definite tag delineating the top workspace folder from the rest.
     const tag = document.createElement('span');
     tag.className = 'hit-group-tag';
@@ -961,7 +1001,11 @@ function panelScript(): string {
     // Prefer the display-form field (URI-decoded, case preserved); fall
     // back to the folded match form if an older indexer record doesn't
     // carry one — schema-mismatch eviction should make that transient.
-    const displayName = hit.displayFilename || hit.filename || '(unknown)';
+    // Show the actual on-disk name for THIS folder (basename of the group's
+    // URI), not the deduped index-time name — the same content can be saved
+    // under different names in different folders. Fall back to the indexed
+    // name only when there's no URI to read a basename from.
+    const displayName = basenameOf(rowKey(hit)) || hit.displayFilename || hit.filename || '(unknown)';
     // Wrap the filename text in its own span so flex layout treats it as a
     // single inline item, with the hash badge floating beside it. Without
     // this wrapper, the highlight() fragment's individual text nodes and

@@ -197,6 +197,25 @@ function test_group_label_decodes_basename(): void {
   console.log('  ok: folder label is decoded basename of the URI');
 }
 
+function test_group_folder_name_from_map(): void {
+  // The wired layer passes a folderUri → friendly-name map (the admin-editor
+  // rename / treeview name). folderName carries it; folderLabel stays the
+  // basename for the small secondary path.
+  const scope = { folderUris: ['file:///Speakers%20Prep', 'file:///work/B'] };
+  const hits = [
+    makeHit({ sha256: 'a'.repeat(64), uris: ['file:///Speakers%20Prep/x.pptx'] }),
+    makeHit({ sha256: 'b'.repeat(64), uris: ['file:///work/B/y.pptx'] }),
+  ];
+  const names = new Map([['file:///Speakers%20Prep', 'Main Room']]);
+  const groups = groupHitsByFolder(hits, scope, names);
+  // Mapped folder → friendly name; basename retained as the secondary path.
+  assert.equal(groups[0].folderName, 'Main Room');
+  assert.equal(groups[0].folderLabel, 'Speakers Prep');
+  // Unmapped folder → folderName falls back to the basename.
+  assert.equal(groups[1].folderName, 'B');
+  console.log('  ok: folderName uses the friendly-name map, falls back to basename');
+}
+
 function test_group_empty_buckets_dropped(): void {
   // A and C in scope, but every hit is in C. A produces no header.
   const scope = {
@@ -313,6 +332,7 @@ const tests: Array<[string, () => void]> = [
   ['urisLeavingScope: empty when unchanged', test_evictions_empty_when_unchanged],
   ['groupHitsByFolder: scope order preserved', test_group_preserves_scope_order],
   ['groupHitsByFolder: label decodes URI', test_group_label_decodes_basename],
+  ['groupHitsByFolder: folderName from friendly-name map', test_group_folder_name_from_map],
   ['groupHitsByFolder: empty buckets dropped', test_group_empty_buckets_dropped],
   ['groupHitsByFolder: empty hits → no groups', test_group_no_hits],
   ['groupHitsByFolder: duplicate content fans out', test_group_fans_out_across_folders],

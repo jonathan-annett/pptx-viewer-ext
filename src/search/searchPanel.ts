@@ -230,8 +230,11 @@ async function handleUpdateFile(
   // bucketing inside groupHitsByFolder so the modal headers read the same
   // way the search-panel groups do.
   const scope = indexer.getScope();
-  const targetFolderLabel = folderLabelFor(longestScopePrefix(scope.folderUris, targetUriStr) ?? '');
-  const candidateFolderLabel = folderLabelFor(longestScopePrefix(scope.folderUris, sourceUriStr) ?? '');
+  const names = workspaceFolderNames();
+  const targetFolder = longestScopePrefix(scope.folderUris, targetUriStr) ?? '';
+  const candidateFolder = longestScopePrefix(scope.folderUris, sourceUriStr) ?? '';
+  const targetFolderLabel = names.get(targetFolder) ?? folderLabelFor(targetFolder);
+  const candidateFolderLabel = names.get(candidateFolder) ?? folderLabelFor(candidateFolder);
 
   const targetFileName = basenameFromUri(targetUri);
   const candidateFileName = basenameFromUri(sourceUri);
@@ -576,7 +579,7 @@ function handleSearch(
   // Bucket by scope folder before sending. The pure helper preserves scope
   // order, which is the workspace-folder declaration order — what the user
   // sees in the explorer matches what they see here.
-  const groups = groupHitsByFolder(trimmed, indexer.getScope());
+  const groups = groupHitsByFolder(trimmed, indexer.getScope(), workspaceFolderNames());
   void panel.webview.postMessage({
     type: 'results',
     query,
@@ -584,6 +587,21 @@ function handleSearch(
     truncated: hits.length > MAX_RESULTS,
     totalMatches: hits.length,
   });
+}
+
+/**
+ * Map of workspace-folder URI string → display name. The display name is the
+ * admin-editor rename (applied via updateWorkspaceFolders), i.e. exactly what
+ * the VS Code treeview shows. Used to label search groups and the update modal
+ * with the friendly name rather than the URI basename. Rebuilt per use — cheap,
+ * and always reflects the current rename.
+ */
+function workspaceFolderNames(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const f of vscode.workspace.workspaceFolders ?? []) {
+    map.set(f.uri.toString(), f.name);
+  }
+  return map;
 }
 
 function handleOpen(uri: string): void {

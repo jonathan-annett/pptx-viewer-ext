@@ -126,6 +126,14 @@ export function urisLeavingScope(
 export interface HitGroup {
   folderUri: string;
   folderLabel: string;
+  /**
+   * User-friendly folder name — the workspace-folder display name as renamed
+   * via the admin editor (what the VS Code treeview shows), supplied by the
+   * wired layer's `folderNames` map. Falls back to `folderLabel` (the URI
+   * basename) when no name is known. The panel shows this prominently with
+   * `folderLabel` as the small secondary path.
+   */
+  folderName?: string;
   hits: SearchHit[];
 }
 
@@ -161,6 +169,7 @@ export interface HitGroup {
 export function groupHitsByFolder(
   hits: readonly SearchHit[],
   scope: SearchScope,
+  folderNames?: ReadonlyMap<string, string>,
 ): HitGroup[] {
   // Pre-compute trailing-slash variants once. Same rule as `isUnderScope`:
   // a URI matches a folder if it equals it or starts with `folder + '/'`.
@@ -178,6 +187,7 @@ export function groupHitsByFolder(
     buckets.set(folder, {
       folderUri: folder,
       folderLabel: folderLabelFor(folder),
+      folderName: folderNames?.get(folder) ?? folderLabelFor(folder),
       hits: [],
     });
   }
@@ -218,7 +228,7 @@ export function groupHitsByFolder(
       buckets.get(folderUri)!.hits.push({ ...hit, uris });
     }
     if (orphans.length > 0) {
-      if (!other) other = { folderUri: '', folderLabel: '(other)', hits: [] };
+      if (!other) other = { folderUri: '', folderLabel: '(other)', folderName: '(other)', hits: [] };
       other.hits.push({ ...hit, uris: orphans });
     }
   }
