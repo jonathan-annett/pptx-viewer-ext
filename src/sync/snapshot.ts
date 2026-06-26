@@ -38,6 +38,14 @@ export interface Snapshot {
   settings: SnapshotSettings;
   /** User-managed sha256 hex strings (lowercase) treated as placeholder files. The empty-file sha is implicit and not stored here. */
   placeholders: string[];
+  /**
+   * Optional archive destination URI (a workspace folder, as a string —
+   * round-trips via vscode.Uri.parse). When set, the search panel's
+   * "Update & remove source" copies a removed source here before deleting it;
+   * when unset, that button is hidden entirely. User-managed like
+   * `placeholders` — preserved verbatim across snapshot regeneration.
+   */
+  archiveFolder?: string;
   /** ISO timestamp at capture. Diagnostic; not used for content equality. */
   capturedAt: string;
 }
@@ -129,6 +137,7 @@ export function marshalSnapshot(snapshot: Snapshot): string {
       folders: snapshot.folders,
       settings: snapshot.settings,
       placeholders: snapshot.placeholders,
+      ...(snapshot.archiveFolder ? { archiveFolder: snapshot.archiveFolder } : {}),
       capturedAt: snapshot.capturedAt,
     },
     null,
@@ -167,10 +176,15 @@ export function parseSnapshot(text: string): ParseSnapshotResult {
   const folders = readFolders(tree, errors);
   const settings = readSettings(tree, errors);
   const placeholders = readPlaceholders(tree, errors);
+  const archiveFolderRaw = readString(tree, 'archiveFolder');
+  const archiveFolder =
+    typeof archiveFolderRaw === 'string' && archiveFolderRaw.length > 0
+      ? archiveFolderRaw
+      : undefined;
   const capturedAt = readString(tree, 'capturedAt') ?? '';
 
   return {
-    snapshot: { folders, settings, placeholders, capturedAt },
+    snapshot: { folders, settings, placeholders, archiveFolder, capturedAt },
     errors,
   };
 }
@@ -212,6 +226,7 @@ export function snapshotsEqual(a: Snapshot, b: Snapshot): boolean {
   for (const h of b.placeholders) {
     if (!aPlaceholders.has(h.toLowerCase())) return false;
   }
+  if ((a.archiveFolder ?? '') !== (b.archiveFolder ?? '')) return false;
   return true;
 }
 

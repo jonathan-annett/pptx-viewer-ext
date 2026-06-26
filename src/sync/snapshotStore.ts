@@ -213,7 +213,10 @@ export async function resolveSnapshotUri(
  * button) without being wiped. The callers in restoreFlow.ts read the
  * current array off disk via `readPlaceholdersFromDisk` and pass it here.
  */
-export function captureCurrent(existingPlaceholders: string[] = []): Snapshot | undefined {
+export function captureCurrent(
+  existingPlaceholders: string[] = [],
+  existingArchiveFolder?: string,
+): Snapshot | undefined {
   const folders = vscode.workspace.workspaceFolders ?? [];
   if (folders.length === 0) return undefined;
 
@@ -235,6 +238,7 @@ export function captureCurrent(existingPlaceholders: string[] = []): Snapshot | 
     folders: snapFolders,
     settings,
     placeholders: [...existingPlaceholders],
+    ...(existingArchiveFolder ? { archiveFolder: existingArchiveFolder } : {}),
     capturedAt: new Date().toISOString(),
   };
 }
@@ -264,6 +268,51 @@ export async function readPlaceholdersFromDisk(folderUri: vscode.Uri): Promise<s
   }
   const { snapshot } = parseSnapshot(text);
   return [...snapshot.placeholders];
+}
+
+/**
+ * Read the `archiveFolder` URI string off the on-disk snapshot file. Returns
+ * undefined when the file is absent/unreadable or no archive is configured.
+ * Used by the recapture callers (preserve across regeneration) and resolved to
+ * a URI by {@link getWorkspaceArchiveFolderUri} for the search panel.
+ */
+export async function readArchiveFolderFromDisk(
+  folderUri: vscode.Uri,
+): Promise<string | undefined> {
+  const { uri: target, existed } = await resolveSnapshotUri(folderUri);
+  if (!existed) return undefined;
+  let bytes: Uint8Array;
+  try {
+    bytes = await vscode.workspace.fs.readFile(target);
+  } catch {
+    return undefined;
+  }
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return undefined;
+  }
+  const { snapshot } = parseSnapshot(text);
+  return snapshot.archiveFolder;
+}
+
+/**
+ * Resolve the configured archive folder for the current workspace to a URI, or
+ * undefined when none is set / no workspace folder exists. The archive lives at
+ * `workspaceFolders[0]`'s snapshot (the canonical admin config location). Read
+ * on demand — only the search-update flow needs it, and rarely.
+ */
+export async function getWorkspaceArchiveFolderUri(): Promise<vscode.Uri | undefined> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) return undefined;
+  const raw = await readArchiveFolderFromDisk(folders[0].uri);
+  if (!raw) return undefined;
+  try {
+    return vscode.Uri.parse(raw, true);
+  } catch {
+    return undefined;
+  }
 }
 
 function errMsg(err: unknown): string {
