@@ -1104,6 +1104,156 @@ test('renderPlanHtml omits the alias-from badge for rows with no aliasOrigin', (
   assert.ok(!/<span class="alias-from"/.test(html), 'no alias-from <span> for non-aliased rows');
 });
 
+// ───── reverse-flow buttons (Feature A) ─────────────────────────────────
+//
+// Collision rows get a "Promote to source" button; destination-only rows get
+// a "Copy to source" button. Both carry data attributes the webview reads to
+// post a reverse-copy message, and an inline confirm. Suppressed when the
+// view is non-interactive (embedded callers).
+
+test('toViewModel: collision row carries a promote reverse affordance', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.updateCollision[0];
+  assert.equal(row.reverse?.kind, 'promote');
+  assert.equal(row.reverse?.label, 'Promote to source');
+  assert.equal(row.reverse?.pairIndex, 0);
+  assert.equal(row.reverse?.relPath, 'a.txt');
+});
+
+test('toViewModel: destination-only row carries a copy reverse affordance', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('destination-only', 'user.txt', { destSize: 1, destHash: 'h' })],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL);
+  const row = vm.pairs[0].sections.destinationOnly[0];
+  assert.equal(row.reverse?.kind, 'copy');
+  assert.equal(row.reverse?.label, 'Copy to source');
+});
+
+test('renderPlanHtml: collision row emits a Promote-to-source button with data attrs', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('class="reverse-btn"'), 'reverse-btn missing');
+  assert.ok(html.includes('Promote to source'), 'promote label missing');
+  assert.ok(html.includes('data-reverse-kind="promote"'), 'data-reverse-kind missing');
+  assert.ok(html.includes('data-reverse-pair="0"'), 'data-reverse-pair missing');
+  assert.ok(html.includes('data-reverse-rel-path="a.txt"'), 'data-reverse-rel-path missing');
+  // Inline confirm is present but hidden until the first click.
+  assert.ok(/class="reverse-confirm" hidden/.test(html), 'inline confirm should start hidden');
+  assert.ok(html.includes('reverse-confirm-yes'), 'confirm button missing');
+});
+
+test('renderPlanHtml: destination-only row emits a Copy-to-source button', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('destination-only', 'user.txt', { destSize: 1, destHash: 'h' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(html.includes('data-reverse-kind="copy"'), 'copy reverse kind missing');
+  assert.ok(html.includes('Copy to source'), 'copy label missing');
+});
+
+test('renderPlanHtml: interactive=false suppresses reverse buttons', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' }),
+        item('destination-only', 'b.txt', { destSize: 1, destHash: 'h' }),
+      ],
+    }),
+  ];
+  const vm = toViewModel(plans, FIXED_LABEL, { interactive: false });
+  assert.equal(vm.pairs[0].sections.updateCollision[0].reverse, undefined);
+  assert.equal(vm.pairs[0].sections.destinationOnly[0].reverse, undefined);
+  const html = renderPlanHtml(vm, 'n');
+  assert.ok(!html.includes('class="reverse-btn"'), 'reverse button leaked into non-interactive view');
+});
+
+// ───── include checkboxes + select-all (Feature B) ──────────────────────
+//
+// Default-run green rows (create / update-tracked / delete-tracked) get an
+// include checkbox, checked by default. Collision / destination-only / skip
+// rows don't. The header shows a select-all master toggle when any include
+// checkbox exists.
+
+test('toViewModel: green rows get includeId; collision/dest-only/skip do not', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [
+        item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' }),
+        item('update-tracked', 'b.txt', { sourceSize: 1, sourceHash: 'h2', destHash: 'h1', manifestHash: 'h1' }),
+        item('delete-tracked', 'c.txt', { destSize: 1, destHash: 'h', manifestHash: 'h' }),
+        item('update-collision', 'd.txt', { sourceSize: 1, sourceHash: 'h3', destHash: 'h4' }),
+        item('destination-only', 'e.txt', { destSize: 1, destHash: 'h' }),
+        item('skip', 'f.txt', { sourceSize: 1, sourceHash: 'h', destHash: 'h' }),
+      ],
+    }),
+  ];
+  const s = toViewModel(plans, FIXED_LABEL).pairs[0].sections;
+  assert.equal(s.create[0].includeId, '0:a.txt');
+  assert.equal(s.updateTracked[0].includeId, '0:b.txt');
+  assert.equal(s.deleteTracked[0].includeId, '0:c.txt');
+  assert.equal(s.updateCollision[0].includeId, undefined);
+  assert.equal(s.destinationOnly[0].includeId, undefined);
+  assert.equal(s.skip[0].includeId, undefined);
+});
+
+test('renderPlanHtml: green row emits a checked include checkbox + select-all master', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(/class="include-input"[^>]*data-include-id="0:a.txt"[^>]*checked/.test(html), 'include checkbox missing/uncheck');
+  assert.ok(html.includes('id="select-all-input"'), 'select-all master missing');
+  assert.ok(html.includes('Include all files in the sync'), 'select-all label missing');
+});
+
+test('renderPlanHtml: no select-all master when there are no includable rows', () => {
+  // A collision-only plan has no green rows → no include checkboxes → no master.
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('update-collision', 'a.txt', { sourceSize: 1, sourceHash: 'h1', destHash: 'h2' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL), 'n');
+  assert.ok(!html.includes('id="select-all-input"'), 'select-all should be absent with no green rows');
+  assert.ok(!html.includes('class="include-input"'), 'include checkbox should be absent on a collision-only plan');
+});
+
+test('renderPlanHtml: interactive=false suppresses include checkboxes + master', () => {
+  const plans = [
+    fakePlan({
+      destName: 'backup',
+      items: [item('create', 'a.txt', { sourceSize: 1, sourceHash: 'h' })],
+    }),
+  ];
+  const html = renderPlanHtml(toViewModel(plans, FIXED_LABEL, { interactive: false }), 'n');
+  assert.ok(!html.includes('class="include-input"'), 'include checkbox leaked into non-interactive view');
+  assert.ok(!html.includes('id="select-all-input"'), 'select-all leaked into non-interactive view');
+});
+
 // ───── humanSize sanity ──────────────────────────────────────────────────
 
 test('humanSize formats B / KB / MB', () => {

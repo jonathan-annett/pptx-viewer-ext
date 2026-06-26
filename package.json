@@ -265,6 +265,7 @@
     "test:sync-scoped-plan": "node --import tsx test/sync-scoped-plan.test.ts",
     "test:sync-planview": "node --import tsx test/sync-planview.test.ts",
     "test:sync-executor": "node --import tsx test/sync-executor.test.ts",
+    "test:sync-reverse-flow": "node --import tsx test/sync-reverse-flow.test.ts",
     "test:sync-config-editor": "node --import tsx test/sync-config-editor.test.ts",
     "test:sync-snapshot": "node --import tsx test/sync-snapshot.test.ts",
     "test:sync-admin-editor": "node --import tsx test/sync-admin-editor.test.ts",

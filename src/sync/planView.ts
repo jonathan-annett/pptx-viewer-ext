@@ -10,15 +10,39 @@ import { buildDryRunPlan, buildScopedDryRunPlan } from './planner';
 import type { ResolvedTopology } from './topology';
 import { renderPlanHtml, toViewModel } from './planHtml';
 import { runSync, formatRunSummary, type RunSummary } from './runSync';
-import { manifestUri, resolveManifestUri } from './manifest';
+import { manifestUri, resolveManifestUri, readManifest, writeManifest, manifestKey } from './manifest';
 import {
   countAccepted,
   handleDecisionMessage,
   seedRememberedDecisions,
   type RowDecision,
 } from './decisions';
+import { copyDestToSource } from './reverseFlow';
+import { vscodeFs } from './vscodeFs';
+import { sha256Hex } from './hash';
 import { getActivePlaceholderSet } from './placeholderRegistry';
 import { log } from '../log';
+
+/** A validated `reverse-copy` message from the plan webview. */
+interface ReverseCopyRequest {
+  kind: 'promote' | 'copy';
+  pairIndex: number;
+  relPath: string;
+}
+
+function parseReverseCopyMessage(msg: unknown): ReverseCopyRequest | undefined {
+  if (!msg || typeof msg !== 'object') return undefined;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== 'reverse-copy') return undefined;
+  const kind = m.kind === 'promote' || m.kind === 'copy' ? m.kind : undefined;
+  const pairIndex =
+    typeof m.pairIndex === 'number' && Number.isInteger(m.pairIndex) && m.pairIndex >= 0
+      ? m.pairIndex
+      : undefined;
+  const relPath = typeof m.relPath === 'string' ? m.relPath : undefined;
+  if (!kind || pairIndex === undefined || !relPath) return undefined;
+  return { kind, pairIndex, relPath };
+}
 
 /**
  * Optional scope + title for `openPlanPanel`. When `scope` is set, the panel
@@ -54,12 +78,19 @@ export async function openPlanPanel(
           ')'
       : 'sync: openPlan invoked',
   );
-  let plans: PlanForDestination[] = [];
-  try {
+  const buildPlans = async (): Promise<PlanForDestination[]> => {
     const placeholders = await getActivePlaceholderSet();
-    plans = opts?.scope
+    return opts?.scope
       ? await buildScopedDryRunPlan(topology, { ...opts.scope, placeholders })
       : await buildDryRunPlan(topology, { placeholders });
+  };
+
+  // `plans` is reassigned by `refresh()` after a reverse-flow copy mutates a
+  // source file — the message handler closes over the variable, so the
+  // refreshed list is what Proceed/decision/reverse handlers see.
+  let plans: PlanForDestination[];
+  try {
+    plans = await buildPlans();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`sync: openPlan failed to build plan — ${message}`);
@@ -67,10 +98,10 @@ export async function openPlanPanel(
     return;
   }
 
-  const vm = toViewModel(plans, (plan) => {
+  const labelSource = (plan: PlanForDestination): string => {
     const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
     return rel || plan.source.sourceFolderUri.toString();
-  });
+  };
 
   const panel = vscode.window.createWebviewPanel(
     'folderSync.plan',
@@ -97,12 +128,71 @@ export async function openPlanPanel(
   // (which don't fire change events on load) still appear as armed when
   // Proceed runs the executor.
   const decisions = new Map<string, RowDecision>();
-  const seeded = seedRememberedDecisions(plans, decisions);
-  if (seeded > 0) log(`sync: seeded ${seeded} remembered decision(s) from plan`);
+  // Feature B: ids (`${pairIndex}:${relPath}`) the user opted out of via the
+  // include checkboxes. Empty = include everything. Reset on every refresh.
+  const excluded = new Set<string>();
+
+  const seedDecisions = (): void => {
+    decisions.clear();
+    const seeded = seedRememberedDecisions(plans, decisions);
+    if (seeded > 0) log(`sync: seeded ${seeded} remembered decision(s) from plan`);
+  };
+
+  // Every include-checkbox id in the current plan — the green (default-run)
+  // rows. Used by the select-none master toggle to exclude them all at once.
+  const allIncludableIds = (): string[] => {
+    const ids: string[] = [];
+    plans.forEach((plan, i) => {
+      if (plan.skippedReason) return;
+      for (const item of plan.items) {
+        if (
+          item.kind === 'create' ||
+          item.kind === 'update-tracked' ||
+          item.kind === 'delete-tracked'
+        ) {
+          ids.push(`${i}:${item.relPath}`);
+        }
+      }
+    });
+    return ids;
+  };
+
+  const render = (): void => {
+    const vm = toViewModel(plans, labelSource);
+    const nonce = makeNonce();
+    panel.webview.html = renderPlanHtml(vm, nonce);
+    log(
+      `sync: plan rendered — ${vm.pairs.length} pair(s), ` +
+        `create ${vm.totals.create}, update-tracked ${vm.totals.updateTracked}, ` +
+        `collisions ${vm.totals.updateCollision}, skip ${vm.totals.skip}, ` +
+        `delete-tracked ${vm.totals.deleteTracked}, destination-only ${vm.totals.destinationOnly}, ` +
+        `warnings ${vm.totals.warnings}, skipped-pairs ${vm.totals.skipped}`,
+    );
+  };
+
+  // Re-plan from disk and re-render after a reverse-flow copy changed a source
+  // file. The copy made a destination's version canonical; the fresh plan
+  // reclassifies the other destinations against it. Decisions + exclusions are
+  // reset — the row ids may no longer mean the same thing post-reclassification.
+  const refresh = async (): Promise<void> => {
+    try {
+      plans = await buildPlans();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`sync: re-plan after reverse-copy failed — ${message}`);
+      void vscode.window.showErrorMessage(`Folder Sync: could not rebuild plan — ${message}`);
+      return;
+    }
+    excluded.clear();
+    seedDecisions();
+    render();
+  };
+
+  seedDecisions();
 
   panel.webview.onDidReceiveMessage(async (msg: unknown) => {
     if (!msg || typeof msg !== 'object') return;
-    const m = msg as { type?: unknown };
+    const m = msg as { type?: unknown; id?: unknown; included?: unknown };
     if (m.type === 'cancel') {
       if (inFlight) return;
       log('sync: plan cancelled by user');
@@ -112,24 +202,117 @@ export async function openPlanPanel(
     if (m.type === 'proceed') {
       if (inFlight) return;
       inFlight = true;
-      await runProceed(panel, plans, decisions);
+      await runProceed(panel, plans, decisions, excluded);
       return;
     }
     if (m.type === 'decision') {
       handleDecisionMessage(msg, decisions, (line) => log(`sync: ${line}`));
       return;
     }
+    if (m.type === 'include') {
+      // Single row toggled: maintain the excluded set (checked = included).
+      const id = typeof m.id === 'string' ? m.id : undefined;
+      const included = typeof m.included === 'boolean' ? m.included : undefined;
+      if (id !== undefined && included !== undefined) {
+        if (included) excluded.delete(id);
+        else excluded.add(id);
+      }
+      return;
+    }
+    if (m.type === 'include-all') {
+      const included = typeof m.included === 'boolean' ? m.included : true;
+      excluded.clear();
+      if (!included) for (const id of allIncludableIds()) excluded.add(id);
+      log(`sync: include-all ${included ? 'selected' : 'cleared'} (${excluded.size} excluded)`);
+      return;
+    }
+    if (m.type === 'reverse-copy') {
+      if (inFlight) return;
+      const rc = parseReverseCopyMessage(msg);
+      if (!rc) {
+        log('sync: reverse-copy message rejected (malformed)');
+        return;
+      }
+      inFlight = true;
+      try {
+        await performReverseCopy(plans, rc);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`sync: reverse-copy failed — ${message}`);
+        void vscode.window.showErrorMessage(`Folder Sync: copy to source failed — ${message}`);
+      }
+      inFlight = false;
+      await refresh();
+      return;
+    }
   });
 
-  const nonce = makeNonce();
-  panel.webview.html = renderPlanHtml(vm, nonce);
+  render();
+}
+
+/**
+ * Copy a destination's version of one file back over the source (Feature A).
+ * 'promote' overwrites an edited source from an `update-collision` row and
+ * rewrites the destination's manifest entry so the file reads as in-sync;
+ * 'copy' seeds a brand-new source from a `destination-only` row (no manifest
+ * change — the next plan classifies it as a skip at the origin destination and
+ * a create everywhere else). Throws on failure; the caller re-plans regardless.
+ */
+async function performReverseCopy(
+  plans: readonly PlanForDestination[],
+  rc: ReverseCopyRequest,
+): Promise<void> {
+  const plan = plans[rc.pairIndex];
+  if (!plan) throw new Error(`no plan at index ${rc.pairIndex}`);
+  const destRootUri = plan.destination.destRootUri;
+  if (!destRootUri) throw new Error('destination is unresolved');
+
+  const wantKind = rc.kind === 'promote' ? 'update-collision' : 'destination-only';
+  const item = plan.items.find((it) => it.relPath === rc.relPath && it.kind === wantKind);
+  if (!item) throw new Error(`no ${wantKind} row for ${rc.relPath}`);
+
+  // For an alias-rewritten collision the on-disk source path is the pre-rewrite
+  // path; otherwise it coincides with the destination relpath.
+  const sourceRelPath = item.aliasOrigin?.sourceRelPath ?? item.relPath;
+  const result = await copyDestToSource({
+    sourceRootUri: plan.source.sourceFolderUri,
+    sourceRelPath,
+    destRootUri,
+    destRelPath: item.relPath,
+    fs: vscodeFs(),
+    hash: sha256Hex,
+  });
+  if (result.status !== 'ok') throw new Error(result.error ?? 'copy failed');
+
   log(
-    `sync: plan rendered — ${vm.pairs.length} pair(s), ` +
-      `create ${vm.totals.create}, update-tracked ${vm.totals.updateTracked}, ` +
-      `collisions ${vm.totals.updateCollision}, skip ${vm.totals.skip}, ` +
-      `delete-tracked ${vm.totals.deleteTracked}, destination-only ${vm.totals.destinationOnly}, ` +
-      `warnings ${vm.totals.warnings}, skipped-pairs ${vm.totals.skipped}`,
+    `sync: reverse-copy ${rc.kind} — ${item.relPath} ` +
+      `(${plan.destination.name} → ${vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false)})`,
   );
+
+  if (rc.kind !== 'promote') return;
+
+  // Promote: the destination's edit is now canonical. Rewrite the destination's
+  // manifest entry to the promoted hash so this file reads as in-sync on the
+  // re-plan, and so future syncs classify the other destinations against the
+  // new source correctly rather than re-flagging this one as a collision.
+  const destWsUri = plan.destination.workspaceFolderUri ?? destRootUri;
+  const mr = await readManifest(destWsUri);
+  if (mr.kind !== 'ok') {
+    log(`sync: reverse-copy promote — skipping manifest update (manifest ${mr.kind})`);
+    return;
+  }
+  const key = manifestKey(plan.source.workspaceFolderName, item.relPath);
+  const now = new Date().toISOString();
+  mr.manifest.entries[key] = {
+    destPath: plan.destination.subpath
+      ? `${plan.destination.subpath}/${item.relPath}`
+      : item.relPath,
+    size: result.size ?? 0,
+    sha256: result.sha256 ?? '',
+    syncedAt: now,
+  };
+  mr.manifest.lastSync = now;
+  await writeManifest(destWsUri, mr.manifest);
 }
 
 function makeNonce(): string {
@@ -148,15 +331,20 @@ async function runProceed(
   panel: vscode.WebviewPanel,
   plans: PlanForDestination[],
   decisions: ReadonlyMap<string, RowDecision>,
+  excluded: ReadonlySet<string>,
 ): Promise<void> {
   const armedCount = countAccepted(decisions);
-  log(`sync: proceed — starting execution (${armedCount} armed override(s))`);
+  log(
+    `sync: proceed — starting execution (${armedCount} armed override(s), ` +
+      `${excluded.size} file(s) excluded)`,
+  );
   void panel.webview.postMessage({ type: 'status', label: 'Syncing\u2026' });
 
   let summary;
   try {
     summary = await runSync(plans, {
       decisions,
+      excluded,
       onProgress: (e) => {
         void panel.webview.postMessage({
           type: 'progress',

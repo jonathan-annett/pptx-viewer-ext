@@ -56,6 +56,41 @@ export interface PlanRowView {
    * because alias `MON/room1 → MON` rewrote MON/room1/foo.pptx".
    */
   aliasOrigin?: AliasOrigin;
+  /**
+   * Per-row "include this file in the sync" affordance (Feature B). Present
+   * on the default-run green rows (create / update-tracked / delete-tracked)
+   * in interactive mode; the checkbox starts checked and the user unticks to
+   * skip the file. The id is `${pairIndex}:${relPath}` — the standalone
+   * webview posts toggles keyed by it and the host filters the executor's
+   * item list by the resulting excluded set. Absent on collision /
+   * destination-only rows: those already gate inclusion through their opt-in
+   * decision checkbox, and on skip rows (nothing to run).
+   */
+  includeId?: string;
+  /**
+   * Per-row reverse-flow affordance (Feature A): a button that copies the
+   * destination's version of this file back over the source. Attached to
+   * `update-collision` rows (label "Promote to source") and
+   * `destination-only` rows ("Copy to source") in interactive mode. The
+   * standalone webview renders an inline-confirm button and posts a
+   * `reverse-copy` message; the host performs the copy and re-runs the plan.
+   */
+  reverse?: PlanRowReverseView;
+}
+
+export interface PlanRowReverseView {
+  /**
+   * 'promote' — overwrite an edited source from the destination's bytes
+   *             (update-collision row); also rewrites the dest manifest entry.
+   * 'copy'    — seed a brand-new source file from a destination-only file.
+   */
+  kind: 'promote' | 'copy';
+  /** Index of the owning (source × destination) pair in the plans array. */
+  pairIndex: number;
+  /** Destination-relative path of the file to push back to source. */
+  relPath: string;
+  /** Button label, e.g. "Promote to source" / "Copy to source". */
+  label: string;
 }
 
 export interface PlanWarningView {
@@ -328,6 +363,26 @@ export function toViewModel(
         ...(item.remembered?.accepted ? { checked: true, remembered: true } : {}),
       });
     };
+    // Feature B: the default-run green rows (create / update-tracked /
+    // delete-tracked) carry an "include in sync" checkbox so the user can
+    // opt individual files out before Proceed. Starts checked; the host
+    // tracks the excluded set. Collision / destination-only rows are
+    // deliberately excluded — their opt-in decision checkbox already governs
+    // whether they run, so a second "include" box would be redundant and
+    // its default-checked state would contradict their default-skip safety.
+    const withInclude = (row: PlanRowView): PlanRowView =>
+      interactive ? { ...row, includeId: `${pairIndex}:${row.relPath}` } : row;
+    // Feature A: collision + destination-only rows get a reverse-flow button
+    // that pushes the destination's bytes back to the source. Suppressed in
+    // non-interactive (embedded) views, which have no message channel back.
+    const withReverse = (
+      row: PlanRowView,
+      kind: 'promote' | 'copy',
+      label: string,
+    ): PlanRowView =>
+      interactive
+        ? { ...row, reverse: { kind, pairIndex, relPath: row.relPath, label } }
+        : row;
     // Warnings section is a derived view of files already shown in their
     // primary category. We deliberately DON'T duplicate the decision
     // affordance here — the checkbox belongs in the primary section
@@ -341,12 +396,16 @@ export function toViewModel(
       sourceLabel: srcKey,
       destLabel,
       sections: {
-        create: s.create.map(greenWithMaybeWarningOverride),
-        updateTracked: s.updateTracked.map(greenWithMaybeWarningOverride),
-        updateCollision: s.updateCollision.map(overwriteDecision),
+        create: s.create.map((it) => withInclude(greenWithMaybeWarningOverride(it))),
+        updateTracked: s.updateTracked.map((it) => withInclude(greenWithMaybeWarningOverride(it))),
+        updateCollision: s.updateCollision.map((it) =>
+          withReverse(overwriteDecision(it), 'promote', 'Promote to source'),
+        ),
         skip: s.skip.map(toRow),
-        deleteTracked: s.deleteTracked.map(toRow),
-        destinationOnly: s.destinationOnly.map(deleteDecision),
+        deleteTracked: s.deleteTracked.map((it) => withInclude(toRow(it))),
+        destinationOnly: s.destinationOnly.map((it) =>
+          withReverse(deleteDecision(it), 'copy', 'Copy to source'),
+        ),
         warnings: s.warnings.map(toRow),
       },
     });
@@ -418,6 +477,26 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
   const hasWork =
     t.create + t.updateTracked + t.deleteTracked + t.updateCollision > 0;
 
+  // Feature B: show the select-all master toggle only when at least one row
+  // carries an include checkbox (the default-run green rows in interactive
+  // mode). Derived from the rows so it stays correct for any vm — including
+  // the non-interactive embedded views, which have none.
+  const hasIncludable = vm.pairs.some((p) =>
+    [
+      ...p.sections.create,
+      ...p.sections.updateTracked,
+      ...p.sections.deleteTracked,
+    ].some((r) => r.includeId !== undefined),
+  );
+  const selectAll = hasIncludable
+    ? `<div class="select-all">
+        <label class="select-all-label">
+          <input type="checkbox" id="select-all-input" checked>
+          <span>Include all files in the sync</span>
+        </label>
+      </div>`
+    : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -431,6 +510,7 @@ export function renderPlanHtml(vm: PlanViewModel, nonce: string): string {
     <header class="plan-head">
       <h1>${escapeHtml(vm.scopeLabel)}</h1>
       <div class="totals">${renderTotals(t)}</div>
+      ${selectAll}
     </header>
 
     ${renderPlanPairs(vm)}
@@ -637,6 +717,32 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
         </label>`
     : '';
 
+  // Feature B include checkbox: a small "include this file in the sync" box,
+  // checked by default. Distinct class (`include-input`) from the decision
+  // checkbox so the footer/select-all wiring and the existing decision tests
+  // can tell them apart. Only the default-run green rows carry one.
+  const includeHtml = row.includeId
+    ? `<label class="include" title="Include this file in the sync">
+          <input type="checkbox" class="include-input" data-include-id="${escapeHtml(row.includeId)}" checked>
+        </label>`
+    : '';
+
+  // Feature A reverse-flow button with an inline two-step confirm: the first
+  // click reveals Confirm / Cancel in place; Confirm posts the reverse-copy
+  // message. Kept inline (no modal) so the dry run stays read-only except for
+  // this explicit, confirmed action.
+  const rev = row.reverse;
+  const reverseHtml = rev
+    ? `<span class="reverse" data-reverse-kind="${escapeHtml(rev.kind)}" data-reverse-pair="${rev.pairIndex}" data-reverse-rel-path="${escapeHtml(rev.relPath)}">
+          <button type="button" class="reverse-btn" title="Copy the destination's version of this file back over the source, then re-run the plan">${escapeHtml(rev.label)}</button>
+          <span class="reverse-confirm" hidden>
+            <span class="reverse-confirm-q">Make canonical?</span>
+            <button type="button" class="reverse-confirm-yes">Confirm</button>
+            <button type="button" class="reverse-confirm-no">Cancel</button>
+          </span>
+        </span>`
+    : '';
+
   // Layout: <row-lead: path + badges/chips/decision> | <row-meta: size + hashes>.
   // The lead grows to absorb slack and wraps gracefully when chips overflow
   // the visible width; the meta group is intrinsic-width and anchors to the
@@ -645,7 +751,9 @@ function renderRow(row: PlanRowView, opts: SectionOpts = {}): string {
   // single-line `path → size → hashes → trailing badges` flex; the lead/meta
   // split keeps the size+hash column stable now that placeholders, warning
   // badges, and decision controls have started accumulating between them.
-  const leadExtras = [badge, placeholderChip, decisionHtml].filter((x) => x !== '').join(' ');
+  const leadExtras = [includeHtml, badge, placeholderChip, decisionHtml, reverseHtml]
+    .filter((x) => x !== '')
+    .join(' ');
   // Alias rewrite (M2 of room-sync-format-v1-plan.md): when a path-alias
   // rewrote this file's relpath, show the on-disk source path + the alias
   // pair in a tooltip on the path span so the user can trace where the
@@ -870,6 +978,14 @@ function footerScript(): string {
         const r = document.querySelector('.decision-remember-input[data-remember-for="' + id.replace(/"/g, '\\\\"') + '"]');
         if (r) r.disabled = true;
       }
+      // Feature A/B: lock the include checkboxes, the select-all master, and
+      // the reverse-flow buttons too once a run is in flight.
+      const incs = Array.from(document.querySelectorAll('.include-input'));
+      for (let i = 0; i < incs.length; i++) incs[i].disabled = true;
+      const selAll = document.getElementById('select-all-input');
+      if (selAll) selAll.disabled = true;
+      const revBtns = Array.from(document.querySelectorAll('.reverse-btn, .reverse-confirm-yes, .reverse-confirm-no'));
+      for (let i = 0; i < revBtns.length; i++) revBtns[i].disabled = true;
     }
 
     function overrideCount(){
@@ -908,6 +1024,94 @@ function footerScript(): string {
     });
 
     refreshOrangeLabel();
+
+    // ── Feature B: include checkboxes + select-all master ────────────────
+    function includeBoxes(){
+      return Array.from(document.querySelectorAll('.include-input'));
+    }
+    function refreshSelectAll(){
+      const master = document.getElementById('select-all-input');
+      if (!master) return;
+      const boxes = includeBoxes();
+      const checked = boxes.filter(function(b){ return b.checked; }).length;
+      master.indeterminate = checked > 0 && checked < boxes.length;
+      master.checked = boxes.length > 0 && checked === boxes.length;
+    }
+    function postInclude(box){
+      try {
+        vscode.postMessage({
+          type: 'include',
+          id: box.dataset.includeId,
+          included: box.checked,
+        });
+      } catch (_) {}
+    }
+    refreshSelectAll();
+
+    // ── Feature A: reverse-flow inline-confirm buttons ───────────────────
+    function closeAllReverseConfirms(except){
+      const wraps = Array.from(document.querySelectorAll('.reverse'));
+      for (let i = 0; i < wraps.length; i++) {
+        if (wraps[i] === except) continue;
+        const btn = wraps[i].querySelector('.reverse-btn');
+        const confirm = wraps[i].querySelector('.reverse-confirm');
+        if (btn) btn.hidden = false;
+        if (confirm) confirm.hidden = true;
+      }
+    }
+
+    document.addEventListener('change', function(ev){
+      const t = ev.target;
+      if (!t || !t.classList) return;
+      if (t.classList.contains('include-input')) {
+        postInclude(t);
+        refreshSelectAll();
+        return;
+      }
+      if (t.id === 'select-all-input') {
+        const boxes = includeBoxes();
+        for (let i = 0; i < boxes.length; i++) boxes[i].checked = t.checked;
+        t.indeterminate = false;
+        try { vscode.postMessage({ type: 'include-all', included: t.checked }); } catch (_) {}
+        return;
+      }
+    });
+
+    document.addEventListener('click', function(ev){
+      const t = ev.target;
+      if (!t || !t.classList) return;
+      const wrap = t.closest ? t.closest('.reverse') : null;
+      if (t.classList.contains('reverse-btn')) {
+        if (!wrap) return;
+        closeAllReverseConfirms(wrap);
+        t.hidden = true;
+        const confirm = wrap.querySelector('.reverse-confirm');
+        if (confirm) confirm.hidden = false;
+        return;
+      }
+      if (t.classList.contains('reverse-confirm-no')) {
+        if (!wrap) return;
+        const btn = wrap.querySelector('.reverse-btn');
+        const confirm = wrap.querySelector('.reverse-confirm');
+        if (confirm) confirm.hidden = true;
+        if (btn) btn.hidden = false;
+        return;
+      }
+      if (t.classList.contains('reverse-confirm-yes')) {
+        if (!wrap) return;
+        try {
+          vscode.postMessage({
+            type: 'reverse-copy',
+            kind: wrap.dataset.reverseKind,
+            pairIndex: Number(wrap.dataset.reversePair),
+            relPath: wrap.dataset.reverseRelPath,
+          });
+        } catch (_) {}
+        // Lock the page — the host will re-render with a fresh plan shortly.
+        lock('Updating source\\u2026');
+        return;
+      }
+    });
 
     const progressBox = document.getElementById('sync-progress');
     const progressFill = progressBox ? progressBox.querySelector('.sync-progress-fill') : null;
@@ -1292,6 +1496,82 @@ function planContentCss(): string {
       opacity: 0.4;
       cursor: not-allowed;
     }
+
+    /* Feature B: per-row include checkbox. Sits first in the row-lead as a
+       compact "ship this file?" toggle; muted until hovered so it doesn't
+       compete with the path. */
+    ul.rows .include {
+      display: inline-flex;
+      align-items: center;
+      cursor: pointer;
+      padding: 0 2px;
+      border-radius: 3px;
+    }
+    ul.rows .include:hover {
+      background: color-mix(in srgb, var(--vscode-foreground) 6%, transparent);
+    }
+    ul.rows .include-input { margin: 0; cursor: pointer; }
+    /* An unticked include reads as "this row is opted out" — fade the whole
+       row so the excluded files are visible at a glance. */
+    ul.rows .row:has(.include-input:not(:checked)) .path,
+    ul.rows .row:has(.include-input:not(:checked)) .row-meta {
+      opacity: 0.5;
+      text-decoration: line-through;
+    }
+
+    /* Feature A: reverse-flow button + its inline confirm. The button is a
+       subdued link-style control; the confirm row swaps in place with a small
+       question + Confirm/Cancel pair. */
+    ul.rows .reverse { display: inline-flex; align-items: center; gap: 6px; }
+    ul.rows .reverse-btn,
+    ul.rows .reverse-confirm-yes,
+    ul.rows .reverse-confirm-no {
+      font-family: inherit;
+      font-size: 0.85em;
+      padding: 1px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 45%, transparent);
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 12%, transparent);
+      color: var(--vscode-charts-blue, #3794ff);
+    }
+    ul.rows .reverse-btn:hover,
+    ul.rows .reverse-confirm-yes:hover {
+      background: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 22%, transparent);
+    }
+    ul.rows .reverse-btn:disabled,
+    ul.rows .reverse-confirm-yes:disabled,
+    ul.rows .reverse-confirm-no:disabled { opacity: 0.5; cursor: not-allowed; }
+    ul.rows .reverse-confirm { display: inline-flex; align-items: center; gap: 6px; }
+    ul.rows .reverse-confirm[hidden] { display: none; }
+    ul.rows .reverse-confirm-q {
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+    }
+    /* The Confirm button leans on the warn palette — it writes to disk. */
+    ul.rows .reverse-confirm-yes {
+      border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 55%, transparent);
+      background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 16%, transparent);
+      color: var(--vscode-editorWarning-foreground, #cca700);
+    }
+    ul.rows .reverse-confirm-no {
+      border-color: var(--vscode-panel-border, rgba(128,128,128,0.4));
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    /* Feature B: select-all master toggle in the plan header. */
+    .select-all { margin-top: 10px; }
+    .select-all-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.9em;
+      color: var(--vscode-descriptionForeground);
+    }
+    .select-all-label input { margin: 0; cursor: pointer; }
   `;
 }
 

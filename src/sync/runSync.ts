@@ -82,6 +82,15 @@ export interface SyncProgressEvent extends ExecuteProgressEvent {
 export interface RunSyncOptions {
   decisions?: ReadonlyMap<string, RowDecision>;
   /**
+   * Feature B: per-row "skip this file" set from the plan webview's include
+   * checkboxes. Ids are `${pairIndex}:${relPath}` (same pairIndex basis as
+   * `decisions`). Any plan item whose id is in this set is filtered out
+   * before the executor's dispatch logic runs — so excluding a row skips it
+   * regardless of its kind or any armed decision. Empty/absent = include
+   * everything (the pre-Feature-B behaviour).
+   */
+  excluded?: ReadonlySet<string>;
+  /**
    * Fires after each dispatched item completes. Used by the webviews to
    * drive a progress bar. The event carries running `done` + fixed `total`
    * so callers can render `${done}/${total}` or a percentage directly.
@@ -123,6 +132,11 @@ export async function runSync(
   const onProgress: ((event: SyncProgressEvent) => void) | undefined = isMap
     ? undefined
     : (decisionsOrOptions as RunSyncOptions | undefined)?.onProgress;
+  // Feature B: the include-checkbox exclusion set (only carried on the
+  // options-object form; the legacy Map form never excludes anything).
+  const excluded: ReadonlySet<string> | undefined = isMap
+    ? undefined
+    : (decisionsOrOptions as RunSyncOptions | undefined)?.excluded;
 
   const fs = vscodeFs();
   // Cache is set at activation. Treated as optional so tests / partial setups
@@ -193,7 +207,7 @@ export async function runSync(
         if (plan.skippedReason || !plan.destination.destRootUri) continue;
         const pairIndex = pairIndices.get(plan) ?? 0;
         const armed = pickArmedDecisions(decisions, pairIndex);
-        progressTotal += countExecutableItems(plan.items, {
+        progressTotal += countExecutableItems(includedItems(plan.items, pairIndex, excluded), {
           decidedOverwrites: armed.decidedOverwrites,
           decidedDeletes: armed.decidedDeletes,
           decidedWarningOverrides: armed.decidedWarningOverrides,
@@ -248,13 +262,16 @@ export async function runSync(
       const armed = pickArmedDecisions(decisions, pairIndex);
       const planSourceLabel = relPath(plan.source.sourceFolderUri);
       const planDestLabel = pairDestLabel(plan);
+      // Feature B: drop any rows the user opted out of via the include
+      // checkboxes before the executor sees them.
+      const items = includedItems(plan.items, pairIndex, excluded);
 
       const result = await executePlan({
         sourceWorkspaceFolderName: plan.source.workspaceFolderName,
         sourceRootUri: plan.source.sourceFolderUri,
         destRootUri: plan.destination.destRootUri,
         destSubpath: plan.destination.subpath,
-        items: plan.items,
+        items,
         manifest,
         fs,
         hash: sha256Hex,
@@ -287,7 +304,9 @@ export async function runSync(
       const okPaths = new Set(
         result.results.filter((r) => r.status === 'ok').map((r) => r.relPath),
       );
-      applyDecisionPersistence(plan, decisions, manifest, okPaths);
+      // Pass the included items only: an excluded row must not have its
+      // remembered decision cleared just because the user skipped it this run.
+      applyDecisionPersistence(plan.source.workspaceFolderName, items, decisions, manifest, okPaths);
 
       summary.perPlan.push({
         sourceLabel: relPath(plan.source.sourceFolderUri),
@@ -311,6 +330,22 @@ export async function runSync(
   }
 
   return summary;
+}
+
+// ───── inclusion (Feature B) ───────────────────────────────────────────────
+
+/**
+ * Drop plan items the user opted out of via the include checkboxes. The
+ * exclusion id is `${pairIndex}:${relPath}`, matching the include-checkbox id
+ * the renderer emits. No exclusions (the common case) returns the list as-is.
+ */
+function includedItems(
+  items: readonly PlanItem[],
+  pairIndex: number,
+  excluded: ReadonlySet<string> | undefined,
+): readonly PlanItem[] {
+  if (!excluded || excluded.size === 0) return items;
+  return items.filter((it) => !excluded.has(`${pairIndex}:${it.relPath}`));
 }
 
 // ───── decisions ─────────────────────────────────────────────────────────
@@ -362,7 +397,8 @@ function pickArmedDecisions(
  * because the user's intent is explicit.
  */
 function applyDecisionPersistence(
-  plan: PlanForDestination,
+  source: string,
+  items: readonly PlanItem[],
   decisions: ReadonlyMap<string, RowDecision> | undefined,
   manifest: {
     decisions: {
@@ -376,12 +412,11 @@ function applyDecisionPersistence(
   },
   okPaths: ReadonlySet<string>,
 ): void {
-  const source = plan.source.workspaceFolderName;
   // First pass: clear any previously-remembered decision on plan items that
   // exposed a remembered choice this run. We'll re-add below if the user
   // kept it ticked; clearing unconditionally first lets an opted-out row be
   // forgotten without per-kind tracking.
-  for (const item of plan.items) {
+  for (const item of items) {
     const hadRemembered = !!item.remembered?.accepted;
     if (!hadRemembered) continue;
     // Items where remembered may apply: collisions (collisionOverwrite),
@@ -407,7 +442,7 @@ function applyDecisionPersistence(
     // The decision map is panel-wide; only persist entries that belong to
     // this plan. We can tell by checking whether the plan has an item that
     // matches the decision's kind + relPath.
-    const matches = plan.items.find((it) => decisionMatchesItem(d, it));
+    const matches = items.find((it) => decisionMatchesItem(d, it));
     if (!matches) continue;
     const key = manifestKey(source, d.relPath);
     manifest.decisions[key] = {
