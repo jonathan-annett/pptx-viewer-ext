@@ -17,11 +17,11 @@
 import * as vscode from 'vscode';
 import { unzipSync } from 'fflate';
 import { type ParseResult, type ParseTimings } from './pptx';
-import { getParseCacheSingleton, parsePptxCached, project } from './sync/parseCache';
+import { getParseCacheSingleton, parsePptxCached, project } from './shared/parseCache';
 import { renderHtml, renderError, type RenderOptions } from './webview';
 import { log } from './log';
-import { getActivePlaceholderSet } from './sync/placeholderRegistry';
-import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
+import { getActivePlaceholderSet } from './shared/placeholderRegistry';
+import { renderCompareModalHtml, renderIdenticalModalHtml } from './shared/compareModalHtml';
 import { startUploadFlow, type UploadFlowHandle } from './upload/uploadFlow';
 
 class PptxDocument implements vscode.CustomDocument {

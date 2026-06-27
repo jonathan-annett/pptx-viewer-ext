@@ -5,7 +5,7 @@
 // import between planner.ts and runSync.ts.
 
 import * as vscode from 'vscode';
-import type { SyncFs } from './executor';
+import type { SyncFs } from './fsTypes';
 
 export function vscodeFs(): SyncFs<vscode.Uri> {
   return {

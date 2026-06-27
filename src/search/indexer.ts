@@ -28,24 +28,24 @@
 
 import * as vscode from 'vscode';
 import type { FileInfo } from '../pptx';
-import { hashFileAtUri } from '../sync/hash';
+import { hashFileAtUri } from '../shared/hash';
 import {
   getHashCacheSingleton,
   type HashCacheEntry,
   type UriHashCache,
-} from '../sync/hashCache';
+} from '../shared/hashCache';
 import {
   getParseCacheSingleton,
   parsePptxCached,
   snapshotLookup,
   type CachedParseResult,
   type ParseResultCache,
-} from '../sync/parseCache';
+} from '../shared/parseCache';
 import {
   getActivePlaceholderSetSync,
   onDidChangePlaceholderSet,
-} from '../sync/placeholderRegistry';
-import { vscodeFs } from '../sync/vscodeFs';
+} from '../shared/placeholderRegistry';
+import { vscodeFs } from '../shared/vscodeFs';
 import { log } from '../log';
 import { fold } from './fold';
 import type { SearchProjection } from './index-types';

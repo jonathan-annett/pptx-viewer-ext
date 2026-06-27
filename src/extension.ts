@@ -5,14 +5,14 @@ import { PptxEditorProvider } from './provider';
 import { PdfEditorProvider } from './pdfViewer';
 import { initLog, log } from './log';
 import { isWebHost } from './host';
-import { setHashCacheSingleton } from './sync/hashCache';
-import { openHashCache } from './sync/hashCacheIdb';
-import { setParseCacheSingleton } from './sync/parseCache';
-import { openParseCache } from './sync/parseCacheIdb';
+import { setHashCacheSingleton } from './shared/hashCache';
+import { openHashCache } from './shared/hashCacheIdb';
+import { setParseCacheSingleton } from './shared/parseCache';
+import { openParseCache } from './shared/parseCacheIdb';
 import {
   activatePlaceholderRegistry,
   getActivePlaceholderSet,
-} from './sync/placeholderRegistry';
+} from './shared/placeholderRegistry';
 import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';

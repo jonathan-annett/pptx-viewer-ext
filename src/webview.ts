@@ -29,7 +29,7 @@
 // host container is a fixed-position overlay that the script toggles.
 
 import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
-import { compareModalCss } from './sync/compareModalHtml';
+import { compareModalCss } from './shared/compareModalHtml';
 import { pdfImportConfigCss } from './pdfImportConfigHtml';
 import { uploadModalCss } from './upload/uploadModalHtml';
 

@@ -5,7 +5,7 @@ import { strict as assert } from 'node:assert';
 import {
   renderCompareModalHtml,
   renderIdenticalModalHtml,
-} from '../src/sync/compareModalHtml';
+} from '../src/shared/compareModalHtml';
 import type { ParseResult } from '../src/pptx';
 
 const tests: Array<[string, () => void]> = [];

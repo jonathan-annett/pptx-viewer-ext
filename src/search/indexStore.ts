@@ -32,7 +32,7 @@ import {
   isIdbAvailable,
   openIdbStore,
   type IdbStore,
-} from '../sync/idbAdapter';
+} from '../shared/idbAdapter';
 import {
   SEARCH_PROJECTION_SCHEMA_VERSION,
   type SearchProjection,

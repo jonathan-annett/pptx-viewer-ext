@@ -16,7 +16,7 @@
 // exist to make callsites read clearly and to avoid forcing the cached
 // path to synthesise a FileInfo for fields the cache already drops.
 
-import type { CachedParseResult } from '../sync/parseCache';
+import type { CachedParseResult } from '../shared/parseCache';
 import type { FileInfo, ParseResult } from '../pptx';
 import { fold } from './fold';
 import {

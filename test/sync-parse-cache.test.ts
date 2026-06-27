@@ -23,12 +23,12 @@ import {
   getParseCacheSingleton,
   snapshotLookup,
   type CachedParseResult,
-} from '../src/sync/parseCache';
+} from '../src/shared/parseCache';
 import {
   IndexedDbParseCache,
   type ParseResultRecord,
-} from '../src/sync/parseCacheIdb';
-import type { IdbStore } from '../src/sync/idbAdapter';
+} from '../src/shared/parseCacheIdb';
+import type { IdbStore } from '../src/shared/idbAdapter';
 import type { ParseResult, Thumbnail } from '../src/pptx';
 
 if (!(globalThis as { crypto?: unknown }).crypto) {

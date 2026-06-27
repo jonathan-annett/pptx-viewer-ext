@@ -25,13 +25,13 @@
 // background; activation never blocks on it.
 
 import * as vscode from 'vscode';
-import { vscodeFs } from '../sync/vscodeFs';
-import { hashFileAtUri } from '../sync/hash';
-import { getHashCacheSingleton, type UriHashCache } from '../sync/hashCache';
+import { vscodeFs } from '../shared/vscodeFs';
+import { hashFileAtUri } from '../shared/hash';
+import { getHashCacheSingleton, type UriHashCache } from '../shared/hashCache';
 import {
   getActivePlaceholderSetSync,
   onDidChangePlaceholderSet,
-} from '../sync/placeholderRegistry';
+} from '../shared/placeholderRegistry';
 import { log } from '../log';
 
 const DECK_GLOB = '**/*.{pptx,pdf}';

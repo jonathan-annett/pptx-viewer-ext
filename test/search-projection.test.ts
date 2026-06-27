@@ -2,7 +2,7 @@
 // Run with: npm run test:search-projection
 
 import { strict as assert } from 'node:assert';
-import type { CachedParseResult } from '../src/sync/parseCache';
+import type { CachedParseResult } from '../src/shared/parseCache';
 import type { ParseResult } from '../src/pptx';
 import {
   SEARCH_PROJECTION_SCHEMA_VERSION,

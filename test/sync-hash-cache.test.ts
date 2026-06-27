@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert';
 import { webcrypto } from 'node:crypto';
-import { hashFileAtUri, sha256Hex } from '../src/sync/hash';
+import { hashFileAtUri, sha256Hex } from '../src/shared/hash';
 import {
   InMemoryHashCache,
   lruGet,
@@ -19,10 +19,10 @@ import {
   snapshotHashLookup,
   type HashCacheEntry,
   type UriHashCache,
-} from '../src/sync/hashCache';
-import { IndexedDbHashCache } from '../src/sync/hashCacheIdb';
-import type { IdbStore } from '../src/sync/idbAdapter';
-import type { SyncFs } from '../src/sync/executor';
+} from '../src/shared/hashCache';
+import { IndexedDbHashCache } from '../src/shared/hashCacheIdb';
+import type { IdbStore } from '../src/shared/idbAdapter';
+import type { SyncFs } from '../src/shared/fsTypes';
 
 // crypto.subtle is required by sha256Hex; Node 20+ exposes it under
 // `webcrypto`. globalThis.crypto may already exist on Node 21+ but assigning

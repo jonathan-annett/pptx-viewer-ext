@@ -22,7 +22,7 @@
 
 import * as vscode from 'vscode';
 import { humanSize, formatTime } from './pptx';
-import { sha256Hex } from './sync/hash';
+import { sha256Hex } from './shared/hash';
 import { log } from './log';
 import { renderPdfViewerHtml, renderPdfViewerError } from './pdfViewerHtml';
 
