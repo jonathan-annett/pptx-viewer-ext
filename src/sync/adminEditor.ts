@@ -544,6 +544,8 @@ export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
       await this.store.setPointer({
         uri: finalUri.toString(),
         lastWriteAt: next.capturedAt,
+        folders: next.folders,
+        settings: next.settings,
       });
       log(`admin-editor: ${logSummary}`);
     } catch (err) {

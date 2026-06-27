@@ -22,7 +22,7 @@ import {
   snapshotsEqual,
   type Snapshot,
 } from './snapshotStore';
-import { KNOWN_WORKSPACE_KEYS } from './snapshot';
+import { KNOWN_WORKSPACE_KEYS, type SnapshotPointer } from './snapshot';
 import {
   getOperatorRestoreCapture,
   type OperatorRestoreCapture,
@@ -140,22 +140,50 @@ async function operatorColdRestore(capture: OperatorRestoreCapture): Promise<voi
   log(`operator-restore: re-mounted ${folderArgs.length} folder(s)`);
 }
 
+/**
+ * Reconstruct a Snapshot from the folder list cached in the pointer (which
+ * lives in globalState, NOT inside folder[0]). Returns undefined for a legacy
+ * pointer that predates the cache, so the caller can fall back to the file.
+ * Placeholders aren't cached (the placeholder registry reads them on demand),
+ * which restore doesn't need.
+ */
+function snapshotFromPointer(pointer: SnapshotPointer | undefined): Snapshot | undefined {
+  if (!pointer?.folders || pointer.folders.length === 0) return undefined;
+  return {
+    folders: pointer.folders,
+    settings: pointer.settings ?? {},
+    placeholders: [],
+    capturedAt: pointer.lastWriteAt,
+  };
+}
+
 async function coldRestore(
   context: vscode.ExtensionContext,
   store: SnapshotStore,
   pointerUriString: string,
 ): Promise<void> {
-  let pointerUri: vscode.Uri;
-  try {
-    pointerUri = vscode.Uri.parse(pointerUriString);
-  } catch (err) {
-    log(`snapshot: pointer URI is not parseable (${errMsg(err)}); leaving workspace alone`);
-    return;
-  }
-  const snapshot = await store.readSnapshot(pointerUri);
-  if (!snapshot) {
-    log('snapshot: pointer present but file unreadable; leaving workspace alone');
-    return;
+  // Prefer the cached folder list — re-mounting from it needs no read of a file
+  // inside folder[0], which is the read that times out (and used to freeze) on
+  // a web refresh when folder[0]'s handle isn't ready yet.
+  let snapshot = snapshotFromPointer(store.getPointer());
+  if (snapshot) {
+    log(`snapshot: restoring ${snapshot.folders.length} folder(s) from cached pointer (no file read)`);
+  } else {
+    // Legacy pointer (no cached folders) — fall back to the on-disk file. This
+    // read is bounded; if folder[0] is unavailable it times out and there's
+    // genuinely nothing to restore from until that folder is reachable.
+    let pointerUri: vscode.Uri;
+    try {
+      pointerUri = vscode.Uri.parse(pointerUriString);
+    } catch (err) {
+      log(`snapshot: pointer URI is not parseable (${errMsg(err)}); leaving workspace alone`);
+      return;
+    }
+    snapshot = await store.readSnapshot(pointerUri);
+    if (!snapshot) {
+      log('snapshot: pointer present but folder list unavailable (no cache, file unreadable); leaving workspace alone');
+      return;
+    }
   }
   if (snapshot.folders.length === 0) {
     log('snapshot: snapshot has no folders; nothing to restore');
@@ -201,19 +229,23 @@ async function finishPostRestart(
   store: SnapshotStore,
   pointerUriString: string,
 ): Promise<void> {
-  let pointerUri: vscode.Uri;
-  try {
-    pointerUri = vscode.Uri.parse(pointerUriString);
-  } catch (err) {
-    log(`snapshot: post-restart pointer URI unparseable (${errMsg(err)})`);
-    await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
-    return;
-  }
-  const snapshot = await store.readSnapshot(pointerUri);
+  // Cached pointer first (settings without a file read); fall back to the file.
+  let snapshot = snapshotFromPointer(store.getPointer());
   if (!snapshot) {
-    log('snapshot: post-restart — file unreadable; clearing pending flag');
-    await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
-    return;
+    let pointerUri: vscode.Uri;
+    try {
+      pointerUri = vscode.Uri.parse(pointerUriString);
+    } catch (err) {
+      log(`snapshot: post-restart pointer URI unparseable (${errMsg(err)})`);
+      await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
+      return;
+    }
+    snapshot = await store.readSnapshot(pointerUri);
+    if (!snapshot) {
+      log('snapshot: post-restart — file unreadable; clearing pending flag');
+      await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
+      return;
+    }
   }
   await applySettings(snapshot);
   await context.globalState.update(PENDING_SETTINGS_KEY, undefined);
@@ -393,6 +425,8 @@ export async function captureAndWriteSnapshot(store: SnapshotStore): Promise<Sna
   await store.setPointer({
     uri: finalUri.toString(),
     lastWriteAt: captured.capturedAt,
+    folders: captured.folders,
+    settings: captured.settings,
   });
   log(
     `snapshot: force-captured to ${finalUri.toString()} — ` +
@@ -486,6 +520,8 @@ export function startSnapshotWriter(
         await store.setPointer({
           uri: resolved.uri.toString(),
           lastWriteAt: onDisk.capturedAt || captured.capturedAt,
+          folders: onDisk.folders,
+          settings: onDisk.settings,
         });
         log('snapshot: on-disk matches current state — no write needed');
         return;
@@ -500,6 +536,8 @@ export function startSnapshotWriter(
       await store.setPointer({
         uri: finalUri.toString(),
         lastWriteAt: captured.capturedAt,
+        folders: captured.folders,
+        settings: captured.settings,
       });
       lastWritten = captured;
       log(

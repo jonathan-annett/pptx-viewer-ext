@@ -91,6 +91,17 @@ export interface SnapshotPointer {
   uri: string;
   /** ISO timestamp matching the snapshot's `capturedAt` at write time. */
   lastWriteAt: string;
+  /**
+   * Folder list cached at write time. The pointer lives in globalState (IDB),
+   * so restore can re-mount folders from here WITHOUT reading the snapshot file
+   * — which lives inside folder[0] and is unreadable until that folder's handle
+   * is ready (the bootstrap that froze/blocked cold restore on web). Absent on
+   * legacy pointers written before this field existed; restore falls back to
+   * the on-disk file then.
+   */
+  folders?: SnapshotFolder[];
+  /** Workspace settings cached alongside `folders`, applied without a file read. */
+  settings?: SnapshotSettings;
 }
 
 /**
