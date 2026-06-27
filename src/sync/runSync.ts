@@ -31,7 +31,14 @@ import { getHashCacheSingleton } from './hashCache';
 import { vscodeFs } from './vscodeFs';
 import { sweepOrphanTmpFiles } from './orphanSweep';
 import { vscodeSweepFs } from './orphanSweepWired';
+import { withTimeout } from './timeout';
 import { log } from '../log';
+
+// Reachability-probe budget for a destination workspace folder before we sync
+// into it. A live folder answers `stat` in well under this; an unavailable
+// web-FSA folder hangs and is skipped once it elapses, so one dead destination
+// can't block the reachable ones — multiple destinations exist for redundancy.
+const DEST_PROBE_TIMEOUT_MS = 4000;
 
 export interface RunSummary {
   ok: number;
@@ -238,6 +245,36 @@ export async function runSync(
   let progressDone = 0;
 
   for (const group of groups) {
+    // Reachability probe before we touch this destination. An unavailable
+    // folder (revoked web-FSA permission / offline PC) otherwise hangs the
+    // manifest read or the writes and blocks every reachable destination behind
+    // it. Skip it instead — its files simply aren't synced this run; the
+    // reachable destinations still get theirs (redundancy). The would-be ops
+    // count as failed so the summary/toast reflects the incomplete sync.
+    try {
+      await withTimeout(
+        Promise.resolve(fs.stat(group.destWorkspaceFolderUri)),
+        DEST_PROBE_TIMEOUT_MS,
+        `stat destination ${group.destWorkspaceFolderUri.toString()}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      let skipped = 0;
+      for (const plan of group.plans) {
+        if (plan.skippedReason || !plan.destination.destRootUri) continue;
+        const pairIndex = pairIndices.get(plan) ?? 0;
+        const armed = pickArmedDecisions(decisions, pairIndex);
+        skipped += countExecutableItems(includedItems(plan.items, pairIndex, excluded), {
+          decidedOverwrites: armed.decidedOverwrites,
+          decidedDeletes: armed.decidedDeletes,
+          decidedWarningOverrides: armed.decidedWarningOverrides,
+        });
+        log(`sync: execute — destination unreachable, skipping ${labelPair(plan)} (${message})`);
+      }
+      summary.failed += skipped;
+      continue;
+    }
+
     const manifestReadStart = nowMs();
     const manifestResult = await readManifest(group.destWorkspaceFolderUri);
     manifestReadMs += nowMs() - manifestReadStart;
