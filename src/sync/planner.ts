@@ -18,6 +18,7 @@ import type { AliasOrigin, FileInfo, PlanItem, PlanWarning } from './plan';
 import { classifyFiles, summarisePlan, type PlanSummary } from './plan';
 import { walkTree, type WalkEntry } from './walker';
 import { hashFileAtUri } from './hash';
+import { withTimeout } from './timeout';
 import { nowMs, fmtMs } from './timing';
 import {
   aliasesFromRecord,
@@ -52,6 +53,12 @@ import {
 } from './scopedPlan';
 import { isPptxPath, validatePptxBytes, validatePptxBySha } from './validators';
 import { log } from '../log';
+
+// Reachability-probe budget for a destination. A live folder answers `stat`
+// in well under this; an unavailable web-FSA handle hangs and is treated as
+// unreachable (skipped) once it elapses. Bounds only the probe — the actual
+// walk of a reachable destination is never time-limited.
+const DEST_PROBE_TIMEOUT_MS = 4000;
 
 export interface PlanForDestination {
   source: ResolvedSource;
@@ -331,106 +338,130 @@ async function planForSource(
     log(`sync: parse-cache: ${parseStats.hits}/${total} on ${sourceLabel}`);
   }
 
-  const results: PlanForDestination[] = [];
-  for (const dest of source.destinations) {
-    if (!dest.destRootUri || !dest.workspaceFolderUri) {
-      results.push({
-        source,
-        destination: dest,
-        items: [],
-        summary: summarisePlan([]),
-        skippedReason: `destination '${dest.name}' (${dest.uri}) is not in the workspace`,
-      });
-      continue;
-    }
+  // Plan each destination INDEPENDENTLY and in PARALLEL. Multiple destinations
+  // exist for redundancy, so an unreachable one must not block or fail the
+  // reachable ones. A short reachability probe (stat) up front separates a
+  // dead/unavailable folder from a merely slow one — a live folder answers stat
+  // quickly even when its full walk is slow, while a dead web-FSA handle hangs;
+  // bounding the PROBE (not the walk) means a big reachable destination is
+  // never wrongly cancelled, and running in parallel means one dead folder's
+  // probe timeout doesn't serialise in front of the others.
+  const results: PlanForDestination[] = await Promise.all(
+    source.destinations.map(async (dest): Promise<PlanForDestination> => {
+      if (!dest.destRootUri || !dest.workspaceFolderUri) {
+        return {
+          source,
+          destination: dest,
+          items: [],
+          summary: summarisePlan([]),
+          skippedReason: `destination '${dest.name}' (${dest.uri}) is not in the workspace`,
+        };
+      }
 
-    let destFiles: FileInfo[] = [];
-    const destStats = freshStats();
-    const destWalkStart = nowMs();
-    try {
-      destFiles = await walkAndHash(
-        dest.destRootUri,
-        {
-          exclude: destExclude,
-          include: destInclude,
-          scope,
-        },
-        cache,
-        destStats,
-        undefined, // destination walk doesn't validate, so no parse cache
-        undefined, // ...and no parse snapshot either
-        hashSnapshot,
+      try {
+        await withTimeout(
+          Promise.resolve(vscode.workspace.fs.stat(dest.workspaceFolderUri)),
+          DEST_PROBE_TIMEOUT_MS,
+          `stat destination "${dest.name}"`,
+        );
+      } catch (err) {
+        log(`sync: destination "${dest.name}" unreachable — skipping (${errMsg(err)})`);
+        return {
+          source,
+          destination: dest,
+          items: [],
+          summary: summarisePlan([]),
+          skippedReason: `destination '${dest.name}' is currently unreachable (${errMsg(err)})`,
+        };
+      }
+
+      let destFiles: FileInfo[] = [];
+      const destStats = freshStats();
+      const destWalkStart = nowMs();
+      try {
+        destFiles = await walkAndHash(
+          dest.destRootUri,
+          {
+            exclude: destExclude,
+            include: destInclude,
+            scope,
+          },
+          cache,
+          destStats,
+          undefined, // destination walk doesn't validate, so no parse cache
+          undefined, // ...and no parse snapshot either
+          hashSnapshot,
+        );
+      } catch (err) {
+        log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
+      }
+      const destWalkMs = nowMs() - destWalkStart;
+      const scopedDestFiles = filterFilesToScope(destFiles, scope);
+
+      // The manifest lives at the destination workspace folder root, not at
+      // the subpath. A single workspace-folder destination shares one manifest
+      // even when multiple sources write into different subpaths under it.
+      const manifestStart = nowMs();
+      const manifestResult = await readManifest(dest.workspaceFolderUri);
+      const manifestMs = nowMs() - manifestStart;
+      if (manifestResult.kind === 'version-mismatch') {
+        // Refuse to plan this destination — sync would overwrite an unknown
+        // schema. Surface as a skipped row so the plan webview / Output
+        // Channel reports it; runSync skips the destination too (it re-reads
+        // the manifest there for the same reason).
+        return {
+          source,
+          destination: dest,
+          items: [],
+          summary: summarisePlan([]),
+          skippedReason:
+            `manifest at ${dest.workspaceFolderUri.toString()} has unsupported version ` +
+            `${String(manifestResult.actual)} (extension supports version 1)`,
+        };
+      }
+      const manifest = manifestResult.manifest;
+      const scopedManifest = filterManifestToScope(manifest, source.workspaceFolderName, scope);
+
+      const classifyStart = nowMs();
+      const items = classifyFiles(
+        source.workspaceFolderName,
+        scopedSourceFiles,
+        scopedDestFiles,
+        scopedManifest,
+        placeholders,
       );
-    } catch (err) {
-      log(`sync: destination walk failed for ${dest.destRootUri.toString()} — ${errMsg(err)}`);
-    }
-    const destWalkMs = nowMs() - destWalkStart;
-    const scopedDestFiles = filterFilesToScope(destFiles, scope);
-
-    // The manifest lives at the destination workspace folder root, not at
-    // the subpath. A single workspace-folder destination shares one manifest
-    // even when multiple sources write into different subpaths under it.
-    const manifestStart = nowMs();
-    const manifestResult = await readManifest(dest.workspaceFolderUri);
-    const manifestMs = nowMs() - manifestStart;
-    if (manifestResult.kind === 'version-mismatch') {
-      // Refuse to plan this destination — sync would overwrite an unknown
-      // schema. Surface as a skipped row so the plan webview / Output
-      // Channel reports it; runSync skips the destination too (it re-reads
-      // the manifest there for the same reason).
-      results.push({
-        source,
-        destination: dest,
-        items: [],
-        summary: summarisePlan([]),
-        skippedReason:
-          `manifest at ${dest.workspaceFolderUri.toString()} has unsupported version ` +
-          `${String(manifestResult.actual)} (extension supports version 1)`,
-      });
-      continue;
-    }
-    const manifest = manifestResult.manifest;
-    const scopedManifest = filterManifestToScope(manifest, source.workspaceFolderName, scope);
-
-    const classifyStart = nowMs();
-    const items = classifyFiles(
-      source.workspaceFolderName,
-      scopedSourceFiles,
-      scopedDestFiles,
-      scopedManifest,
-      placeholders,
-    );
-    const summary = summarisePlan(items);
-    const classifyMs = nowMs() - classifyStart;
-    // sync-timing: the destination walk is the per-destination multiplier — a
-    // source mirrored to N destinations pays it N times. Pairing it with the
-    // once-per-source srcWalk above (and manifest read + classify) shows where
-    // plan-build latency actually goes.
-    log(
-      `sync-timing: dest-walk ${dest.name}${dest.subpath ? `/${dest.subpath}` : ''} — ` +
-        `destWalk=${fmtMs(destWalkMs)} manifest=${fmtMs(manifestMs)} classify=${fmtMs(classifyMs)} ` +
-        `(${destStats.walked} file(s), ${destStats.hits} hit / ${destStats.misses} miss)`,
-    );
-    // Diagnostics: merge the source-walk stats (paid once for this pair) with
-    // this destination's walk stats. The destination walk is the multiplier;
-    // surfacing it per-destination lets the user see where the wins land.
-    const pairStats: PlanHashCacheStats = mergeStats(sourceStats, destStats);
-    if (cache) {
+      const summary = summarisePlan(items);
+      const classifyMs = nowMs() - classifyStart;
+      // sync-timing: the destination walk is the per-destination multiplier — a
+      // source mirrored to N destinations pays it N times. Pairing it with the
+      // once-per-source srcWalk above (and manifest read + classify) shows where
+      // plan-build latency actually goes.
       log(
-        `sync: hash-cache: ${destStats.hits}/${destStats.walked} on ` +
-          `${dest.name}${dest.subpath ? `/${dest.subpath}` : ''}` +
-          (destStats.bytesSaved > 0 ? ` (saved ${destStats.bytesSaved} bytes)` : ''),
+        `sync-timing: dest-walk ${dest.name}${dest.subpath ? `/${dest.subpath}` : ''} — ` +
+          `destWalk=${fmtMs(destWalkMs)} manifest=${fmtMs(manifestMs)} classify=${fmtMs(classifyMs)} ` +
+          `(${destStats.walked} file(s), ${destStats.hits} hit / ${destStats.misses} miss)`,
       );
-    }
-    results.push({
-      source,
-      destination: dest,
-      items,
-      summary,
-      hashCacheStats: pairStats,
-      parseCacheStats: parseCache ? { ...parseStats } : undefined,
-    });
-  }
+      // Diagnostics: merge the source-walk stats (paid once for this pair) with
+      // this destination's walk stats. The destination walk is the multiplier;
+      // surfacing it per-destination lets the user see where the wins land.
+      const pairStats: PlanHashCacheStats = mergeStats(sourceStats, destStats);
+      if (cache) {
+        log(
+          `sync: hash-cache: ${destStats.hits}/${destStats.walked} on ` +
+            `${dest.name}${dest.subpath ? `/${dest.subpath}` : ''}` +
+            (destStats.bytesSaved > 0 ? ` (saved ${destStats.bytesSaved} bytes)` : ''),
+        );
+      }
+      return {
+        source,
+        destination: dest,
+        items,
+        summary,
+        hashCacheStats: pairStats,
+        parseCacheStats: parseCache ? { ...parseStats } : undefined,
+      };
+    }),
+  );
 
   return results;
 }

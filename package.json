@@ -312,6 +312,7 @@
     "test:search-placeholder-index": "node --import tsx test/search-placeholder-index.test.ts",
     "test:search-scope": "node --import tsx test/search-scope.test.ts",
     "test:search-panel-html": "node --import tsx test/search-panel-html.test.ts",
+    "test:sync-timeout": "node --import tsx test/sync-timeout.test.ts",
     "test:search-archive-name": "node --import tsx test/search-archive-name.test.ts",
     "test:search-update-modal": "node --import tsx test/search-update-modal.test.ts",
     "test:pptx-first-visible-slide-text": "node --import tsx test/pptx-first-visible-slide-text.test.ts",
