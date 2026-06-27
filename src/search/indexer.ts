@@ -790,10 +790,12 @@ export function startSearchIndexer(
       await firstPassReady;
     },
     async refresh() {
-      // Explicit Reindex: force a fresh re-hash so external edits are detected
-      // even when the file watcher never fired (web FSA) or size+mtime didn't
-      // move. Worth the full re-read — this path is user-initiated.
-      await runFullPass(true);
+      // Explicit Reindex: re-walk the scope folders (picks up new + removed
+      // files regardless of timestamps) and re-hash only files whose size/mtime
+      // changed — the cheap path. A force re-hash that ignores mtime entirely is
+      // available via runFullPass(true) if mtime ever proves unreliable here,
+      // but we don't pay that full-read cost on every Reindex by default.
+      await runFullPass();
     },
     onProgress(listener) {
       progressListeners.add(listener);
