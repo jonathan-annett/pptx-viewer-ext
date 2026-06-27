@@ -55,6 +55,18 @@ test('includes the remove button when showRemoveOption is true', () => {
   assert.match(html, /Update &amp; remove source/);
 });
 
+test('renders the sync-to-destinations checkbox, unchecked by default', () => {
+  const html = renderSearchUpdateModalHtml(baseInput);
+  assert.match(html, /id="search-update-auto-sync"/);
+  assert.match(html, /Sync to destinations after update/);
+  assert.doesNotMatch(html, /id="search-update-auto-sync"[^>]*checked/);
+});
+
+test('sync checkbox is checked when autoSyncDefault is true', () => {
+  const html = renderSearchUpdateModalHtml({ ...baseInput, autoSyncDefault: true });
+  assert.match(html, /id="search-update-auto-sync" checked/);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {

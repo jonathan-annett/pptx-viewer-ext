@@ -349,7 +349,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // user doesn't see "search: open" wired to nothing.
     context.subscriptions.push(
       vscode.commands.registerCommand('pptxSearch.openPanel', () => {
-        openSearchPanel({ engine, indexer });
+        openSearchPanel({ engine, indexer, manager, globalState: context.globalState });
       }),
     );
   } catch (err) {

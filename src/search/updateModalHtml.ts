@@ -35,6 +35,13 @@ export interface SearchUpdateModalInput {
    * lose the source file.
    */
   showRemoveOption?: boolean;
+  /**
+   * Initial state of the "sync to destinations after update" checkbox. Defaults
+   * to the persisted preference (shared with the viewer's drop dialog via
+   * globalState `pptxViewer.autoSyncAfterDrop`). When checked, the canonical
+   * file is pushed to its sync destinations right after the update.
+   */
+  autoSyncDefault?: boolean;
 }
 
 export function renderSearchUpdateModalHtml(input: SearchUpdateModalInput): string {
@@ -43,6 +50,7 @@ export function renderSearchUpdateModalHtml(input: SearchUpdateModalInput): stri
     ? `<button type="button" class="action-btn action-btn-secondary" id="search-update-remove-btn" title="Copy the incoming file to the archive folder, overwrite the canonical file with it, then delete the incoming file from its source folder.">Update &amp; remove source</button>
     `
     : '';
+  const checked = input.autoSyncDefault ? ' checked' : '';
   return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="search-update-title">
   <h2 id="search-update-title" class="modal-title">Update canonical file?</h2>
   <p class="modal-sub">Replace the file on the left with the file on the right.</p>
@@ -57,6 +65,10 @@ export function renderSearchUpdateModalHtml(input: SearchUpdateModalInput): stri
     </div>
   </div>
   <div class="modal-actions">
+    <label class="compare-auto-sync" title="Run the per-file sync immediately after updating — pushes the new canonical file out to its destinations">
+      <input type="checkbox" id="search-update-auto-sync"${checked}>
+      Sync to destinations after update
+    </label>
     <span class="modal-actions-spacer"></span>
     <button type="button" class="action-btn action-btn-secondary" id="search-update-cancel-btn">Cancel</button>
     ${removeBtn}<button type="button" class="action-btn" id="search-update-confirm-btn">Update file</button>

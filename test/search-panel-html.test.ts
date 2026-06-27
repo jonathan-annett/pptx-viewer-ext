@@ -187,6 +187,10 @@ function test_script_drives_panel(): void {
   assert.match(html, /'results'/, 'results message handler present');
   assert.match(html, /'indexProgress'/, 'indexProgress message handler present');
   assert.match(html, /'indexComplete'/, 'indexComplete message handler present');
+  // The update modal's "sync to destinations" checkbox is read at confirm time
+  // and threaded through the updateConfirm message.
+  assert.match(html, /search-update-auto-sync/, 'webview reads the auto-sync checkbox');
+  assert.match(html, /autoSync: autoSyncChecked\(\)/, 'updateConfirm carries the autoSync flag');
   // Clicking Reindex flags an explicit re-search; the indexComplete handler
   // then refreshes the term currently in the box (qInput.value) rather than
   // only the last debounced query.

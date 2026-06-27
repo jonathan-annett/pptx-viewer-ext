@@ -32,11 +32,22 @@ import {
 import { disambiguateFileName } from './archiveName';
 import { getParseCacheSingleton, parsePptxCached } from '../sync/parseCache';
 import { getWorkspaceArchiveFolderUri } from '../sync/snapshotStore';
-import { requestPdfImportIntoViewer } from '../provider';
+import { requestPdfImportIntoViewer, syncFileToDestinations } from '../provider';
+import type { SyncManager } from '../sync/manager';
+
+/** GlobalState key for the shared "sync to destinations after update" toggle —
+ *  the same key the viewer's drop dialog persists, so the preference carries
+ *  across both surfaces. */
+const AUTO_SYNC_KEY = 'pptxViewer.autoSyncAfterDrop';
 
 export interface OpenSearchPanelDeps {
   engine: SearchEngine;
   indexer: SearchIndexerHandle;
+  /** Sync manager — used to push an updated canonical file to its destinations
+   *  when the modal's "sync to destinations after update" box is ticked. */
+  manager: SyncManager;
+  /** Extension globalState — persists the auto-sync checkbox preference. */
+  globalState: vscode.Memento;
 }
 
 // Singleton — we only ever want one search panel active at a time. Tracked
@@ -141,18 +152,30 @@ export function openSearchPanel(deps: OpenSearchPanelDeps): void {
       const sourceUriStr = typeof (msg as { sourceUri?: unknown }).sourceUri === 'string'
         ? ((msg as { sourceUri: string }).sourceUri)
         : '';
-      pendingUpdate = await handleUpdateFile(panel, deps.indexer, targetUriStr, sourceUriStr);
+      const autoSyncDefault = deps.globalState.get<boolean>(AUTO_SYNC_KEY, false);
+      pendingUpdate = await handleUpdateFile(
+        panel,
+        deps.indexer,
+        targetUriStr,
+        sourceUriStr,
+        autoSyncDefault,
+      );
       return;
     }
     if (m.type === 'updateConfirm') {
       const mode = (msg as { mode?: unknown }).mode === 'update-remove' ? 'update-remove' : 'update';
+      const autoSync = (msg as { autoSync?: unknown }).autoSync === true;
       const slot = pendingUpdate;
       pendingUpdate = null;
       if (!slot) {
         log('pptxSearch: updateConfirm with no pending update — ignoring');
         return;
       }
-      await handleUpdateConfirm(panel, slot, mode);
+      // Persist the checkbox state so the next modal (here or the drop dialog)
+      // opens with the same default. Cancel never reaches here, so cancelling
+      // leaves the stored preference untouched.
+      await deps.globalState.update(AUTO_SYNC_KEY, autoSync);
+      await handleUpdateConfirm(panel, slot, mode, autoSync ? deps.manager : undefined);
       return;
     }
     if (m.type === 'updateCancel') {
@@ -215,6 +238,7 @@ async function handleUpdateFile(
   indexer: SearchIndexerHandle,
   targetUriStr: string,
   sourceUriStr: string,
+  autoSyncDefault: boolean,
 ): Promise<PendingUpdate | null> {
   if (!targetUriStr || !sourceUriStr) {
     log('pptxSearch: updateFile — missing target or source URI');
@@ -363,6 +387,7 @@ async function handleUpdateFile(
     targetFolderLabel,
     candidateFolderLabel,
     showRemoveOption: !!archiveFolder,
+    autoSyncDefault,
   });
   void panel.webview.postMessage({ type: 'updateModal', html });
   log(
@@ -456,6 +481,10 @@ async function handleUpdateConfirm(
   panel: vscode.WebviewPanel,
   slot: PendingUpdate,
   mode: 'update' | 'update-remove',
+  // When set (the "sync to destinations" box was ticked), push the freshly
+  // updated canonical file out to its sync destinations after the write +
+  // archive/delete all settle. Undefined = don't sync.
+  syncManager?: SyncManager,
 ): Promise<void> {
   const cache = getParseCacheSingleton();
   try {
@@ -530,6 +559,28 @@ async function handleUpdateConfirm(
         });
         await openTargetInViewer(slot.targetUri);
         return;
+      }
+    }
+
+    // Sync the freshly-updated canonical out to its destinations, if the box
+    // was ticked. Runs AFTER the write + archive + delete have all settled, so
+    // it operates on the final on-disk state (no race with the source removal).
+    if (syncManager) {
+      try {
+        const result = await syncFileToDestinations(syncManager, slot.targetUri);
+        log(
+          `pptxSearch: update — post-update sync ${
+            result.synced ? `ran (ok=${result.ok} failed=${result.failed})` : `skipped (${result.reason})`
+          }`,
+        );
+      } catch (err) {
+        // Sync failures surface their own toast inside syncFileToDestinations;
+        // never let them mask the successful update.
+        log(
+          `pptxSearch: update — post-update sync threw — ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
     }
 

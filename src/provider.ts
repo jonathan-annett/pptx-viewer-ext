@@ -1125,6 +1125,59 @@ async function runPerFileSync(
   }
 }
 
+/**
+ * Push a single file out to its sync destinations — the "after update" sync
+ * used by the viewer drop dialog and the search panel's update modals. Builds
+ * the per-file plan for `fileUri` and, when it's the clean green path
+ * (work exists, nothing blocking), runs it and surfaces the usual toasts.
+ *
+ * Returns a small result the caller can log/report:
+ *   - `{ synced: true, ok, failed }` — a sync ran.
+ *   - `{ synced: false, reason: 'nothing' }` — no destinations / nothing to do.
+ *   - `{ synced: false, reason: 'blocked' }` — collisions/warnings present; the
+ *     auto-sync deliberately doesn't ship blocked items (use the plan panel).
+ */
+export async function syncFileToDestinations(
+  manager: SyncManager,
+  fileUri: vscode.Uri,
+): Promise<
+  | { synced: true; ok: number; failed: number }
+  | { synced: false; reason: 'nothing' | 'blocked' }
+> {
+  const target = await buildSyncTargetHtml(manager, fileUri);
+  if (!target || !target.hasWork) return { synced: false, reason: 'nothing' };
+  if (target.blocking > 0) {
+    void vscode.window.showWarningMessage(
+      'Updated, but auto-sync skipped: this file has collisions/warnings. ' +
+        'Open the sync plan to ship it.',
+    );
+    return { synced: false, reason: 'blocked' };
+  }
+  let summary;
+  try {
+    summary = await runSync(target.plans, new Map());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`syncFileToDestinations: run-sync threw — ${message}`);
+    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
+    return { synced: false, reason: 'nothing' };
+  }
+  for (const line of formatRunSummary(summary).split('\n')) log(line);
+  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
+    if (summary.ok > 0) {
+      void vscode.window.showInformationMessage(
+        `Folder Sync: ${summary.ok} operation(s) completed.`,
+      );
+    }
+  } else if (summary.failed > 0) {
+    void vscode.window.showWarningMessage(
+      `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
+    );
+  }
+  surfaceManifestVersionMismatches(summary);
+  return { synced: true, ok: summary.ok, failed: summary.failed };
+}
+
 // ───── sync target section ──────────────────────────────────────────────
 
 /**

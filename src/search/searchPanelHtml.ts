@@ -1515,6 +1515,13 @@ function panelScript(): string {
     const cancelBtn = modalHost.querySelector('#search-update-cancel-btn');
     const confirmBtn = modalHost.querySelector('#search-update-confirm-btn');
     const removeBtn = modalHost.querySelector('#search-update-remove-btn');
+    // Read the "sync to destinations" checkbox at click time and thread its
+    // state through with the confirm so the extension can persist the
+    // preference + run the per-file sync after the update.
+    function autoSyncChecked() {
+      const cb = modalHost.querySelector('#search-update-auto-sync');
+      return !!(cb && cb.checked);
+    }
     if (cancelBtn) {
       cancelBtn.addEventListener('click', function () {
         vscode.postMessage({ type: 'updateCancel' });
@@ -1524,14 +1531,14 @@ function panelScript(): string {
       confirmBtn.addEventListener('click', function () {
         confirmBtn.disabled = true;
         if (removeBtn) removeBtn.disabled = true;
-        vscode.postMessage({ type: 'updateConfirm', mode: 'update' });
+        vscode.postMessage({ type: 'updateConfirm', mode: 'update', autoSync: autoSyncChecked() });
       });
     }
     if (removeBtn) {
       removeBtn.addEventListener('click', function () {
         removeBtn.disabled = true;
         if (confirmBtn) confirmBtn.disabled = true;
-        vscode.postMessage({ type: 'updateConfirm', mode: 'update-remove' });
+        vscode.postMessage({ type: 'updateConfirm', mode: 'update-remove', autoSync: autoSyncChecked() });
       });
     }
   }
