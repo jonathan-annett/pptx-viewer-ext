@@ -5,39 +5,10 @@ import { PptxEditorProvider } from './provider';
 import { PdfEditorProvider } from './pdfViewer';
 import { initLog, log } from './log';
 import { isWebHost } from './host';
-import { SyncManager } from './sync/manager';
-import { createStatusBarItem } from './sync/statusBar';
-import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
-import { openPlanPanel } from './sync/planView';
-import type { ResolvedSource, ResolvedTopology } from './sync/topology';
-import { ReconnectController, collectMissingTargets } from './sync/reconnectDestinations';
-import { SyncConfigEditorProvider } from './sync/configEditor';
-import { AdminEditorProvider } from './sync/adminEditor';
-import { ManifestEditorProvider } from './sync/manifestEditor';
-import {
-  activateDestinationOnlyContextKey,
-  maybeAutoOpenOperatorManifest,
-} from './sync/destinationOnlyWired';
-import {
-  attachConflictNotifier,
-  registerConfigConflictCommand,
-} from './sync/configConflict';
-import {
-  attachSnapshotConflictNotifier,
-  registerSnapshotConflictCommand,
-} from './sync/snapshotConflict';
-import { EventEditorProvider } from './event/eventEditor';
 import { setHashCacheSingleton } from './sync/hashCache';
 import { openHashCache } from './sync/hashCacheIdb';
 import { setParseCacheSingleton } from './sync/parseCache';
 import { openParseCache } from './sync/parseCacheIdb';
-import { SnapshotStore, resolveSnapshotUri } from './sync/snapshotStore';
-import {
-  clearSnapshotCommand,
-  maybeRestore,
-  showSnapshotCommand,
-  startSnapshotWriter,
-} from './sync/restoreFlow';
 import {
   activatePlaceholderRegistry,
   getActivePlaceholderSet,
@@ -46,13 +17,8 @@ import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
 import { registerPlaceholderDecorations } from './search/placeholderDecorations';
-import { registerFolderStateDecorations } from './sync/folderStateDecorations';
 import { openSearchPanel } from './search/searchPanel';
 import { registerResetState } from './resetState';
-import {
-  handleQuickSetupPostReload,
-  registerQuickSetupCommand,
-} from './event/quickSetup';
 
 // The literal "__PPTX_BUILD_INFO_PLACEHOLDER__" is rewritten in the emitted
 // bundle by esbuild's post-build plugin (see esbuild.config.js) into a JSON
@@ -67,31 +33,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   log(`activate: pptx-viewer ${packageVersion(context)} loaded`);
   logBuildInfo();
 
-  // Quick Setup wizard post-reload handoff. Runs before SnapshotStore
-  // so the flag read can't race against the snapshot writer; the
-  // auto-open + toast are deferred via setTimeout so the event editor
-  // provider has time to register (later in this function).
-  await handleQuickSetupPostReload(context);
-
-  // M4.6 — silent restore must run BEFORE SyncManager.create so the
-  // manager's initial reload sees the just-restored folders. If the
-  // restore triggers a host restart (first folder added to a folderless
-  // workspace), this activation tears down and re-runs with folders in
-  // place; the post-restart branch finishes settings application + toast.
-  const snapshotStore = new SnapshotStore(context);
-  try {
-    await maybeRestore(context, snapshotStore);
-  } catch (err) {
-    log(`snapshot: maybeRestore threw — ${err instanceof Error ? err.message : String(err)}`);
-  }
-
   // Register the pptx custom editor BEFORE the rest of activation. On PWA
   // refresh VS Code restores .pptx editor tabs as soon as workspace folders
-  // are mounted (just above, by maybeRestore). If the provider isn't
-  // registered by then, VS Code drops the tab and shows the welcome page —
-  // user has to click the file in the explorer to re-open it. Previously
-  // this registration sat after ensureWorkspaceLockSettings + cache opens +
-  // SyncManager.create, far enough into activate() for VS Code to give up.
+  // are mounted. If the provider isn't registered by then, VS Code drops the
+  // tab and shows the welcome page — user has to click the file in the
+  // explorer to re-open it.
   context.subscriptions.push(
     PptxEditorProvider.register(),
   );
@@ -117,27 +63,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // workspace from desktop into vscode.dev still has a fresh marker to
   // replay from.
   migrateLegacyActiveTabKey(context);
-  // Capture marker presence BEFORE the restorer fires so the M3 auto-
-  // open can race-freely decide whether to defer (marker present, the
-  // restorer will reopen something) or take focus (marker absent, the
-  // restorer is a no-op, so the user lands cold). See
-  // `maybeAutoOpenOperatorManifest` for the rationale.
-  const hadActiveTabMarker = isWebHost()
-    ? !!context.globalState.get<SavedActiveTab>(ACTIVE_TAB_KEY)?.uri
-    : false;
   if (isWebHost()) {
     void restoreLastActiveTab(context);
   } else {
     log('restore: desktop host — last-active-tab replay skipped (native tab persistence)');
   }
-
-  // Lock-settings seeding (`files.readonlyInclude` / `readonlyExclude`)
-  // used to run here at activation, gated on destination-only detection.
-  // It's now deferred to the snapshot writer's `tryWrite` so it only
-  // fires when source intent is actually present (≥1 `.sync.jsonc`),
-  // avoiding the false-positive where a cold destination folder
-  // (no manifest yet, looks indistinguishable from a fresh source) got
-  // its workspaceFolders[0] erroneously locked. See restoreFlow.ts.
 
   // M5.2.5 — URI hash cache. Initialised once at activation and parked on a
   // module singleton (planner.ts + runSync.ts read it via getHashCacheSingleton).
@@ -169,160 +99,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
   }
 
-  // Sync feature — M1: config layer + diagnostics. The manager owns config
-  // discovery, hot-reload, and topology resolution. The status bar and the
-  // showTopology command are surface layers over the manager's state.
-  const manager = await SyncManager.create(context);
-
-  // Active-tab tracker for the PWA-refresh-restore loop above. Started after
-  // manager resolution so the initial capture sees whatever tab the restore
-  // just opened (rather than the welcome page during the brief window before).
+  // Active-tab tracker for the PWA-refresh-restore loop above.
   context.subscriptions.push(startActiveTabTracker(context));
 
-  // Snapshot writer subscribes to topology changes — every config edit or
-  // workspace folder add/remove recaptures and rewrites .admin-sync.jsonc
-  // if anything actually changed. Skip-on-equal handled inside.
-  context.subscriptions.push(
-    startSnapshotWriter(snapshotStore, (listener) => manager.onDidChange(listener)),
-  );
-
-  // Placeholder registry — workspace-wide cache of "is this sha a placeholder?".
-  // Reads .admin-sync.jsonc's `placeholders: string[]` (plus the implicit
-  // empty-file default), invalidates on file change or workspace topology
-  // change. Consumers: planner classifier, viewer banner, scoped plans.
+  // Placeholder registry — answers "is this sha a placeholder?" from the
+  // `pptxViewer.placeholderHashes` setting (+ the implicit empty-file default).
+  // Consumers: viewer placeholder banner, search per-URI placeholder indexing.
   context.subscriptions.push(activatePlaceholderRegistry(context));
-  createStatusBarItem(context, manager);
-  // M6 — context key drives the Explorer context-menu visibility for
-  // "Sync This Folder". We grey the menu entry out (via a `when` clause in
-  // package.json) whenever the workspace has zero sources, so the user
-  // never sees an unusable menu item. Per-selection greying (e.g. "this
-  // selection is inside a destination") would require VS Code APIs that
-  // don't exist for explorer right-click; we handle that at click-time
-  // with an information message instead.
-  const writeHasAnySource = (topology: ResolvedTopology): void => {
-    void vscode.commands.executeCommand(
-      'setContext',
-      'folderSync.hasAnySource',
-      topology.sources.length > 0,
-    );
-  };
-  writeHasAnySource(manager.getTopology());
-  context.subscriptions.push(manager.onDidChange(writeHasAnySource));
 
-  // Missing-destination context key — true when any source's destination URI
-  // doesn't match an open workspace folder (stale FSA handle / removed folder).
-  // Gates the "Reconnect Missing Destinations" palette command's visibility.
-  const writeHasMissingDestinations = (topology: ResolvedTopology): void => {
-    void vscode.commands.executeCommand(
-      'setContext',
-      'folderSync.hasMissingDestinations',
-      collectMissingTargets(topology).length > 0,
-    );
-  };
-  writeHasMissingDestinations(manager.getTopology());
-  context.subscriptions.push(manager.onDidChange(writeHasMissingDestinations));
-
-  // Reconnect-missing-destinations flow — command + auto-notification +
-  // reload-defensive resume state machine (see reconnectDestinations.ts).
-  context.subscriptions.push(ReconnectController.register(manager, context.globalState));
-
-  // Destination-only mode detection — context key
-  // `folderSync.destinationOnlyWorkspace` flips true when the workspace has
-  // zero sources and at least one workspace folder carries a manifest at
-  // its root. M2+ gates source-side UI on its negation; M1 is just the
-  // detector + a probe palette command for verification.
-  activateDestinationOnlyContextKey(context, manager);
-
-  // Source-config filename conflict surface — when a folder ends up
-  // carrying both `.sync.jsonc` and `.roomSync`, SyncManager records the
-  // pair on topology.conflicts. The notifier keeps the
-  // `folderSync.hasConfigConflict` context key in sync and pops a one-shot
-  // toast on first detection; the command lets the user pick a winner.
-  context.subscriptions.push(attachConflictNotifier(manager));
-  context.subscriptions.push(registerConfigConflictCommand(manager));
-
-  // Workspace-snapshot filename conflict surface — the parallel of the
-  // source-config conflict above, but for `.admin-sync.jsonc` ↔ `.eventSync`
-  // at workspaceFolders[0]. Auto-migrates empty `.eventSync` → contents of
-  // legacy file (silent rename intent); toasts once on a genuine conflict;
-  // the resolve command lets the user pick a winner.
-  context.subscriptions.push(attachSnapshotConflictNotifier());
-  context.subscriptions.push(registerSnapshotConflictCommand());
-
-  context.subscriptions.push(SyncConfigEditorProvider.register(manager));
-  log('activate: source-config custom editor registered (.sync.jsonc + .roomSync)');
-  context.subscriptions.push(AdminEditorProvider.register(snapshotStore, manager));
-  log('activate: .admin-sync.jsonc custom editor registered');
-  context.subscriptions.push(ManifestEditorProvider.register());
-  log('activate: .foldersync-manifest.json custom editor registered');
-  context.subscriptions.push(EventEditorProvider.register());
-  log('activate: .eventSchedule custom editor registered');
-  context.subscriptions.push(
-    vscode.commands.registerCommand('folderSync.showTopology', () => {
-      log('sync: showTopology invoked');
-      log('--- topology ---');
-      for (const line of manager.dumpTopology().split('\n')) log(line);
-      log('--- end topology ---');
-      // Surface the Output Channel so the user can read what just printed.
-      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
-    }),
-    vscode.commands.registerCommand('folderSync.dryRunPlan', async () => {
-      log('sync: dryRunPlan invoked');
-      try {
-        const placeholders = await getActivePlaceholderSet();
-        const plans = await buildDryRunPlan(manager.getTopology(), { placeholders });
-        for (const line of formatDryRunPlan(plans).split('\n')) log(line);
-      } catch (err) {
-        log(`sync: dryRunPlan failed — ${err instanceof Error ? err.message : String(err)}`);
-      }
-      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
-    }),
-    vscode.commands.registerCommand('folderSync.openPlan', async () => {
-      await openPlanPanel(manager.getTopology());
-    }),
-    vscode.commands.registerCommand(
-      'folderSync.syncThisFolder',
-      async (uriArg?: vscode.Uri) => {
-        await runSyncThisFolder(manager, uriArg);
-      },
-    ),
-    vscode.commands.registerCommand('folderSync.showSnapshot', async () => {
-      log('snapshot: showSnapshot invoked');
-      await showSnapshotCommand(snapshotStore);
-      void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
-    }),
-    vscode.commands.registerCommand('folderSync.clearSnapshot', async () => {
-      log('snapshot: clearSnapshot invoked');
-      await clearSnapshotCommand(context, snapshotStore);
-    }),
-    vscode.commands.registerCommand('folderSync.openAdminConfig', async () => {
-      log('admin-editor: openAdminConfig invoked');
-      const folders = vscode.workspace.workspaceFolders ?? [];
-      if (folders.length === 0) {
-        void vscode.window.showWarningMessage(
-          'Cannot open admin config — no workspace folders are open.',
-        );
-        return;
-      }
-      // Prefer the pointer's URI if present (handles the case where the
-      // user has moved/renamed workspaceFolders[0] but the snapshot still
-      // lives where it was). Fall back to whichever snapshot filename
-      // actually exists at workspaceFolders[0] — preferred (`.eventSync`)
-      // when neither does.
-      const pointer = snapshotStore.getPointer();
-      const target = pointer
-        ? vscode.Uri.parse(pointer.uri)
-        : (await resolveSnapshotUri(folders[0].uri)).uri;
-      await vscode.commands.executeCommand(
-        'vscode.openWith',
-        target,
-        'folderSync.adminEditor',
-      );
-    }),
-    registerResetState(context),
-    registerQuickSetupCommand(context),
-  );
-  log('activate: folder sync manager initialised');
+  // Factory-reset command.
+  context.subscriptions.push(registerResetState(context));
 
   // Search subsystem — M4. The IDB store opens lazily (returns undefined
   // when IndexedDB isn't reachable; indexer + engine still work in-memory).
@@ -370,20 +156,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Explorer placeholder badges — independent of the search index (its own
   // crawler), so it runs even when the search IDB is unavailable.
   context.subscriptions.push(registerPlaceholderDecorations());
-
-  // Explorer workspace-folder availability badges (✓ / ⚠ / ?) — so an operator
-  // can see which connected folder is offline rather than inferring it from a
-  // stalled sync. Polls in the background; activation never blocks on it.
-  context.subscriptions.push(registerFolderStateDecorations());
-
-  // M3 — auto-open the canonical manifest in operator mode. Fire-and-
-  // forget: the helper checks operator-mode + canonical-manifest
-  // presence + defers when the active-tab restorer is going to open
-  // something. Web-only — desktop persists tabs natively, so the user
-  // gets whatever they had focused last session without our help.
-  if (isWebHost()) {
-    void maybeAutoOpenOperatorManifest(hadActiveTabMarker);
-  }
 }
 
 export function deactivate(): void {
@@ -500,182 +272,6 @@ async function restoreLastActiveTab(context: vscode.ExtensionContext): Promise<v
       `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-}
-
-// ───── M6 — folder-scoped invocation ───────────────────────────────────────
-//
-// Explorer right-click → "Folder Sync: Sync This Folder" routes here. The
-// arg is the URI of the right-clicked folder (vscode passes it positionally
-// for explorer/context menu items). When invoked from the command palette
-// the arg is undefined and we fall back to the first workspace folder.
-//
-// Resolution order (each click maps to at most one scoped plan; we never
-// open multiple panels at once because the right-clicked folder is a single
-// physical location and there's a unique source/destination mapping for it):
-//
-//   1. Topology has any sources at all → otherwise "no .sync.jsonc anywhere".
-//
-//   2. **Destination-side click** — the target sits inside some
-//      `dest.destRootUri` subtree. The user wants the plan that *would
-//      write* to this exact location, so we walk the mapping backwards: the
-//      relative path from `destRootUri` to the target is the same relative
-//      path from the source's `sourceFolderUri` to its mirror on the source
-//      side. We open the scoped plan against the source with that mapped
-//      path as the filter. If two destinations could match (deeper subpath
-//      nests inside a shallower one) we take the deeper — same nearest-
-//      ancestor rule as source resolution below.
-//
-//   3. **Source-side click** — the target sits inside a `sourceFolderUri`.
-//      Open the scoped plan against that source, filter = the target itself.
-//      Nearest-source rule when multiple sources nest.
-//
-//   4. Neither — info message. Covers "inside a destination workspace folder
-//      but outside every destination's subpath" and "no .sync.jsonc anywhere
-//      that covers this folder".
-
-async function runSyncThisFolder(
-  manager: SyncManager,
-  uriArg?: vscode.Uri,
-): Promise<void> {
-  const target = uriArg ?? vscode.workspace.workspaceFolders?.[0]?.uri;
-  if (!target) {
-    void vscode.window.showInformationMessage(
-      'Folder Sync: no folder selected and no workspace folders are open.',
-    );
-    return;
-  }
-  const topology = manager.getTopology();
-  if (topology.sources.length === 0) {
-    void vscode.window.showInformationMessage(
-      'Folder Sync: no .sync.jsonc found in the workspace. Add one to a source folder first.',
-    );
-    return;
-  }
-  const rel = vscode.workspace.asRelativePath(target, false) || target.toString();
-
-  // Destination-side click: map back to the source's mirror path and open
-  // the scoped plan from there. The user gets the same plan they'd see by
-  // right-clicking the matching source folder.
-  const destHit = findDestinationContaining(topology, target);
-  if (destHit) {
-    log(
-      `sync: syncThisFolder invoked (destination-side) — target=${target.toString()} ` +
-        `source=${destHit.source.configUri.toString()} ` +
-        `mapped=${destHit.mappedSourceUri.toString()}`,
-    );
-    await openPlanPanel(topology, {
-      scope: {
-        sourceConfigUri: destHit.source.configUri,
-        pathFilter: destHit.mappedSourceUri,
-        pathFilterIsFile: false,
-      },
-      title: `Folder Sync — ${rel} (via ${destHit.source.workspaceFolderName})`,
-    });
-    return;
-  }
-
-  const source = findNearestSourceForPath(topology, target);
-  if (!source) {
-    void vscode.window.showInformationMessage(
-      'Folder Sync: no .sync.jsonc covers this folder. Add one at this folder or an ancestor.',
-    );
-    return;
-  }
-  log(
-    `sync: syncThisFolder invoked (source-side) — target=${target.toString()} ` +
-      `source=${source.configUri.toString()}`,
-  );
-  await openPlanPanel(topology, {
-    scope: {
-      sourceConfigUri: source.configUri,
-      // Skip the stat round-trip — the explorer/context entry's `when`
-      // clause is `explorerResourceIsFolder`, and command-palette fallback
-      // uses workspaceFolders[0] which is always a folder.
-      pathFilter: target,
-      pathFilterIsFile: false,
-    },
-    title: `Folder Sync — ${rel}`,
-  });
-}
-
-/**
- * Find the source whose `sourceFolderUri` is the closest ancestor of `target`
- * (or equal to it). Returns the deepest match when multiple sources nest —
- * that's the "nearest yaml" rule from the plan. URI comparison is by path
- * after normalising trailing slashes; same scheme/authority required.
- */
-function findNearestSourceForPath(
-  topology: ResolvedTopology,
-  target: vscode.Uri,
-): ResolvedSource | undefined {
-  let best: ResolvedSource | undefined;
-  let bestLen = -1;
-  for (const src of topology.sources) {
-    if (!sameSchemeAuthority(src.sourceFolderUri, target)) continue;
-    if (!isPathAtOrUnder(src.sourceFolderUri.path, target.path)) continue;
-    const len = stripTrailingSlash(src.sourceFolderUri.path).length;
-    if (len > bestLen) {
-      best = src;
-      bestLen = len;
-    }
-  }
-  return best;
-}
-
-/**
- * Find the (source, destination) pair whose resolved `destRootUri` contains
- * `target`, and compute the equivalent URI on the source side. Used to
- * reverse-map a destination-side right-click to the scoped plan that would
- * have written to that exact location.
- *
- * "Deepest match wins" — when one destination's subpath nests inside another
- * (legal as long as they belong to different sources; same-source overlap is
- * caught by topology diagnostics). The longer `destRootUri.path` is the
- * tighter match.
- *
- * We check `destRootUri` (subpath-resolved) rather than `workspaceFolderUri`
- * because a click outside the subpath isn't actually written by any source —
- * for those cases the caller falls through to nearest-source resolution.
- */
-function findDestinationContaining(
-  topology: ResolvedTopology,
-  target: vscode.Uri,
-): { source: ResolvedSource; mappedSourceUri: vscode.Uri } | undefined {
-  let best: { source: ResolvedSource; mappedSourceUri: vscode.Uri } | undefined;
-  let bestLen = -1;
-  for (const src of topology.sources) {
-    for (const dest of src.destinations) {
-      const root = dest.destRootUri;
-      if (!root) continue;
-      if (!sameSchemeAuthority(root, target)) continue;
-      if (!isPathAtOrUnder(root.path, target.path)) continue;
-      const rootPath = stripTrailingSlash(root.path);
-      const rel = target.path === rootPath ? '' : target.path.slice(rootPath.length + 1);
-      const srcPath = stripTrailingSlash(src.sourceFolderUri.path);
-      const mappedPath = rel === '' ? srcPath : `${srcPath}/${rel}`;
-      if (rootPath.length > bestLen) {
-        best = { source: src, mappedSourceUri: src.sourceFolderUri.with({ path: mappedPath }) };
-        bestLen = rootPath.length;
-      }
-    }
-  }
-  return best;
-}
-
-function sameSchemeAuthority(a: vscode.Uri, b: vscode.Uri): boolean {
-  return a.scheme === b.scheme && a.authority === b.authority;
-}
-
-/** True when `childPath` is equal to `basePath` or sits below it. Path strings
- *  only — caller has already matched scheme/authority. */
-function isPathAtOrUnder(basePath: string, childPath: string): boolean {
-  const base = stripTrailingSlash(basePath);
-  if (childPath === base) return true;
-  return childPath.startsWith(base + '/');
-}
-
-function stripTrailingSlash(p: string): string {
-  return p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p;
 }
 
 function logBuildInfo(): void {
