@@ -19,20 +19,23 @@ import { log } from './log';
 // by the same grep that finds the owning module's DB_NAME constant.
 const IDB_DATABASES = [
   'pptxSearch.index',      // src/search/indexStore.ts
-  'folderSync.hashCache',  // src/sync/hashCacheIdb.ts
-  'folderSync.parseCache', // src/sync/parseCacheIdb.ts
+  'folderSync.hashCache',  // src/shared/hashCacheIdb.ts
+  'folderSync.parseCache', // src/shared/parseCacheIdb.ts
 ];
 
-// All globalState keys this extension writes to. The grep
-// `context\.globalState\.update|this\.context\.globalState\.update` is the
-// authoritative source — keep this list in sync.
+// All globalState keys this extension writes to, plus legacy keys from the
+// pre-slim (folder-sync) builds so a factory reset also clears stale state
+// after an upgrade. The grep `context\.globalState\.update` over src/ is the
+// authoritative source for the live keys.
 const GLOBAL_STATE_KEYS = [
-  'pptxViewer.lastActiveTab',           // src/extension.ts
+  'pptxViewer.lastActiveTab',           // src/extension.ts (live)
   'pptxViewer.lastActiveUri',           // src/extension.ts (legacy migration marker)
-  'pptxViewer.autoSyncAfterDrop',       // src/provider.ts
-  'folderSync.snapshotPointer',         // src/sync/snapshotStore.ts
-  'folderSync.operatorRestore',         // src/sync/destinationOnlyWired.ts
-  'folderSync.snapshotPendingSettings', // src/sync/restoreFlow.ts
+  // Legacy keys from the removed folder-sync feature — cleared for upgrade hygiene.
+  'pptxViewer.autoSyncAfterDrop',
+  'folderSync.snapshotPointer',
+  'folderSync.operatorRestore',
+  'folderSync.snapshotPendingSettings',
+  'folderSync.reconnectSession',
 ];
 
 // deleteDatabase can fire none of success/error/blocked when IDB itself is
