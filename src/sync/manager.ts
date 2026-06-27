@@ -31,6 +31,69 @@ type Listener = (topology: ResolvedTopology) => void;
 
 const CONFIG_GLOB = SYNC_CONFIG_GLOB;
 
+// Per-folder config-discovery budget. A reachable folder's filename-glob search
+// returns in well under a second; an unavailable web-FSA folder otherwise hangs
+// until VS Code's much longer internal timeout. Cap it so the topology builds
+// from the reachable folders promptly. Generous enough not to cancel a slow-but-
+// reachable folder mid-search.
+const CONFIG_DISCOVERY_TIMEOUT_MS = 5000;
+
+/**
+ * Discover config files across every workspace folder, tolerating an
+ * unavailable one. Searches each folder independently and in parallel, each
+ * bounded by {@link CONFIG_DISCOVERY_TIMEOUT_MS}; a folder that times out (or
+ * errors) contributes nothing instead of stalling the whole discovery.
+ */
+async function discoverConfigUris(
+  folders: readonly vscode.WorkspaceFolder[],
+): Promise<vscode.Uri[]> {
+  const perFolder = await Promise.all(
+    folders.map((folder) =>
+      findFilesWithTimeout(
+        new vscode.RelativePattern(folder, CONFIG_GLOB),
+        CONFIG_DISCOVERY_TIMEOUT_MS,
+        `config discovery in "${folder.name}"`,
+      ),
+    ),
+  );
+  return perFolder.flat();
+}
+
+/**
+ * findFiles bounded by a timeout. On expiry the underlying search is cancelled
+ * (best effort) and we resolve to `[]` — and we race the timeout directly so a
+ * search that ignores cancellation still can't hang the caller.
+ */
+async function findFilesWithTimeout(
+  pattern: vscode.RelativePattern,
+  ms: number,
+  label: string,
+): Promise<vscode.Uri[]> {
+  const cts = new vscode.CancellationTokenSource();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<vscode.Uri[]>((resolve) => {
+    timer = setTimeout(() => {
+      cts.cancel();
+      log(`sync: ${label} timed out after ${ms}ms — proceeding without it`);
+      resolve([]);
+    }, ms);
+  });
+  const search = Promise.resolve(
+    vscode.workspace.findFiles(pattern, undefined, undefined, cts.token),
+  )
+    .then((uris) => uris)
+    .catch((err) => {
+      log(`sync: ${label} failed — ${err instanceof Error ? err.message : String(err)}`);
+      return [] as vscode.Uri[];
+    });
+  try {
+    return await Promise.race([search, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    cts.dispose();
+  }
+}
+
 export class SyncManager implements vscode.Disposable {
   private topology: ResolvedTopology = {
     sources: [],
@@ -96,14 +159,19 @@ export class SyncManager implements vscode.Disposable {
       return;
     }
 
-    // Find every recognised source-config file. `findFiles` respects the
-    // user's files.exclude settings but ignores .gitignore by default —
-    // fine for our purposes. The glob honours `.sync.jsonc`, `.roomSync`,
-    // and named `<dest>.roomSync` (M3). Named variants are workspace-root
-    // only; the post-discovery filter below drops nested ones with a log
-    // line so a stray file deep in the tree doesn't silently become a
-    // ghost source.
-    const allConfigUris = await vscode.workspace.findFiles(CONFIG_GLOB);
+    // Find every recognised source-config file. We search each workspace
+    // folder INDEPENDENTLY (not one findFiles across all folders) so an
+    // unavailable folder — a web FSA handle whose permission was revoked or
+    // whose drive is disconnected — can't stall discovery: a single combined
+    // findFiles blocks on the dead folder until VS Code's long internal
+    // timeout, leaving the whole topology (and every command/context-key that
+    // gates on it) dead until then. Per-folder + a short cancel-on-timeout
+    // lets the dead folder fall out in seconds while the reachable folders'
+    // configs still land. The glob honours `.sync.jsonc`, `.roomSync`, and
+    // named `<dest>.roomSync` (M3). Named variants are workspace-root only;
+    // the post-discovery filter below drops nested ones with a log line so a
+    // stray file deep in the tree doesn't silently become a ghost source.
+    const allConfigUris = await discoverConfigUris(folders);
     const configUris: vscode.Uri[] = [];
     for (const u of allConfigUris) {
       const filename = configFilenameFromUri(u);
@@ -128,17 +196,25 @@ export class SyncManager implements vscode.Disposable {
       legacyUri: c.legacy,
       roomSyncUri: c.roomSync,
     }));
-    const loads: SourceLoad[] = [];
-    for (const configUri of keep) {
-      const owner = workspaceFolderOf(configUri, folders);
-      if (!owner) {
-        // Shouldn't happen — findFiles searches within workspace folders.
-        // Guard anyway so an oddly-scoped result doesn't crash the load.
-        log(`sync: ignoring config outside any workspace folder: ${configUri.toString()}`);
-        continue;
-      }
-      loads.push(await loadSyncConfig(configUri, owner.uri));
-    }
+    // Load the kept configs in parallel (order preserved). Each load only
+    // reads its own config file — which lives in a reachable folder, since
+    // discovery above already dropped any dead-folder results — so this can't
+    // re-introduce the stall. loadSyncConfig never throws (it returns an
+    // error-bearing SourceLoad), so one bad config doesn't sink the rest.
+    const loads: SourceLoad[] = (
+      await Promise.all(
+        keep.map(async (configUri) => {
+          const owner = workspaceFolderOf(configUri, folders);
+          if (!owner) {
+            // Shouldn't happen — discovery searches within workspace folders.
+            // Guard anyway so an oddly-scoped result doesn't crash the load.
+            log(`sync: ignoring config outside any workspace folder: ${configUri.toString()}`);
+            return null;
+          }
+          return await loadSyncConfig(configUri, owner.uri);
+        }),
+      )
+    ).filter((load): load is SourceLoad => load !== null);
 
     this.topology = resolveTopology(loads, folders);
     this.topology.conflicts = conflicts;
