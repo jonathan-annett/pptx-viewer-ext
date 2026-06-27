@@ -491,20 +491,6 @@ export function startSearchIndexer(
       mtime: hashed.mtime,
     };
 
-    // Diagnostic: zero-byte and placeholder-sha files are the ones meant to be
-    // indexed per-URI (each keeps its own filename). Log how each was seen so
-    // the Output channel can show whether a "can't find by filename" file is
-    // (a) actually zero bytes, (b) classified as a placeholder, and therefore
-    // (c) keyed per-URI rather than content-deduped against its siblings.
-    const isPlaceholderSha = activePlaceholderShas.has(sha);
-    if (info.size === 0 || isPlaceholderSha) {
-      log(
-        `search-indexer: placeholder-candidate ${info.fileName} ` +
-          `size=${info.size} sha=${sha.slice(0, 12)}… placeholder=${isPlaceholderSha} ` +
-          `(per-URI=${isPlaceholderSha})`,
-      );
-    }
-
     // PDF fast path — no parse, no parseCache touch. Surface as a
     // filename-only projection so the search panel can find it by
     // basename. We still go through the indexStore so a warm-load on the

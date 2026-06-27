@@ -120,6 +120,27 @@ function test_load_skips_placeholder_seed(): void {
   assert.deepEqual(hits[0].uris, ['file:///live.pptx']);
 }
 
+// ── Activation-order invariant: placeholders must be set BEFORE load() ──
+// If load() runs first (placeholderShas still empty), the warm IDB's empty-sha
+// projection is seeded under the BARE sha and surfaces as a searchable hit with
+// empty uris[] — a ghost that also squats the bare key. The activation wiring
+// (extension.ts) therefore calls setPlaceholderShas before load(); this test
+// pins down the wrong-order failure so the ordering can't silently regress.
+function test_load_before_placeholders_leaves_ghost(): void {
+  const wrong = createSearchEngine();
+  wrong.load([proj({ sha256: STUB_SHA, filename: 'ghost.pptx' })]); // placeholderShas empty
+  wrong.setPlaceholderShas(new Set([STUB_SHA]));
+  const ghost = wrong.search('ghost');
+  assert.equal(ghost.length, 1, 'wrong order: ghost projection is searchable');
+  assert.deepEqual(ghost[0].uris, [], 'wrong order: ghost hit has empty uris[]');
+
+  // Correct order (the fix): no ghost.
+  const right = createSearchEngine();
+  right.setPlaceholderShas(new Set([STUB_SHA]));
+  right.load([proj({ sha256: STUB_SHA, filename: 'ghost.pptx' })]);
+  assert.equal(right.search('ghost').length, 0, 'correct order: placeholder seed skipped, no ghost');
+}
+
 function main(): void {
   console.log('placeholder indexing:');
   test_placeholders_indexed_per_uri();
@@ -127,6 +148,7 @@ function main(): void {
   test_real_content_still_dedupes();
   test_remove_one_placeholder_keeps_others();
   test_load_skips_placeholder_seed();
+  test_load_before_placeholders_leaves_ghost();
   console.log('all search-placeholder-index tests passed');
 }
 
