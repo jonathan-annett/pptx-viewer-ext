@@ -210,6 +210,12 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Override the dropbox-server base URL used by the upload-to-update flow. Leave empty to use the default `https://vscode.sophtwhere.com/dropbox`. Set to e.g. `http://127.0.0.1:3030` to point at a local dev instance. The WebSocket endpoint is derived by appending `/ws` and rewriting the scheme."
+        },
+        "pptxViewer.placeholderHashes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "SHA-256 hex hashes (lowercase) of deck files to treat as placeholders — the viewer shows a \"placeholder file\" banner and the search panel indexes each per-URI so byte-identical stubs keep their own filename. The empty-file hash is always treated as a placeholder and does not need to be listed."
         }
       }
     },
