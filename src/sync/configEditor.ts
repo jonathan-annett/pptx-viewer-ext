@@ -17,6 +17,7 @@
 
 import * as vscode from 'vscode';
 import { applyEdits, modify, type FormattingOptions } from 'jsonc-parser';
+import { readRawDestinations } from './destinationId';
 import { parseSyncConfigText, type SyncConfig } from './configParse';
 import { renderConfigEditorHtml } from './configEditorHtml';
 import {
@@ -605,7 +606,19 @@ function serialiseConfig(originalText: string, config: SyncConfig): string {
   }
 
   let text = originalText;
-  text = applyEdits(text, modify(text, ['destinations'], config.destinations, {
+  // Preserve each destination's stable `id` across a form save. The webview
+  // form round-trips destinations by uri/path and is unaware of `id`, so a
+  // blind rewrite of the array would strip the GUIDs. Re-attach them by uri
+  // from the on-disk text before writing (a new destination with no prior
+  // on-disk match simply stays id-less until reconnect/stamp).
+  const priorIds = new Map<string, string>();
+  for (const d of readRawDestinations(originalText) ?? []) {
+    if (d.id) priorIds.set(d.uri, d.id);
+  }
+  const destinationsWithIds = config.destinations.map((d) =>
+    d.id || !priorIds.has(d.uri) ? d : { ...d, id: priorIds.get(d.uri) },
+  );
+  text = applyEdits(text, modify(text, ['destinations'], destinationsWithIds, {
     formattingOptions: FORMATTING,
   }));
 

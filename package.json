@@ -178,6 +178,11 @@
         "category": "Folder Sync"
       },
       {
+        "command": "folderSync.reconnectMissingDestinations",
+        "title": "Folder Sync: Reconnect Missing Destinations",
+        "category": "Folder Sync"
+      },
+      {
         "command": "folderSync.resolveSnapshotConflict",
         "title": "Folder Sync: Resolve Workspace Snapshot Conflict",
         "category": "Folder Sync"
@@ -234,6 +239,10 @@
           "when": "folderSync.hasConfigConflict"
         },
         {
+          "command": "folderSync.reconnectMissingDestinations",
+          "when": "folderSync.hasMissingDestinations"
+        },
+        {
           "command": "folderSync.resolveSnapshotConflict",
           "when": "folderSync.hasSnapshotConflict"
         },
@@ -264,6 +273,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
     "test:parse": "node --import tsx test/parse.test.ts",
     "test:sync-jsonc": "node --import tsx test/sync-jsonc.test.ts",
+    "test:sync-destination-id": "node --import tsx test/sync-destination-id.test.ts",
     "test:sync-config-filenames": "node --import tsx test/sync-config-filenames.test.ts",
     "test:sync-glob": "node --import tsx test/sync-glob.test.ts",
     "test:sync-plan": "node --import tsx test/sync-plan.test.ts",

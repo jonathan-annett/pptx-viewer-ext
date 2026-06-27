@@ -27,6 +27,12 @@ export interface ResolvedDestination {
   name: string;
   /** Subpath within the destination workspace folder (already normalised). */
   subpath: string;
+  /**
+   * Stable destination GUID carried through from the config, when stamped.
+   * Display/identity only — matching is still by `uri`. Lets the reconnect
+   * flow re-attach a destination by its durable id rather than its churning URI.
+   */
+  id?: string;
   /** Resolved workspace folder URI, or null if no workspace folder matches the URI. */
   workspaceFolderUri: vscode.Uri | null;
   /** Final URI of the destination root (workspaceFolderUri + subpath), or null if unresolved. */
@@ -131,6 +137,7 @@ export function resolveTopology(
           uri: dest.uri,
           name: displayName,
           subpath,
+          ...(dest.id ? { id: dest.id } : {}),
           workspaceFolderUri: null,
           destRootUri: null,
         });
@@ -141,6 +148,7 @@ export function resolveTopology(
         uri: dest.uri,
         name: displayName,
         subpath,
+        ...(dest.id ? { id: dest.id } : {}),
         workspaceFolderUri: folder.uri,
         destRootUri: subpath === '' ? folder.uri : appendPath(folder.uri, subpath),
       });

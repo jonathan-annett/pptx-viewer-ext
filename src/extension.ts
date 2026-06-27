@@ -10,6 +10,7 @@ import { createStatusBarItem } from './sync/statusBar';
 import { buildDryRunPlan, formatDryRunPlan } from './sync/planner';
 import { openPlanPanel } from './sync/planView';
 import type { ResolvedSource, ResolvedTopology } from './sync/topology';
+import { ReconnectController, collectMissingTargets } from './sync/reconnectDestinations';
 import { SyncConfigEditorProvider } from './sync/configEditor';
 import { AdminEditorProvider } from './sync/adminEditor';
 import { ManifestEditorProvider } from './sync/manifestEditor';
@@ -217,6 +218,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
   writeHasAnySource(manager.getTopology());
   context.subscriptions.push(manager.onDidChange(writeHasAnySource));
+
+  // Missing-destination context key — true when any source's destination URI
+  // doesn't match an open workspace folder (stale FSA handle / removed folder).
+  // Gates the "Reconnect Missing Destinations" palette command's visibility.
+  const writeHasMissingDestinations = (topology: ResolvedTopology): void => {
+    void vscode.commands.executeCommand(
+      'setContext',
+      'folderSync.hasMissingDestinations',
+      collectMissingTargets(topology).length > 0,
+    );
+  };
+  writeHasMissingDestinations(manager.getTopology());
+  context.subscriptions.push(manager.onDidChange(writeHasMissingDestinations));
+
+  // Reconnect-missing-destinations flow — command + auto-notification +
+  // reload-defensive resume state machine (see reconnectDestinations.ts).
+  context.subscriptions.push(ReconnectController.register(manager, context.globalState));
 
   // Destination-only mode detection — context key
   // `folderSync.destinationOnlyWorkspace` flips true when the workspace has

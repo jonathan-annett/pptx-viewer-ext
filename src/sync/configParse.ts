@@ -49,6 +49,15 @@ export interface SyncDestination {
   uri: string;
   /** Optional subpath within the destination workspace folder. */
   path?: string;
+  /**
+   * Stable per-destination identity (an opaque GUID; see `destinationId.ts`).
+   * Unlike `uri` — which is the live matching key but churns when a folder's
+   * FSA handle is re-granted under a new URI — `id` survives that churn, so the
+   * reconnect flow can re-attach "the same logical destination" even after the
+   * URI is rewritten. Optional: legacy configs predate it and are stamped
+   * lazily (on reconnect or config-editor save), never eagerly on load.
+   */
+  id?: string;
 }
 
 export interface SyncConfig {
@@ -145,9 +154,15 @@ function validateSchema(raw: unknown): ParseResult {
     if (e.path !== undefined && typeof e.path !== 'string') {
       return { kind: 'error', error: `destinations[${i}].path must be a string if set` };
     }
+    if (e.id !== undefined && typeof e.id !== 'string') {
+      return { kind: 'error', error: `destinations[${i}].id must be a string if set` };
+    }
     destinations.push({
       uri: e.uri,
       ...(typeof e.path === 'string' ? { path: normaliseSubpath(e.path) } : {}),
+      // An empty-string id is treated as absent (it carries no identity); only
+      // a non-empty value is preserved so the round-trip stays clean.
+      ...(typeof e.id === 'string' && e.id.length > 0 ? { id: e.id } : {}),
     });
   }
 

@@ -121,4 +121,8 @@ export const BUILT_IN_IGNORES: readonly string[] = [
   '**/.foldersync-manifest.json',
   '**/.syncManifest',
   '**/*.tmp',
+  // Transient writability probe dropped (and normally deleted in a `finally`)
+  // by the reconnect flow's write-probe — see reconnectDestinations.ts. Ignored
+  // so a probe whose cleanup failed can never be picked up as content to sync.
+  '**/.sync-writetest-*',
 ];
