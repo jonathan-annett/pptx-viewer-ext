@@ -14,6 +14,31 @@
 
 import * as vscode from 'vscode';
 import { log } from '../log';
+import { withTimeout } from './timeout';
+
+// Budget for reading the snapshot file. The restore path reads it during
+// activation BEFORE folders are (re)mounted, so on web an un-re-granted / dead
+// FSA handle can make the read hang — and the restore is awaited in activate(),
+// so an unbounded hang freezes the whole window (the symptom: activation stops
+// right after "snapshot: pointer present", unresponsive to even "Open Folder").
+// Bounding it lets activation finish; worst case the workspace just doesn't
+// auto-restore (recoverable) instead of locking up.
+const SNAPSHOT_READ_TIMEOUT_MS = 6000;
+
+/** Read a (small) snapshot-adjacent file, bounded so a dead folder handle can't
+ *  hang activation. Returns undefined on timeout/error (caller logs context). */
+async function readFileBounded(uri: vscode.Uri, label: string): Promise<Uint8Array | undefined> {
+  try {
+    return await withTimeout(
+      Promise.resolve(vscode.workspace.fs.readFile(uri)),
+      SNAPSHOT_READ_TIMEOUT_MS,
+      label,
+    );
+  } catch (err) {
+    log(`snapshot: ${label} — ${errMsg(err)}`);
+    return undefined;
+  }
+}
 import {
   emptySnapshot,
   KNOWN_WORKSPACE_KEYS,
@@ -68,13 +93,8 @@ export class SnapshotStore {
    * snapshot — that's the caller's call.
    */
   async readSnapshot(uri: vscode.Uri): Promise<Snapshot | undefined> {
-    let bytes: Uint8Array;
-    try {
-      bytes = await vscode.workspace.fs.readFile(uri);
-    } catch (err) {
-      log(`snapshot: read FAILED at ${uri.toString()} — ${errMsg(err)}`);
-      return undefined;
-    }
+    const bytes = await readFileBounded(uri, `read snapshot ${uri.toString()}`);
+    if (!bytes) return undefined;
     let text: string;
     try {
       text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -183,16 +203,27 @@ function snapshotUriAt(folderUri: vscode.Uri, filename: SnapshotFilename): vscod
 export async function resolveSnapshotUri(
   folderUri: vscode.Uri,
 ): Promise<{ uri: vscode.Uri; filename: SnapshotFilename; existed: boolean }> {
+  // Stats are bounded: this runs on the activation/capture path, and an
+  // unavailable folder's stat can hang on web FSA. A timeout is treated as
+  // "not found" (fall through), never a freeze.
   const preferred = snapshotUriAt(folderUri, PREFERRED_SNAPSHOT_FILENAME);
   try {
-    await vscode.workspace.fs.stat(preferred);
+    await withTimeout(
+      Promise.resolve(vscode.workspace.fs.stat(preferred)),
+      SNAPSHOT_READ_TIMEOUT_MS,
+      `stat ${preferred.toString()}`,
+    );
     return { uri: preferred, filename: PREFERRED_SNAPSHOT_FILENAME, existed: true };
   } catch { /* fall through to legacy probe */ }
   for (const filename of SNAPSHOT_FILENAMES) {
     if (filename === PREFERRED_SNAPSHOT_FILENAME) continue;
     const candidate = snapshotUriAt(folderUri, filename);
     try {
-      await vscode.workspace.fs.stat(candidate);
+      await withTimeout(
+        Promise.resolve(vscode.workspace.fs.stat(candidate)),
+        SNAPSHOT_READ_TIMEOUT_MS,
+        `stat ${candidate.toString()}`,
+      );
       return { uri: candidate, filename, existed: true };
     } catch { /* try next */ }
   }
@@ -254,12 +285,8 @@ export function captureCurrent(
 export async function readPlaceholdersFromDisk(folderUri: vscode.Uri): Promise<string[]> {
   const { uri: target, existed } = await resolveSnapshotUri(folderUri);
   if (!existed) return [];
-  let bytes: Uint8Array;
-  try {
-    bytes = await vscode.workspace.fs.readFile(target);
-  } catch {
-    return [];
-  }
+  const bytes = await readFileBounded(target, `read placeholders ${target.toString()}`);
+  if (!bytes) return [];
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -281,12 +308,8 @@ export async function readArchiveFolderFromDisk(
 ): Promise<string | undefined> {
   const { uri: target, existed } = await resolveSnapshotUri(folderUri);
   if (!existed) return undefined;
-  let bytes: Uint8Array;
-  try {
-    bytes = await vscode.workspace.fs.readFile(target);
-  } catch {
-    return undefined;
-  }
+  const bytes = await readFileBounded(target, `read archiveFolder ${target.toString()}`);
+  if (!bytes) return undefined;
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);

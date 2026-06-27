@@ -466,18 +466,27 @@ function migrateLegacyActiveTabKey(context: vscode.ExtensionContext): void {
   log(`restore: migrated legacy active-pptx key → lastActiveTab`);
 }
 
+// Only DECK viewers are re-opened on restore. Re-opening the folder-sync admin
+// / config / manifest custom editors kicks off heavy per-folder I/O (full plan
+// build, view-model stats) that — on web FSA, right after a refresh — risks
+// deadlocking activation before the workspace has settled. A deck viewer just
+// renders one file, so it's safe. A non-deck last tab is simply not restored.
+const RESTORABLE_VIEW_TYPES = new Set(['pptxViewer.viewer', 'pptxViewer.pdfViewer']);
+
 async function restoreLastActiveTab(context: vscode.ExtensionContext): Promise<void> {
   const saved = context.globalState.get<SavedActiveTab>(ACTIVE_TAB_KEY);
   if (!saved?.uri) return;
+  if (!saved.viewType || !RESTORABLE_VIEW_TYPES.has(saved.viewType)) {
+    log(
+      `restore: skipping last-active tab — not a deck viewer ` +
+        `(viewType=${saved.viewType ?? 'text'}, ${saved.uri})`,
+    );
+    return;
+  }
   try {
     const uri = vscode.Uri.parse(saved.uri);
-    if (saved.viewType) {
-      log(`restore: re-opening last-active tab — ${saved.uri} (viewType=${saved.viewType})`);
-      await vscode.commands.executeCommand('vscode.openWith', uri, saved.viewType);
-    } else {
-      log(`restore: re-opening last-active tab — ${saved.uri} (text)`);
-      await vscode.commands.executeCommand('vscode.open', uri);
-    }
+    log(`restore: re-opening last-active tab — ${saved.uri} (viewType=${saved.viewType})`);
+    await vscode.commands.executeCommand('vscode.openWith', uri, saved.viewType);
   } catch (err) {
     log(
       `restore: re-open last-active failed — ${err instanceof Error ? err.message : String(err)}`,
