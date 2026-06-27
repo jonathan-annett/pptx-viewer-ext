@@ -30,7 +30,6 @@
 
 import type { Flag, MediaEntry, MediaFileEntry, ParseResult } from './pptx';
 import { compareModalCss } from './sync/compareModalHtml';
-import { decisionWiringScript } from './sync/planHtml';
 import { pdfImportConfigCss } from './pdfImportConfigHtml';
 import { uploadModalCss } from './upload/uploadModalHtml';
 
@@ -44,16 +43,6 @@ const PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER =
   '__PPTX_PDFIMPORT_WEBVIEW_BUNDLE_PLACEHOLDER__';
 
 export interface RenderOptions {
-  /** Pre-rendered HTML for the "Sync target" section, or null/undefined for
-   *  none (file is outside any workspace). Passed verbatim — the caller is
-   *  responsible for HTML safety on its inputs. Mutually exclusive with
-   *  `syncTargetLoading`; if both are set, `syncTargetLoading` wins. */
-  syncTargetHtml?: string | null;
-  /** Render an empty Sync-target section with a "Computing…" placeholder so
-   *  the caller can post a `sync-target-html` message later to swap the
-   *  built dry-run HTML into the page without re-rendering the whole panel.
-   *  The placeholder section carries a stable id `sync-target-section`. */
-  syncTargetLoading?: boolean;
   /** Pre-populated status text shown in the action row. Used after a
    *  successful Update / drop-confirm to surface "Updated" without needing
    *  the new script to receive a postMessage that may race the re-render. */
@@ -113,34 +102,6 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
       </ul>
     </section>`;
 
-  // Sync target section. Three states:
-  //   - syncTargetLoading=true  → placeholder with "Computing…"; the webview
-  //                               will swap real HTML in via a postMessage
-  //                               handler when the dry-run completes.
-  //   - syncTargetHtml truthy   → render the supplied HTML directly (used
-  //                               by tests and any legacy synchronous caller).
-  //   - otherwise               → no section.
-  // Stable ids: `sync-target-section` is the host; `sync-target-content`
-  // wraps the inner HTML so the postMessage handler can swap only the body
-  // (leaving the <h2> heading static in the DOM, which also keeps the
-  // "Sync target" string out of the inline-script literal that would
-  // otherwise trip the renderHtml test for the no-section case).
-  const syncTargetSection = opts.syncTargetLoading
-    ? `<section id="sync-target-section" class="sync-target-pending">
-      <h2>Sync target</h2>
-      <div id="sync-target-content">
-        <p class="sync-target-pending-msg">Computing\u2026</p>
-      </div>
-    </section>`
-    : opts.syncTargetHtml
-    ? `<section id="sync-target-section">
-      <h2>Sync target</h2>
-      <div id="sync-target-content">
-        ${opts.syncTargetHtml}
-      </div>
-    </section>`
-    : '';
-
   const initialStatus = opts.initialStatus ? escapeHtml(opts.initialStatus) : '';
   // Compute the synth-hint payload once. Emitted as its own nonced <script>
   // before viewerScript so the latter can read window.__pptxSynthHint on init.
@@ -176,8 +137,6 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
     </section>
 
     ${validationSection}
-
-    ${syncTargetSection}
   </main>
   <div id="modal-host" class="modal-host" aria-hidden="true"></div>
   <div id="drop-overlay" class="drop-overlay" aria-hidden="true">
@@ -189,7 +148,6 @@ export function renderHtml(r: ParseResult, nonce: string, opts: RenderOptions = 
   <script nonce="${nonce}">${PDF_IMPORT_WEBVIEW_BUNDLE_PLACEHOLDER}</script>
   ${synthHint ? `<script nonce="${nonce}">${synthHint}</script>` : ''}
   <script nonce="${nonce}">${viewerScript()}</script>
-  <script nonce="${nonce}">${decisionWiringScript()}</script>
 </body>
 </html>`;
 }

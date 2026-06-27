@@ -92,15 +92,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // user has to click the file in the explorer to re-open it. Previously
   // this registration sat after ensureWorkspaceLockSettings + cache opens +
   // SyncManager.create, far enough into activate() for VS Code to give up.
-  //
-  // The provider needs SyncManager for the "Sync target" section but
-  // nothing else, so we hand it a Promise and resolve it later.
-  let resolveManager!: (m: SyncManager) => void;
-  const managerPromise = new Promise<SyncManager>((res) => {
-    resolveManager = res;
-  });
   context.subscriptions.push(
-    PptxEditorProvider.register(managerPromise, context.globalState),
+    PptxEditorProvider.register(),
   );
   log('activate: custom editor registered for *.pptx');
   context.subscriptions.push(PdfEditorProvider.register());
@@ -180,9 +173,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // discovery, hot-reload, and topology resolution. The status bar and the
   // showTopology command are surface layers over the manager's state.
   const manager = await SyncManager.create(context);
-  // Unblock any resolveCustomEditor calls that landed during activation —
-  // they've been awaiting this since the provider was registered above.
-  resolveManager(manager);
 
   // Active-tab tracker for the PWA-refresh-restore loop above. Started after
   // manager resolution so the initial capture sees whatever tab the restore

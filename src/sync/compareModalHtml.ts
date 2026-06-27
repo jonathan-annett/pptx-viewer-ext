@@ -22,15 +22,9 @@ import type { ParseResult } from '../pptx';
 export function renderCompareModalHtml(
   current: ParseResult,
   candidate: ParseResult,
-  autoSyncDefault: boolean,
 ): string {
   // Modal is rendered into a host container that the viewer styles as a
   // full-window overlay. The dimmed backdrop is a sibling rule on .modal-host.
-  // The auto-sync checkbox lives in the action row; its initial checked state
-  // comes from globalState (last value used on a previous Update). Toggling
-  // the box only takes effect when the user actually clicks Update — Cancel
-  // preserves the prior default.
-  const checked = autoSyncDefault ? ' checked' : '';
   return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="compare-title">
   <h2 id="compare-title" class="modal-title">Replace current file?</h2>
   <p class="modal-sub">A different pptx was dropped. Compare and choose.</p>
@@ -45,10 +39,6 @@ export function renderCompareModalHtml(
     </div>
   </div>
   <div class="modal-actions">
-    <label class="compare-auto-sync" title="Run the per-file sync immediately after replacing — pushes the new file out to its destinations">
-      <input type="checkbox" id="compare-auto-sync"${checked}>
-      <span>Sync to destinations after update</span>
-    </label>
     <span class="modal-actions-spacer"></span>
     <button type="button" class="action-btn action-btn-secondary" id="compare-cancel-btn">Cancel</button>
     <button type="button" class="action-btn" id="compare-update-btn">Update file</button>

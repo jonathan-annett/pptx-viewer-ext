@@ -20,27 +20,8 @@ import { type ParseResult, type ParseTimings } from './pptx';
 import { getParseCacheSingleton, parsePptxCached, project } from './sync/parseCache';
 import { renderHtml, renderError, type RenderOptions } from './webview';
 import { log } from './log';
-import type { SyncManager } from './sync/manager';
-import {
-  classifyPreviewContext,
-  type PreviewContext,
-  type PreviewInput,
-  type PreviewSource,
-  type PreviewWorkspaceFolder,
-} from './sync/previewContext';
-import { buildScopedDryRunPlan, type PlanForDestination } from './sync/planner';
 import { getActivePlaceholderSet } from './sync/placeholderRegistry';
-import { renderPlanPairs, toViewModel } from './sync/planHtml';
-import { readManifest } from './sync/manifest';
 import { renderCompareModalHtml, renderIdenticalModalHtml } from './sync/compareModalHtml';
-import { runSync, formatRunSummary } from './sync/runSync';
-import { surfaceManifestVersionMismatches } from './sync/planView';
-import {
-  countAccepted,
-  handleDecisionMessage,
-  seedRememberedDecisions,
-  type RowDecision,
-} from './sync/decisions';
 import { startUploadFlow, type UploadFlowHandle } from './upload/uploadFlow';
 
 class PptxDocument implements vscode.CustomDocument {
@@ -142,26 +123,10 @@ export async function requestPdfImportIntoViewer(
 export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<PptxDocument> {
   public static readonly viewType = 'pptxViewer.viewer';
 
-  constructor(
-    // Promise rather than a resolved manager so the provider can be registered
-    // at the top of activate() before SyncManager.create runs. On PWA refresh
-    // VS Code restores .pptx editor tabs as soon as workspace folders are
-    // mounted (by our maybeRestore) — if the provider isn't registered by
-    // then, VS Code drops the tab and shows the welcome page. We await the
-    // promise inside resolveCustomEditor only at the point the manager is
-    // actually needed (sync-target rendering); the read+parse+render path
-    // doesn't depend on it.
-    private readonly managerPromise: Promise<SyncManager>,
-    private readonly globalState: vscode.Memento,
-  ) {}
-
-  public static register(
-    managerPromise: Promise<SyncManager>,
-    globalState: vscode.Memento,
-  ): vscode.Disposable {
+  public static register(): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       PptxEditorProvider.viewType,
-      new PptxEditorProvider(managerPromise, globalState),
+      new PptxEditorProvider(),
       {
         webviewOptions: { retainContextWhenHidden: false },
         supportsMultipleEditorsPerDocument: false,
@@ -183,14 +148,6 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     const fileName = document.uri.path.split('/').pop() ?? 'unknown.pptx';
     log(`open: ${document.uri.toString()}`);
 
-    // Await the manager. On a normal user-initiated open (after activate()
-    // returned) this resolves synchronously. On a PWA-refresh restore where
-    // resolveCustomEditor fires before SyncManager.create completes, we
-    // block here briefly — the panel stays empty for that window, then
-    // populates as normal. Crucially we are NOT blocked at registration
-    // time, so VS Code does not drop the editor tab.
-    const manager = await this.managerPromise;
-
     // Single-slot candidate cache for the ingest → confirm-update flow. The
     // drop path posts bytes once, waits for the user to click Update inside
     // the compare modal, and we re-use the same bytes from memory rather
@@ -202,99 +159,20 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
     // sha256 without re-reading and re-parsing the file on disk.
     let currentResult: ParseResult | null = null;
 
-    // Per-render scoped-plan stash. The Sync target section's Run Sync button
-    // dispatches `run-sync` and we feed these plans straight into runSync().
-    // Reset on every render so a button that survives in a stale tab can't
-    // operate on out-of-date plans.
-    let lastPerFilePlans: PlanForDestination[] = [];
-    let lastPerFileBlocking = 0;
-    let lastPerFileHasWork = false;
-    let syncInFlight = false;
-    // M5.1: per-row decisions for the embedded scoped plan. Reset on each
-    // render alongside `lastPerFilePlans` — IDs are positional and the plan
-    // is recomputed on every render (drop, save-as, topology change).
-    let lastPerFileDecisions = new Map<string, RowDecision>();
-
-    // Monotonic token for the in-flight sync-target build. Used to ignore
-    // late responses from a build that started against an old ParseResult
-    // (e.g. user dropped a new file mid-build). Each renderWithSyncTarget
-    // bumps it; the async build checks the token before posting.
-    let syncTargetBuildToken = 0;
-
-    const renderWithSyncTarget = async (
+    // Render the viewer shell for a parse result. The placeholder lookup is
+    // async but always safe (the registry returns the empty-default set when
+    // the workspace is folderless or the registry hasn't loaded yet) and just
+    // drives the "placeholder stub" banner.
+    const render = async (
       result: ParseResult,
       initialStatus?: string,
     ): Promise<void> => {
-      // 1. Render the shell IMMEDIATELY — thumbnail, metadata, validation,
-      //    and a placeholder "Sync target" section saying "Computing…".
-      //    The dry-run (buildSyncTargetHtml) is the slow phase; we kick it
-      //    off below and post the result back to the webview when it's
-      //    ready. Net effect: the user sees the bulk of the page snap into
-      //    place immediately, then the sync section fills in.
-      lastPerFilePlans = [];
-      lastPerFileBlocking = 0;
-      lastPerFileHasWork = false;
-      lastPerFileDecisions = new Map();
-      // Placeholder lookup — async but always safe (the registry returns the
-      // empty-default set when the workspace is folderless or the registry
-      // hasn't loaded yet). One extra await pre-render is cost-free given
-      // the existing parse+hash work already on this path.
       const placeholders = await getActivePlaceholderSet();
-      const isPlaceholder = placeholders.has(result.sha256);
       const opts: RenderOptions = {};
-      // Skip the sync-target build entirely for placeholders. The viewer's
-      // job for a stub deck is to confirm "yes, still a stub" — the workspace
-      // plan view (with its [P] chip on the matching row) is the right place
-      // to see sync state for placeholder files, and the per-file build
-      // would otherwise spin up a 24-file walk + dest hashing for what's
-      // ultimately a sub-second confirmation glance. Leaving syncTargetLoading
-      // unset means the section never renders, no "Computing…" flash.
-      if (!isPlaceholder) opts.syncTargetLoading = true;
       if (initialStatus !== undefined) opts.initialStatus = initialStatus;
-      if (isPlaceholder) opts.isPlaceholder = true;
+      if (placeholders.has(result.sha256)) opts.isPlaceholder = true;
       webviewPanel.webview.html = renderHtml(result, makeNonce(), opts);
       currentResult = result;
-
-      if (isPlaceholder) {
-        // Bump the build token so any in-flight build from a previous
-        // (non-placeholder) render of this panel gets discarded when it
-        // resolves, and skip kicking off a fresh one.
-        ++syncTargetBuildToken;
-        return;
-      }
-
-      // 2. Background build — when it lands, post a sync-target-html
-      //    message; the webview swaps it into the placeholder section
-      //    (or removes the section if there's no sync coverage).
-      const myToken = ++syncTargetBuildToken;
-      try {
-        const syncTarget = await buildSyncTargetHtml(manager, document.uri);
-        if (myToken !== syncTargetBuildToken) {
-          // A newer render superseded us before this build finished.
-          log(`viewer[${fileName}]: sync-target build #${myToken} superseded — discarding`);
-          return;
-        }
-        lastPerFilePlans = syncTarget?.plans ?? [];
-        lastPerFileBlocking = syncTarget?.blocking ?? 0;
-        lastPerFileHasWork = syncTarget?.hasWork ?? false;
-        // The webview HTML was rebuilt above, so any decisions the user
-        // armed before are gone from the DOM. The stash is already empty
-        // (reset above) — remembered rows come back pre-checked via the
-        // renderer, and we seed the map so the extension's view matches.
-        const seeded = seedRememberedDecisions(lastPerFilePlans, lastPerFileDecisions);
-        if (seeded > 0) {
-          log(`viewer[${fileName}]: seeded ${seeded} remembered decision(s) from plan`);
-        }
-        webviewPanel.webview.postMessage({
-          type: 'sync-target-html',
-          html: syncTarget?.html ?? null,
-        });
-      } catch (err) {
-        if (myToken !== syncTargetBuildToken) return;
-        const message = err instanceof Error ? err.message : String(err);
-        log(`viewer[${fileName}]: sync-target build threw — ${message}`);
-        webviewPanel.webview.postMessage({ type: 'sync-target-html', html: null });
-      }
     };
 
     // M5: per-panel upload session. At most one is active at a time; opening
@@ -334,13 +212,6 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
 
       if (m.type === 'viewer-log' && typeof m.message === 'string') {
         log(`viewer[${fileName}]: ${m.message}`);
-        return;
-      }
-
-      if (m.type === 'decision') {
-        handleDecisionMessage(msg, lastPerFileDecisions, (line) =>
-          log(`viewer[${fileName}]: ${line}`),
-        );
         return;
       }
 
@@ -410,8 +281,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           (candidate) => {
             pendingCandidate = candidate;
           },
-          renderWithSyncTarget,
-          this.globalState.get<boolean>('pptxViewer.autoSyncAfterDrop', false),
+          render,
         );
         return;
       }
@@ -423,28 +293,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         }
         const candidate = pendingCandidate;
         pendingCandidate = null;
-        // The webview sends the checkbox state along; persist it so the next
-        // drop's modal opens with the same default. Cancel takes the other
-        // branch and does NOT touch the stored default.
-        const autoSync = (msg as { autoSync?: unknown }).autoSync === true;
-        await this.globalState.update('pptxViewer.autoSyncAfterDrop', autoSync);
-        await handleConfirmUpdate(document, webviewPanel, candidate, renderWithSyncTarget);
-        if (autoSync && lastPerFileHasWork && lastPerFileBlocking === 0 && !syncInFlight) {
-          syncInFlight = true;
-          webviewPanel.webview.postMessage({ type: 'sync-status', status: 'running' });
-          try {
-            await runPerFileSync(
-              webviewPanel,
-              fileName,
-              lastPerFilePlans,
-              lastPerFileDecisions,
-              currentResult,
-              renderWithSyncTarget,
-            );
-          } finally {
-            syncInFlight = false;
-          }
-        }
+        await handleConfirmUpdate(document, webviewPanel, candidate, render);
         return;
       }
 
@@ -521,48 +370,6 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
         return;
       }
 
-      if (m.type === 'run-sync') {
-        // Per-file Run Sync — same machinery as the admin editor's, but with
-        // a plan list filtered to a single file by buildScopedDryRunPlan's
-        // pathFilter+pathFilterIsFile options.
-        //
-        // M5.1: orange Run Sync (safe items only) posts the same message;
-        // the difference is what's in `lastPerFileDecisions`. The executor
-        // honours whatever's armed; un-armed collisions, blocked warnings,
-        // and destination-only files skip naturally. So we only gate on the
-        // truly no-op case (no work AND no armed decisions). Mirrors the
-        // admin/config editor's runSync handler.
-        if (syncInFlight) return;
-        if (!lastPerFileHasWork && countAccepted(lastPerFileDecisions) === 0) {
-          log(`viewer[${fileName}]: run-sync ignored — nothing to do`);
-          // Defensive: the webview has locked its buttons into "Syncing…"
-          // on click. Post a terminal status so it unlocks even though we
-          // never started execution. Without this the orange button stays
-          // pinned in its locked label forever.
-          webviewPanel.webview.postMessage({
-            type: 'sync-status',
-            status: 'done',
-            ok: 0,
-            failed: 0,
-          });
-          return;
-        }
-        syncInFlight = true;
-        webviewPanel.webview.postMessage({ type: 'sync-status', status: 'running' });
-        try {
-          await runPerFileSync(
-            webviewPanel,
-            fileName,
-            lastPerFilePlans,
-            lastPerFileDecisions,
-            currentResult,
-            renderWithSyncTarget,
-          );
-        } finally {
-          syncInFlight = false;
-        }
-        return;
-      }
     });
 
     try {
@@ -596,7 +403,7 @@ export class PptxEditorProvider implements vscode.CustomReadonlyEditorProvider<P
           (cacheHit ? ' (cached)' : ''),
       );
       if (result.timings) logParseTimings(fileName, '', result.timings, readMs);
-      await renderWithSyncTarget(result);
+      await render(result);
 
       // Drain any pending PDF-import stash. The search panel's update flow
       // for a (canonical PPTX, candidate PDF) pair stashes the PDF bytes
@@ -826,8 +633,7 @@ async function handleIngest(
   webviewPanel: vscode.WebviewPanel,
   currentResult: ParseResult | null,
   setCandidate: (c: { fileName: string; bytes: Uint8Array; sha256: string }) => void,
-  renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
-  autoSyncDefault: boolean,
+  render: (r: ParseResult, initialStatus?: string) => Promise<void>,
 ): Promise<void> {
   // 'upload' is a new (M5) ingest source — user-affirmed bytes from the
   // dropbox-server. It behaves identically to 'picker' (no compare modal;
@@ -941,7 +747,7 @@ async function handleIngest(
         await cache.forget(candidate.sha256);
         log(`ingest[${source}]: evicted stale cache entry for sha256=${candidate.sha256.slice(0, 12)}… (will be repopulated by post-write re-parse)`);
       }
-      await writeAndRender(document, webviewPanel, bytes, ingestFileName, renderWithSyncTarget);
+      await writeAndRender(document, webviewPanel, bytes, ingestFileName, render);
       webviewPanel.webview.postMessage({ type: 'picker-result', outcome: 'updated' });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -958,7 +764,7 @@ async function handleIngest(
   // Drop path — stash candidate and ask the user.
   setCandidate({ fileName: ingestFileName, bytes, sha256: candidate.sha256 });
   const modalHtml = currentResult
-    ? renderCompareModalHtml(currentResult, candidate, autoSyncDefault)
+    ? renderCompareModalHtml(currentResult, candidate)
     : renderIdenticalModalHtml(ingestFileName); // shouldn't happen — current is always set by the time the user can drop, but be tolerant
   webviewPanel.webview.postMessage({
     type: 'drop-result',
@@ -1042,452 +848,6 @@ function coerceToUint8Array(raw: unknown): Uint8Array {
   throw new Error('Could not interpret bytes payload as Uint8Array');
 }
 
-// ───── per-file Run Sync ────────────────────────────────────────────────
-
-/**
- * Execute the per-file scoped plan via the shared runSync engine, log a summary,
- * surface info/warning toasts (same UX as admin + config editors), and re-render
- * the panel so the Sync target section reflects the post-sync world. The post-
- * sync re-render is what gives the user immediate feedback that the section's
- * "to update" line went away.
- */
-async function runPerFileSync(
-  webviewPanel: vscode.WebviewPanel,
-  fileName: string,
-  plans: PlanForDestination[],
-  decisions: ReadonlyMap<string, RowDecision>,
-  currentResult: ParseResult | null,
-  renderWithSyncTarget: (r: ParseResult, initialStatus?: string) => Promise<void>,
-): Promise<void> {
-  log(
-    `viewer[${fileName}]: run-sync — starting execution (${countAccepted(decisions)} armed override(s))`,
-  );
-  let summary;
-  try {
-    summary = await runSync(plans, decisions);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`viewer[${fileName}]: run-sync threw — ${message}`);
-    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
-    webviewPanel.webview.postMessage({ type: 'sync-status', status: 'error', message });
-    return;
-  }
-
-  for (const line of formatRunSummary(summary).split('\n')) log(line);
-
-  const total = summary.ok + summary.failed;
-  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
-    if (total === 0) {
-      void vscode.window.showInformationMessage('Folder Sync: nothing to do.');
-    } else {
-      void vscode.window.showInformationMessage(
-        `Folder Sync: ${summary.ok} operation(s) completed.`,
-      );
-    }
-  } else if (summary.failed > 0) {
-    void vscode.window
-      .showWarningMessage(
-        `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
-        'Show details',
-      )
-      .then((choice) => {
-        if (choice === 'Show details') {
-          void vscode.commands.executeCommand('workbench.action.output.toggleOutput');
-        }
-      });
-  } else {
-    void vscode.window.showWarningMessage(
-      `Folder Sync: files placed, but ${summary.manifestWriteFailures.length} manifest write(s) failed. ` +
-        `Re-run will re-detect these as already-placed-but-untracked files.`,
-    );
-  }
-
-  // Manifest version-mismatch: orthogonal to the other outcomes (a destination
-  // could be skipped while others still synced). Same surface as the standalone
-  // plan panel so the messaging matches across entry points.
-  surfaceManifestVersionMismatches(summary);
-
-  // Re-render. The whole webview HTML is replaced — the new render's Sync
-  // target section will reflect the updated manifest (typically nothing-to-do
-  // after a green-path apply). initialStatus mirrors what the user just did.
-  if (currentResult) {
-    const status = summary.failed === 0 ? 'Synced' : 'Sync partially failed';
-    await renderWithSyncTarget(currentResult, status);
-  } else {
-    // No current parse on hand (shouldn't happen — the button only renders
-    // after a successful parse), but be defensive: at least notify the page.
-    webviewPanel.webview.postMessage({
-      type: 'sync-status',
-      status: 'done',
-      ok: summary.ok,
-      failed: summary.failed,
-    });
-  }
-}
-
-/**
- * Push a single file out to its sync destinations — the "after update" sync
- * used by the viewer drop dialog and the search panel's update modals. Builds
- * the per-file plan for `fileUri` and, when it's the clean green path
- * (work exists, nothing blocking), runs it and surfaces the usual toasts.
- *
- * Returns a small result the caller can log/report:
- *   - `{ synced: true, ok, failed }` — a sync ran.
- *   - `{ synced: false, reason: 'nothing' }` — no destinations / nothing to do.
- *   - `{ synced: false, reason: 'blocked' }` — collisions/warnings present; the
- *     auto-sync deliberately doesn't ship blocked items (use the plan panel).
- */
-export async function syncFileToDestinations(
-  manager: SyncManager,
-  fileUri: vscode.Uri,
-): Promise<
-  | { synced: true; ok: number; failed: number }
-  | { synced: false; reason: 'nothing' | 'blocked' }
-> {
-  const target = await buildSyncTargetHtml(manager, fileUri);
-  if (!target || !target.hasWork) return { synced: false, reason: 'nothing' };
-  if (target.blocking > 0) {
-    void vscode.window.showWarningMessage(
-      'Updated, but auto-sync skipped: this file has collisions/warnings. ' +
-        'Open the sync plan to ship it.',
-    );
-    return { synced: false, reason: 'blocked' };
-  }
-  let summary;
-  try {
-    summary = await runSync(target.plans, new Map());
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`syncFileToDestinations: run-sync threw — ${message}`);
-    void vscode.window.showErrorMessage(`Folder Sync: execution failed — ${message}`);
-    return { synced: false, reason: 'nothing' };
-  }
-  for (const line of formatRunSummary(summary).split('\n')) log(line);
-  if (summary.failed === 0 && summary.manifestWriteFailures.length === 0) {
-    if (summary.ok > 0) {
-      void vscode.window.showInformationMessage(
-        `Folder Sync: ${summary.ok} operation(s) completed.`,
-      );
-    }
-  } else if (summary.failed > 0) {
-    void vscode.window.showWarningMessage(
-      `Folder Sync: ${summary.ok} succeeded, ${summary.failed} failed.`,
-    );
-  }
-  surfaceManifestVersionMismatches(summary);
-  return { synced: true, ok: summary.ok, failed: summary.failed };
-}
-
-// ───── sync target section ──────────────────────────────────────────────
-
-/**
- * Output of buildSyncTargetHtml. `plans` is the raw planner output, kept so
- * the per-file Run Sync button can hand them straight to runSync() without
- * a second walk. `blocking` + `hasWork` are the same gating values the admin
- * + config editors compute.
- */
-interface SyncTargetResult {
-  html: string;
-  plans: PlanForDestination[];
-  blocking: number;
-  /**
-   * Items whose only warnings are 'override' severity. The viewer's orange
-   * Run Sync button is enabled whenever `blocking > 0` so the user can ship
-   * armed overrides through the same per-row affordance the standalone plan
-   * webview offers.
-   */
-  overridableWarnings: number;
-  hasWork: boolean;
-}
-
-/**
- * Build the HTML for the viewer's "Sync target" section from current topology
- * + manifest. Returns null when the file is outside any workspace folder —
- * the renderer drops the section entirely in that case.
- *
- * Branching:
- *   - source             → scoped dry-run plan + attribution + Run Sync
- *   - destinationMapped  → scoped dry-run plan against the owning source +
- *                          attribution lines + Run Sync (re-sync this file
- *                          from the source's current copy)
- *   - destinationOrphan  → muted banner "unique to destination" (no plan)
- *   - uncovered          → muted banner "not covered by a .sync.jsonc"
- *   - outsideWorkspace   → null (no section)
- */
-async function buildSyncTargetHtml(
-  manager: SyncManager,
-  documentUri: vscode.Uri,
-): Promise<SyncTargetResult | null> {
-  const topology = manager.getTopology();
-  const workspaceFolders = (vscode.workspace.workspaceFolders ?? []).map(toPreviewWorkspaceFolder);
-  const sources = topology.sources.map(toPreviewSource);
-
-  // Find the containing workspace folder by ancestry on path. Used to read
-  // the manifest at that root before classifying.
-  const containing = pickContainingFolder(documentUri.path, vscode.workspace.workspaceFolders ?? []);
-  // Treat a version-mismatched manifest like a missing manifest for the
-  // viewer's purposes — the preview still renders, the user sees the file
-  // surface as destination-only (or scoped-plan with empty tracking). The
-  // refusal-to-sync signal lands when they hit Run Sync, via the toast
-  // surfaced by surfaceManifestVersionMismatches above. Logging the read
-  // result here would double-log; manifest.ts already logged on read.
-  const manifestResult = containing ? await readManifest(containing.uri) : null;
-  const manifest =
-    manifestResult && manifestResult.kind === 'ok' ? manifestResult.manifest : null;
-
-  const input: PreviewInput = {
-    documentUri: documentUri.toString(),
-    documentPath: documentUri.path,
-    workspaceFolders,
-    sources,
-    manifest,
-  };
-  const ctx = classifyPreviewContext(input);
-
-  switch (ctx.kind) {
-    case 'outsideWorkspace':
-      return null;
-
-    case 'uncovered':
-      return bannerOnly(renderUncoveredBanner(ctx.workspaceFolderName, ctx.relPath));
-
-    case 'destinationOrphan':
-      return bannerOnly(renderOrphanBanner(ctx.destinationWorkspaceFolderName, ctx.relPath));
-
-    case 'source':
-      return renderScopedPlan(manager, ctx.sourceConfigUri, documentUri, {
-        kind: 'source',
-        workspaceFolderName: ctx.workspaceFolderName,
-        relPath: ctx.relPath,
-      });
-
-    case 'destinationMapped':
-      // Build the scoped plan against the source that placed the file, with
-      // pathFilter relative to the source folder. Resolve the source URI by
-      // looking up the configUri in topology.
-      return renderScopedPlanForDestination(manager, ctx, documentUri);
-  }
-}
-
-function bannerOnly(html: string): SyncTargetResult {
-  return { html, plans: [], blocking: 0, overridableWarnings: 0, hasWork: false };
-}
-
-function renderUncoveredBanner(workspaceFolderName: string, relPath: string): string {
-  const where = relPath ? `${workspaceFolderName}/${relPath}` : workspaceFolderName;
-  return `<div class="sync-banner muted">
-    <strong>Not covered by sync.</strong>
-    <code>${escapeHtml(where)}</code> is in the workspace but no <code>.sync.jsonc</code> includes it.
-  </div>`;
-}
-
-function renderOrphanBanner(destinationWorkspaceFolderName: string, relPath: string): string {
-  const where = relPath
-    ? `${destinationWorkspaceFolderName}/${relPath}`
-    : destinationWorkspaceFolderName;
-  return `<div class="sync-banner muted">
-    <strong>Destination-only file.</strong>
-    <code>${escapeHtml(where)}</code> lives in a sync destination but isn't tracked by any source manifest.
-  </div>`;
-}
-
-async function renderScopedPlan(
-  manager: SyncManager,
-  sourceConfigUri: string,
-  documentUri: vscode.Uri,
-  attribution: { kind: 'source'; workspaceFolderName: string; relPath: string },
-): Promise<SyncTargetResult> {
-  try {
-    const placeholders = await getActivePlaceholderSet();
-    const plans = await buildScopedDryRunPlan(manager.getTopology(), {
-      sourceConfigUri: vscode.Uri.parse(sourceConfigUri),
-      pathFilter: documentUri,
-      pathFilterIsFile: true,
-      placeholders,
-    });
-    // M5.1: per-row decision checkboxes are wired through to the viewer's
-    // postMessage channel — same as the admin/config editors. Collisions get
-    // an Overwrite arming, destination-only rows get Delete, and green-path
-    // rows with override-only warnings get "Sync anyway".
-    const vm = toViewModel(
-      plans,
-      (plan) => {
-        const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
-        return rel || plan.source.sourceFolderUri.toString();
-      },
-      { interactive: true },
-    );
-    const head = `<p class="sync-attribution">Source: <code>${escapeHtml(attribution.workspaceFolderName)}</code> · path <code>${escapeHtml(attribution.relPath)}</code></p>`;
-    const blocking = vm.totals.updateCollision + vm.totals.warnings;
-    const hasWork =
-      vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, vm.totals);
-    const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
-    return { html, plans, blocking, overridableWarnings: vm.totals.overridableWarnings, hasWork };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`viewer: scoped-plan failed — ${message}`);
-    return bannerOnly(`<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`);
-  }
-}
-
-async function renderScopedPlanForDestination(
-  manager: SyncManager,
-  ctx: Extract<PreviewContext, { kind: 'destinationMapped' }>,
-  _documentUri: vscode.Uri,
-): Promise<SyncTargetResult> {
-  try {
-    const topology = manager.getTopology();
-    const source = topology.sources.find(
-      (s) => s.configUri.toString() === ctx.sourceConfigUri,
-    );
-    if (!source) {
-      return bannerOnly(`<div class="sync-banner muted">Source no longer present in topology — manifest may be stale.</div>`);
-    }
-    // pathFilter is the source-relative path joined onto the source folder URI.
-    const pathFilter = source.sourceFolderUri.with({
-      path: joinPath(source.sourceFolderUri.path, ctx.sourceRelPath),
-    });
-    const placeholders = await getActivePlaceholderSet();
-    const plans = await buildScopedDryRunPlan(topology, {
-      sourceConfigUri: source.configUri,
-      pathFilter,
-      pathFilterIsFile: true,
-      placeholders,
-    });
-    // M5.1: same interactive treatment as the source-side scoped plan.
-    const vm = toViewModel(
-      plans,
-      (plan) => {
-        const rel = vscode.workspace.asRelativePath(plan.source.sourceFolderUri, false);
-        return rel || plan.source.sourceFolderUri.toString();
-      },
-      { interactive: true },
-    );
-    const head = `<p class="sync-attribution">Placed here by source <code>${escapeHtml(ctx.sourceWorkspaceFolderName)}</code> · source path <code>${escapeHtml(ctx.sourceRelPath)}</code></p>`;
-    const blocking = vm.totals.updateCollision + vm.totals.warnings;
-    const hasWork =
-      vm.totals.create + vm.totals.updateTracked + vm.totals.deleteTracked + vm.totals.updateCollision > 0;
-    const actions = renderRunSyncRow(hasWork, vm.totals);
-    const html = `<div class="sync-target">${head}${renderPlanPairs(vm)}${actions}</div>`;
-    return { html, plans, blocking, overridableWarnings: vm.totals.overridableWarnings, hasWork };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log(`viewer: dest-mapped scoped-plan failed — ${message}`);
-    return bannerOnly(`<div class="sync-banner muted">Could not build scoped plan: ${escapeHtml(message)}</div>`);
-  }
-}
-
-/**
- * Render the Run Sync action row appended to a scoped plan section. M5.1
- * mirrors the admin/config editor's traffic-light buttons:
- *   - Green Run Sync — always present; enabled iff `blocking === 0` & hasWork.
- *   - Orange Run Sync (safe items only) — shown iff `blocking > 0`; label is
- *     refreshed by the viewer's `__decisionWiring` hook as the user arms
- *     per-row checkboxes (the same checkboxes embedded in the scoped plan
- *     above this action row).
- *
- * The hint to the right explains gating when something blocks; otherwise it
- * stays empty.
- */
-function renderRunSyncRow(
-  hasWork: boolean,
-  totals: {
-    updateCollision: number;
-    warnings: number;
-    blockingWarnings: number;
-    overridableWarnings: number;
-    create: number;
-    updateTracked: number;
-    deleteTracked: number;
-    destinationOnly: number;
-  },
-): string {
-  const collisions = totals.updateCollision;
-  const blocking = collisions + totals.warnings;
-  const safeUpper = totals.create + totals.updateTracked + totals.deleteTracked;
-  // Items the orange "safe items only" button can actually ship when armed:
-  // collisions (overwrite decision), destination-only (delete decision), and
-  // create/update-tracked rows that may carry an overridable warning. A
-  // skip-row with an overridable warning has nothing to ship — the file is
-  // already in sync — so it doesn't count.
-  const shippable = collisions + totals.destinationOnly + safeUpper;
-
-  let hint = '';
-  let greenDisabled = '';
-  let orangeAttrs = ' hidden disabled';
-
-  if (blocking > 0) {
-    greenDisabled = ' disabled';
-    const parts: string[] = [];
-    if (collisions) parts.push(`${collisions} collision${collisions === 1 ? '' : 's'}`);
-    if (totals.blockingWarnings) {
-      parts.push(`${totals.blockingWarnings} blocked file${totals.blockingWarnings === 1 ? '' : 's'}`);
-    }
-    if (totals.overridableWarnings) {
-      parts.push(
-        `${totals.overridableWarnings} file${totals.overridableWarnings === 1 ? '' : 's'} needing override`,
-      );
-    }
-    if (shippable > 0) {
-      orangeAttrs = '';
-      hint = `${parts.join(' + ')} — orange ships armed overrides or skips the rest.`;
-    } else if (totals.overridableWarnings > 0 && !hasWork) {
-      // Skip-row(s) carry an overridable warning, but there's nothing to
-      // ship — destination already matches source. The warning is purely
-      // informational in this case.
-      hint = 'Destination already matches source — validator warning is informational.';
-    } else {
-      hint = `${parts.join(' + ')} — cannot ship; fix the source file and re-open.`;
-    }
-  } else if (!hasWork) {
-    greenDisabled = ' disabled';
-    hint = 'Nothing to sync — destination is up to date.';
-  }
-
-  return `<div class="sync-actions">
-    <button id="sync-run-btn" class="action-btn sync-run-btn" type="button"${greenDisabled} title="Apply the green-path operations from the plan above — limited to this file">Run Sync</button>
-    <button id="sync-run-safe-btn" class="action-btn sync-run-safe-btn" type="button"${orangeAttrs} title="Sync only the items without collisions or warnings — armed checkboxes still ship">Run Sync (safe items only)</button>
-    <span id="sync-run-hint" class="action-status">${escapeHtml(hint)}</span>
-  </div>`;
-}
-
-function joinPath(base: string, sub: string): string {
-  if (!sub) return base;
-  return base.endsWith('/') ? `${base}${sub}` : `${base}/${sub}`;
-}
-
-function toPreviewWorkspaceFolder(f: vscode.WorkspaceFolder): PreviewWorkspaceFolder {
-  return { uri: f.uri.toString(), path: f.uri.path, name: f.name };
-}
-
-function toPreviewSource(s: import('./sync/topology').ResolvedSource): PreviewSource {
-  return {
-    configUri: s.configUri.toString(),
-    sourceFolderPath: s.sourceFolderUri.path,
-    workspaceFolderName: s.workspaceFolderName,
-    destinations: s.destinations.map((d) => ({ uri: d.uri, subpath: d.subpath })),
-  };
-}
-
-function pickContainingFolder(
-  documentPath: string,
-  folders: readonly vscode.WorkspaceFolder[],
-): vscode.WorkspaceFolder | null {
-  let best: vscode.WorkspaceFolder | null = null;
-  let bestLen = -1;
-  for (const f of folders) {
-    const base = f.uri.path.replace(/\/+$/, '');
-    if (documentPath === base || documentPath.startsWith(`${base}/`)) {
-      if (base.length > bestLen) {
-        best = f;
-        bestLen = base.length;
-      }
-    }
-  }
-  return best;
-}
-
 /**
  * Format a millisecond duration for the parse-timing log line. Under 10ms we
  * keep one decimal (sub-millisecond noise is visible there); above that an
@@ -1524,15 +884,6 @@ function logParseTimings(
       `media=${fmtMs(timings.mediaMs)} ` +
       `show=${fmtMs(timings.showPropsMs)}`,
   );
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 // Cryptographically-random nonce for the webview's CSP. 16 bytes → 32 hex chars

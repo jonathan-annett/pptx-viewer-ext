@@ -148,27 +148,6 @@ test('renderHtml: isPlaceholder omitted preserves the existing corrupt + normal-
   assert.ok(!corruptHtml.includes('banner info'), 'no info banner on parseError');
 });
 
-// ───── sync target section ──────────────────────────────────────────────
-
-test('renderHtml: sync target section absent when syncTargetHtml omitted', () => {
-  const html = renderHtml(parseResult(), NONCE);
-  assert.ok(!/>Sync target</.test(html), 'no Sync target heading by default');
-});
-
-test('renderHtml: sync target section absent when syncTargetHtml is null', () => {
-  const html = renderHtml(parseResult(), NONCE, { syncTargetHtml: null });
-  assert.ok(!/>Sync target</.test(html), 'no Sync target heading on null');
-});
-
-test('renderHtml: sync target section rendered when syncTargetHtml provided', () => {
-  const html = renderHtml(parseResult(), NONCE, {
-    syncTargetHtml: '<div class="sync-target"><p>plan goes here</p></div>',
-  });
-  assert.ok(/>Sync target</.test(html), 'Sync target heading present');
-  assert.ok(html.includes('plan goes here'), 'caller HTML inlined verbatim');
-  assert.ok(html.includes('class="sync-target"'), 'caller wrapper preserved');
-});
-
 // ───── extract media row ────────────────────────────────────────────────
 
 test('renderHtml: extract-media row absent when no embedded video', () => {
@@ -251,38 +230,14 @@ test('renderHtml: CSP forbids default-src and allows only data: images', () => {
   assert.ok(html.includes('img-src data:'), 'img-src data: only');
 });
 
-// ───── M5.1: shared decision-wiring snippet ─────────────────────────────
-
-test('renderHtml: embeds the shared decisionWiringScript so per-row checkboxes post {type:"decision"}', () => {
+test('renderHtml: nonce flows onto every <script> tag (viewer + pdf import)', () => {
   const html = renderHtml(parseResult(), NONCE);
-  // Distinctive tokens emitted by decisionWiringScript() in src/sync/planHtml.ts.
-  // The viewer needs these whether or not a sync-target section is present,
-  // so the script can attach to rows that show up on a subsequent re-render
-  // (drop / save-as → renderWithSyncTarget rebuilds the whole HTML, but the
-  // first render with no sync section still benefits from a no-op listener).
-  assert.ok(
-    html.includes('__decisionWiringInstalled'),
-    'delegated listener guard token present',
-  );
-  assert.ok(
-    html.includes('__decisionVscode'),
-    'cached vscode API singleton present (so the viewer + decision scripts share it)',
-  );
-  assert.ok(
-    /type:\s*['"]decision['"]/.test(html),
-    'decision message type emitted by the shared snippet',
-  );
-});
-
-test('renderHtml: nonce flows onto every <script> tag (viewer + decision wiring + pdf import)', () => {
-  const html = renderHtml(parseResult(), NONCE);
-  // Three nonce-tagged <script> tags are expected:
+  // Two nonce-tagged <script> tags are expected in the slim build:
   //   1. viewer script (postMessage wiring, action handlers)
-  //   2. shared decisionWiringScript (M5.1)
-  //   3. PDF import webview bundle (M-VE-1)
+  //   2. PDF import webview bundle (M-VE-1)
   // All must carry the per-render nonce — otherwise the strict CSP blocks them.
   const occurrences = html.split(`<script nonce="${NONCE}">`).length - 1;
-  assert.equal(occurrences, 3, 'three nonce-tagged <script> tags (viewer + decision wiring + pdf import)');
+  assert.equal(occurrences, 2, 'two nonce-tagged <script> tags (viewer + pdf import)');
 });
 
 // ───── run ──────────────────────────────────────────────────────────────
