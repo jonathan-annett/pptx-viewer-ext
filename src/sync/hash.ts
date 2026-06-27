@@ -76,6 +76,15 @@ export interface HashFileAtUriOptions {
    * the per-file fallback on miss.
    */
   snapshot?: Map<string, HashCacheEntry>;
+  /**
+   * Skip the cache/snapshot LOOKUP and always read + re-hash the bytes, then
+   * refresh the cache with the freshly computed sha. The (size, mtime) key
+   * isn't trusted — used by the search panel's explicit Reindex so an external
+   * edit that left size+mtime unchanged (or whose mtime the web FSA layer
+   * reports staleley) is still detected. The recorded entry stays consistent
+   * for the next non-forced caller.
+   */
+  force?: boolean;
 }
 
 export async function hashFileAtUri<U extends { toString(): string }>(
@@ -92,7 +101,7 @@ export async function hashFileAtUri<U extends { toString(): string }>(
   // then fall through to per-call cache.lookup() so a record() that landed
   // mid-walk from another caller is still observed. Either tier returns a
   // sha string on hit, undefined on miss.
-  if (opts?.snapshot || cache) {
+  if (!opts?.force && (opts?.snapshot || cache)) {
     const cached = await snapshotHashLookup(opts?.snapshot, cache, uri, stat.size, stat.mtime);
     if (cached !== undefined) {
       if (!needBytes) {

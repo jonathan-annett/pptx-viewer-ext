@@ -173,6 +173,9 @@ export function startSearchIndexer(
   // placeholder file was classified (per-URI vs content-deduped).
   let activePlaceholderShas: ReadonlySet<string> = getActivePlaceholderSetSync();
   let queued = false;
+  // Set when a force (Reindex) request coalesces into an in-flight pass, so the
+  // re-run honours the force even though the original pass didn't.
+  let queuedForce = false;
   let firstPassReady: Promise<void>;
   let resolveFirstPass: () => void = () => {};
   firstPassReady = new Promise<void>((res) => {
@@ -263,16 +266,22 @@ export function startSearchIndexer(
    * Coalesces with overlapping requests — a second call while one is in
    * flight waits, then runs once more.
    */
-  async function runFullPass(): Promise<void> {
+  async function runFullPass(force = false): Promise<void> {
     if (disposed) return;
     if (inFlight) {
+      // A force request that lands while a non-force pass is running still
+      // wants a forced re-hash, so remember it for the coalesced re-run.
+      if (force) queuedForce = true;
       queued = true;
       return inFlight;
     }
     inFlight = (async (): Promise<void> => {
+      let runForce = force;
       do {
         queued = false;
-        await doFullPass();
+        queuedForce = false;
+        await doFullPass(runForce);
+        runForce = queuedForce;
       } while (queued && !disposed);
     })();
     try {
@@ -322,7 +331,7 @@ export function startSearchIndexer(
     return [...dirs];
   }
 
-  async function doFullPass(): Promise<void> {
+  async function doFullPass(force = false): Promise<void> {
     if (disposed) return;
     const folders = scope.folderUris;
     if (folders.length === 0) {
@@ -385,7 +394,10 @@ export function startSearchIndexer(
     }
 
     const total = allUris.length;
-    log(`search-indexer: pass starting — ${total} pptx+pdf file(s) across ${folders.length} folder(s)`);
+    log(
+      `search-indexer: pass starting — ${total} pptx+pdf file(s) across ${folders.length} folder(s)` +
+        (force ? ' [force re-hash]' : ''),
+    );
 
     // Sweep: any URIs the engine knows about that aren't in the found set
     // and that *should* be in scope must have been deleted on disk between
@@ -422,7 +434,7 @@ export function startSearchIndexer(
       if (disposed) return;
       emitProgress({ phase: 'projecting', done, total });
       try {
-        await processUri(uri, walkSnapshots);
+        await processUri(uri, walkSnapshots, force);
       } catch (err) {
         stats.errors++;
         log(
@@ -473,16 +485,21 @@ export function startSearchIndexer(
       hash?: Map<string, HashCacheEntry>;
       parse?: Map<string, CachedParseResult>;
     },
+    force = false,
   ): Promise<void> {
     const hashCache = opts.hashCache ?? (getHashCacheSingleton() as UriHashCache<vscode.Uri> | undefined);
     const parseCache = opts.parseCache ?? getParseCacheSingleton();
 
     // First read: stat + maybe-read for the hash. Source-walk style —
     // bytes returned only on cache miss, which is when we'll likely need
-    // them anyway (parse). Hits skip the read.
+    // them anyway (parse). Hits skip the read. A forced pass (explicit
+    // Reindex) bypasses the (size, mtime) cache lookup and re-reads so an
+    // external edit is always detected; needBytes:true lets Step 4 reuse the
+    // bytes instead of reading twice.
     const hashed = await hashFileAtUri(fs, uri, hashCache, {
-      needBytes: false,
+      needBytes: force,
       snapshot: walkSnapshots?.hash,
+      force,
     });
     const sha = hashed.sha256;
     const info: FileInfo = {
@@ -580,11 +597,12 @@ export function startSearchIndexer(
       }
     }
 
-    // Step 4: fresh parse. Read bytes (skipped at step 1) and feed
+    // Step 4: fresh parse. Reuse the bytes the forced hash already read;
+    // otherwise read now (skipped at step 1 on the fast path) and feed
     // parsePptxCached so the parse-cache learns about this sha too.
     let bytes: Uint8Array;
     try {
-      bytes = await fs.readFile(uri);
+      bytes = hashed.bytes ?? (await fs.readFile(uri));
     } catch (err) {
       stats.errors++;
       log(
@@ -772,7 +790,10 @@ export function startSearchIndexer(
       await firstPassReady;
     },
     async refresh() {
-      await runFullPass();
+      // Explicit Reindex: force a fresh re-hash so external edits are detected
+      // even when the file watcher never fired (web FSA) or size+mtime didn't
+      // move. Worth the full re-read — this path is user-initiated.
+      await runFullPass(true);
     },
     onProgress(listener) {
       progressListeners.add(listener);

@@ -307,6 +307,34 @@ test('hashFileAtUri: cache miss after mtime change → re-reads and updates the 
   assert.deepEqual(fs.ops, ['stat f']);
 });
 
+test('hashFileAtUri: force re-hashes despite a matching (size,mtime) cache entry', async () => {
+  const fs = makeFakeFs();
+  const v1 = enc.encode('aaa'); // 3 bytes
+  putFile(fs, 'f', v1, 1000);
+  const cache = new InMemoryHashCache<string>();
+  const r1 = await hashFileAtUri(fs, 'f', cache);
+
+  // External edit: SAME byte length + SAME mtime (the pathological case the
+  // normal cache can't see — e.g. web FSA reporting a stale mtime).
+  const v2 = enc.encode('bbb'); // also 3 bytes
+  putFile(fs, 'f', v2, 1000);
+
+  // Normal lookup is fooled — returns the stale sha (this is the bug).
+  const stale = await hashFileAtUri(fs, 'f', cache);
+  assert.equal(stale.sha256, r1.sha256, 'normal lookup trusts (size,mtime) and returns stale');
+
+  // force re-reads and returns the fresh sha, and refreshes the cache.
+  fs.ops.length = 0;
+  const forced = await hashFileAtUri(fs, 'f', cache, { force: true });
+  assert.deepEqual(fs.ops, ['stat f', 'read f'], 'force always reads');
+  assert.equal(forced.sha256, await sha256Hex(v2));
+  assert.notEqual(forced.sha256, r1.sha256);
+
+  // Cache now holds the fresh sha for subsequent non-forced callers.
+  const after = await hashFileAtUri(fs, 'f', cache);
+  assert.equal(after.sha256, forced.sha256);
+});
+
 test('hashFileAtUri: throwing cache.record does not propagate', async () => {
   const fs = makeFakeFs();
   putFile(fs, 'u', enc.encode('x'), 1);
