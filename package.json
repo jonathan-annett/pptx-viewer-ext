@@ -133,6 +133,11 @@
     ],
     "commands": [
       {
+        "command": "folderSync.refreshFolderAvailability",
+        "title": "Folder Sync: Check Folder Availability",
+        "category": "Folder Sync"
+      },
+      {
         "command": "folderSync.showTopology",
         "title": "Folder Sync: Show Topology",
         "category": "Folder Sync"

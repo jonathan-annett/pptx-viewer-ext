@@ -45,6 +45,7 @@ import { createSearchEngine } from './search/searchEngine';
 import { openSearchIndexStore } from './search/indexStore';
 import { startSearchIndexer } from './search/indexer';
 import { registerPlaceholderDecorations } from './search/placeholderDecorations';
+import { registerFolderStateDecorations } from './sync/folderStateDecorations';
 import { openSearchPanel } from './search/searchPanel';
 import { registerResetState } from './resetState';
 import {
@@ -361,6 +362,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Explorer placeholder badges — independent of the search index (its own
   // crawler), so it runs even when the search IDB is unavailable.
   context.subscriptions.push(registerPlaceholderDecorations());
+
+  // Explorer workspace-folder availability badges (✓ / ⚠ / ?) — so an operator
+  // can see which connected folder is offline rather than inferring it from a
+  // stalled sync. Polls in the background; activation never blocks on it.
+  context.subscriptions.push(registerFolderStateDecorations());
 
   // M3 — auto-open the canonical manifest in operator mode. Fire-and-
   // forget: the helper checks operator-mode + canonical-manifest
