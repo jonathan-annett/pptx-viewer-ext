@@ -168,6 +168,10 @@ export function startSearchIndexer(
   let ignoreDirs: string[] = [];
   const isUnderIgnoredDir = (uriStr: string): boolean =>
     ignoreDirs.some((d) => uriStr.startsWith(d));
+  // Current placeholder sha set (mirror of what's pushed to the engine). Used
+  // by processUri's diagnostic so the Output channel shows how each zero-byte /
+  // placeholder file was classified (per-URI vs content-deduped).
+  let activePlaceholderShas: ReadonlySet<string> = getActivePlaceholderSetSync();
   let queued = false;
   let firstPassReady: Promise<void>;
   let resolveFirstPass: () => void = () => {};
@@ -436,6 +440,15 @@ export function startSearchIndexer(
         `(indexStore=${stats.indexStoreHits} parseCache=${stats.parseCacheHits} ` +
         `fresh=${stats.freshParses} errors=${stats.errors}) in ${elapsed}ms`,
     );
+    // Diagnostic: projections < uris means content-dedup is collapsing some
+    // files into shared hits. For placeholders that's avoided (per-URI keys);
+    // a large gap here when the user expected distinct files is the signal
+    // that those files are byte-identical and NOT registered as placeholders.
+    const engineStats = opts.engine.stats();
+    log(
+      `search-indexer: engine — projections=${engineStats.projections} ` +
+        `uris=${engineStats.uris} placeholderShas=${activePlaceholderShas.size}`,
+    );
     emitProgress({ phase: 'idle', done: total, total });
   }
 
@@ -477,6 +490,20 @@ export function startSearchIndexer(
       size: hashed.size,
       mtime: hashed.mtime,
     };
+
+    // Diagnostic: zero-byte and placeholder-sha files are the ones meant to be
+    // indexed per-URI (each keeps its own filename). Log how each was seen so
+    // the Output channel can show whether a "can't find by filename" file is
+    // (a) actually zero bytes, (b) classified as a placeholder, and therefore
+    // (c) keyed per-URI rather than content-deduped against its siblings.
+    const isPlaceholderSha = activePlaceholderShas.has(sha);
+    if (info.size === 0 || isPlaceholderSha) {
+      log(
+        `search-indexer: placeholder-candidate ${info.fileName} ` +
+          `size=${info.size} sha=${sha.slice(0, 12)}… placeholder=${isPlaceholderSha} ` +
+          `(per-URI=${isPlaceholderSha})`,
+      );
+    }
 
     // PDF fast path — no parse, no parseCache touch. Surface as a
     // filename-only projection so the search panel can find it by
@@ -630,11 +657,16 @@ export function startSearchIndexer(
   // Placeholder set: files whose content sha is in this set are indexed
   // per-URI (not content-deduped) so each keeps its own filename. Seed it
   // now, and re-walk when the registry changes (admin edits to the snapshot
-  // placeholder list) so affected files get re-keyed.
-  opts.engine.setPlaceholderShas(getActivePlaceholderSetSync());
+  // placeholder list) so affected files get re-keyed. Kept on `activePlaceholderShas`
+  // too so processUri can log how each file was classified (diagnostics).
+  opts.engine.setPlaceholderShas(activePlaceholderShas);
   const placeholderSub = onDidChangePlaceholderSet((set) => {
     if (disposed) return;
+    activePlaceholderShas = set;
     opts.engine.setPlaceholderShas(set);
+    log(
+      `search-indexer: placeholder set updated — ${set.size} sha(s); re-walking`,
+    );
     void runFullPass();
   });
 

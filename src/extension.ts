@@ -323,6 +323,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // + webview panel that calls `engine.search(query)`.
   try {
     const engine = createSearchEngine();
+    // Register placeholder shas BEFORE load() so the warm-load correctly skips
+    // seeding placeholder-sha projections (they're re-asserted per-URI by the
+    // indexer's first pass). Without this, load() seeds a stale bare-sha entry
+    // for the empty-file sha — harmless (the pass cleans it up) but it's the
+    // tested invariant, so do it in the right order.
+    engine.setPlaceholderShas(await getActivePlaceholderSet());
     const store = await openSearchIndexStore();
     if (store) {
       const warm = await store.getAll();
