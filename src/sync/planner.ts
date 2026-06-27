@@ -54,11 +54,26 @@ import {
 import { isPptxPath, validatePptxBytes, validatePptxBySha } from './validators';
 import { log } from '../log';
 
-// Reachability-probe budget for a destination. A live folder answers `stat`
-// in well under this; an unavailable web-FSA handle hangs and is treated as
-// unreachable (skipped) once it elapses. Bounds only the probe — the actual
-// walk of a reachable destination is never time-limited.
-const DEST_PROBE_TIMEOUT_MS = 4000;
+// Reachability-probe budget for a source/destination folder. A live folder
+// lists its top level in well under this; an unavailable web-FSA handle hangs
+// and is treated as unreachable (skipped) once it elapses. Bounds only the
+// probe — the actual walk of a reachable folder is never time-limited.
+const FOLDER_PROBE_TIMEOUT_MS = 4000;
+
+/**
+ * Throw if `folderUri` can't be reached within {@link FOLDER_PROBE_TIMEOUT_MS}.
+ * Uses `readDirectory` (a top-level listing) rather than `stat`: a dead FSA
+ * handle can still answer `stat` from VS Code's cached workspace-folder entry
+ * while the real read path hangs, so the listing is the honest reachability
+ * test. The listing is non-recursive, so it's cheap even for a huge folder.
+ */
+async function probeReachable(folderUri: vscode.Uri, label: string): Promise<void> {
+  await withTimeout(
+    Promise.resolve(vscode.workspace.fs.readDirectory(folderUri)),
+    FOLDER_PROBE_TIMEOUT_MS,
+    label,
+  );
+}
 
 export interface PlanForDestination {
   source: ResolvedSource;
@@ -201,6 +216,24 @@ async function planForSource(
   scope: Scope,
   placeholders: Set<string>,
 ): Promise<PlanForDestination[]> {
+  // Source reachability probe — same redundancy rationale as destinations, and
+  // it must come FIRST: loadConfigForSource + the source walk both read from the
+  // source folder, so an unavailable source (offline PC / revoked FSA) would
+  // otherwise hang the whole plan here. Skip it instead, surfacing each
+  // destination as "source unreachable" so the dry run still completes.
+  try {
+    await probeReachable(source.sourceFolderUri, `readdir source "${source.workspaceFolderName}"`);
+  } catch (err) {
+    log(`sync: source "${source.workspaceFolderName}" unreachable — skipping (${errMsg(err)})`);
+    return source.destinations.map((dest) => ({
+      source,
+      destination: dest,
+      items: [],
+      summary: summarisePlan([]),
+      skippedReason: `source '${source.workspaceFolderName}' is currently unreachable (${errMsg(err)})`,
+    }));
+  }
+
   // The yaml's include/exclude only ever apply to the source tree —
   // the destination walk uses built-ins plus the same user excludes so
   // we don't surface destination-only entries the user has chosen to
@@ -359,11 +392,7 @@ async function planForSource(
       }
 
       try {
-        await withTimeout(
-          Promise.resolve(vscode.workspace.fs.stat(dest.workspaceFolderUri)),
-          DEST_PROBE_TIMEOUT_MS,
-          `stat destination "${dest.name}"`,
-        );
+        await probeReachable(dest.workspaceFolderUri, `readdir destination "${dest.name}"`);
       } catch (err) {
         log(`sync: destination "${dest.name}" unreachable — skipping (${errMsg(err)})`);
         return {

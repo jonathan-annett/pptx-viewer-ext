@@ -51,6 +51,7 @@ import {
 import type { PlanForDestination } from './planner';
 import { buildDryRunPlan } from './planner';
 import { runSync, formatRunSummary } from './runSync';
+import { withTimeout, TimeoutError } from './timeout';
 import {
   countAccepted,
   handleDecisionMessage,
@@ -63,6 +64,10 @@ const VIEW_TYPE = 'folderSync.adminEditor';
 
 /** Debounce window for plan rebuilds after workspace/topology changes. */
 const PLAN_DEBOUNCE_MS = 500;
+// Per-folder stat budget in the view-model build. Keeps the editor's initial
+// render (and, when it's the restored tab, the refresh) from hanging on a
+// folder handle that's slow/unavailable right after a refresh.
+const ADMIN_STAT_TIMEOUT_MS = 4000;
 
 export class AdminEditorProvider implements vscode.CustomTextEditorProvider {
   static register(store: SnapshotStore, manager: SyncManager): vscode.Disposable {
@@ -628,10 +633,23 @@ async function buildViewModel(
         if (!row.needsStat) return;
         const probeUri = appendUriPath(rootUri, row.base.name.trim());
         try {
-          await vscode.workspace.fs.stat(probeUri);
+          // Bound the stat: this view-model build is awaited by the editor's
+          // resolveCustomTextEditor, so a hanging stat (e.g. a folder handle
+          // still being re-acquired right after a refresh) would hold up the
+          // whole editor — and, when it's the restored tab, the refresh itself.
+          await withTimeout(
+            Promise.resolve(vscode.workspace.fs.stat(probeUri)),
+            ADMIN_STAT_TIMEOUT_MS,
+            `stat ${probeUri.toString()}`,
+          );
           // Exists — leave canCreateSource false.
-        } catch {
-          row.base.canCreateSource = true;
+        } catch (err) {
+          // ENOENT → the folder doesn't exist → offer "Create source folder".
+          // A timeout means we couldn't determine it (folder unreachable):
+          // don't offer create, and crucially don't hang.
+          if (!(err instanceof TimeoutError)) {
+            row.base.canCreateSource = true;
+          }
         }
       }),
     );

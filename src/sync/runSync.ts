@@ -252,10 +252,13 @@ export async function runSync(
     // reachable destinations still get theirs (redundancy). The would-be ops
     // count as failed so the summary/toast reflects the incomplete sync.
     try {
+      // readDirectory (top-level listing), not stat: a dead FSA handle can
+      // still answer stat from VS Code's cached folder entry while the real
+      // read path hangs, so the listing is the honest reachability test.
       await withTimeout(
-        Promise.resolve(fs.stat(group.destWorkspaceFolderUri)),
+        Promise.resolve(vscode.workspace.fs.readDirectory(group.destWorkspaceFolderUri)),
         DEST_PROBE_TIMEOUT_MS,
-        `stat destination ${group.destWorkspaceFolderUri.toString()}`,
+        `readdir destination ${group.destWorkspaceFolderUri.toString()}`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
