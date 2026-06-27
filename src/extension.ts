@@ -356,7 +356,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } else {
       log('search-index: idb=unavailable (in-memory only)');
     }
-    const indexer = startSearchIndexer({ engine, store, manager });
+    const indexer = startSearchIndexer({ engine, store });
     context.subscriptions.push(indexer);
     if (store) {
       context.subscriptions.push({ dispose: () => store.close() });
@@ -368,7 +368,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // user doesn't see "search: open" wired to nothing.
     context.subscriptions.push(
       vscode.commands.registerCommand('pptxSearch.openPanel', () => {
-        openSearchPanel({ engine, indexer, manager, globalState: context.globalState });
+        openSearchPanel({ engine, indexer });
       }),
     );
   } catch (err) {

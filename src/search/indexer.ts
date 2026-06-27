@@ -41,8 +41,6 @@ import {
   type CachedParseResult,
   type ParseResultCache,
 } from '../sync/parseCache';
-import type { SyncManager } from '../sync/manager';
-import type { ResolvedTopology } from '../sync/topology';
 import {
   getActivePlaceholderSetSync,
   onDidChangePlaceholderSet,
@@ -61,10 +59,7 @@ import {
 } from './projection';
 import { tokenize } from './tokenize';
 import {
-  computeSearchScope,
-  isUnderFirstScopeFolder,
   isUnderScope,
-  urisLeavingScope,
   type SearchScope,
 } from './scope';
 import type { SearchEngine } from './searchEngine';
@@ -126,7 +121,6 @@ export interface StartSearchIndexerOptions {
   /** Optional — when absent, indexer runs in pure in-memory mode
    *  (still useful for tests and degraded environments). */
   store?: SearchIndexStore;
-  manager: SyncManager;
   /** Defaults to the global parse cache singleton; tests can inject. */
   parseCache?: ParseResultCache;
   /** Defaults to the global hash cache singleton. */
@@ -134,14 +128,14 @@ export interface StartSearchIndexerOptions {
 }
 
 /**
- * Start the indexer. Subscribes to the manager's `onDidChange` event
- * (which fires once immediately, so the initial scope is captured
- * synchronously), kicks off the first full pass in the background,
- * and registers a recursive pptx FileSystemWatcher.
+ * Start the indexer. Scope is the first workspace folder (folder[0]);
+ * `recomputeScope()` runs once synchronously to seed it and kick the first
+ * full pass, then re-runs on workspace-folder changes. Registers a recursive
+ * pptx/pdf FileSystemWatcher.
  *
  * Caller is responsible for adding the returned disposable to
  * `context.subscriptions`. The disposable tears down the watcher, the
- * manager subscription, and any in-flight pass's progress listeners.
+ * workspace-folder subscription, and any in-flight pass's progress listeners.
  */
 export function startSearchIndexer(
   opts: StartSearchIndexerOptions,
@@ -214,37 +208,23 @@ export function startSearchIndexer(
     resolveFirstPass();
   };
 
-  const updateScope = (topology: ResolvedTopology): void => {
-    const workspaceFolderUris = (vscode.workspace.workspaceFolders ?? []).map(
-      (f) => f.uri.toString(),
-    );
-    // Destination workspace-folder URIs: only those that resolved to a
-    // currently-open folder count. Unresolved destinations (config refers
-    // to a folder not in the workspace) don't exclude anything because
-    // they aren't part of `workspaceFolderUris` to begin with.
-    const destUris: string[] = [];
-    for (const src of topology.sources) {
-      for (const dest of src.destinations) {
-        if (dest.workspaceFolderUri) destUris.push(dest.workspaceFolderUri.toString());
-      }
-    }
-    const next = computeSearchScope({
-      workspaceFolderUris,
-      destinationWorkspaceFolderUris: destUris,
-    });
+  // Scope = the first workspace folder only (the slim build indexes the main
+  // workspace folder, not destinations/multiple roots). Recomputed when the
+  // workspace folder set changes (folder[0] added/removed/replaced).
+  const recomputeScope = (): void => {
+    const f0 = vscode.workspace.workspaceFolders?.[0];
+    const next: SearchScope = { folderUris: f0 ? [f0.uri.toString()] : [] };
     const prev = scope;
     scope = next;
 
-    // Evict any tracked URIs that just fell out of scope (e.g. a workspace
-    // folder was promoted to destination). The IDB record stays — the same
-    // sha may still be valid in another scope or later if the user reverts
-    // the topology — only the engine's URI mapping is dropped here.
-    const evictions = urisLeavingScope(next, opts.engine.getAllUris());
+    // Evict any tracked URIs no longer under scope (e.g. folder[0] changed).
+    // The IDB record stays — only the engine's URI mapping is dropped here.
+    const evictions = opts.engine.getAllUris().filter((u) => !isUnderScope(next, u));
     for (const uri of evictions) opts.engine.removeUri(uri);
     if (evictions.length > 0) {
       log(
         `search-indexer: scope changed — evicted ${evictions.length} URI(s) ` +
-          `now outside any source folder`,
+          `now outside the workspace folder`,
       );
     }
 
@@ -255,8 +235,7 @@ export function startSearchIndexer(
       log(
         `search-indexer: scope folders [${next.folderUris.join(', ') || '(none)'}]`,
       );
-      // Topology may have added new source folders — kick a walk so their
-      // existing files land in the index. Coalesced with any in-flight pass.
+      // Kick a walk so the (new) folder's existing files land in the index.
       void runFullPass();
     }
   };
@@ -344,16 +323,8 @@ export function startSearchIndexer(
     const t0 = performance.now();
 
     // Use vscode.workspace.findFiles with a RelativePattern per folder so
-    // the search is scoped exactly to the folders we want (not every
-    // workspace folder). Per-folder calls also let us avoid leaking
-    // results from destination folders.
-    //
-    // First-folder rule: the canonical workspace folder (folders[0]) is
-    // pptx-only. PDFs in the canonical folder can't be valid update
-    // sources (their target would need to be a PDF, which is out of
-    // scope) and they can't be valid targets (the update flow only
-    // writes PPTX), so we don't index them. Every other in-scope folder
-    // walks both extensions.
+    // the search is scoped exactly to the in-scope folder. Both pptx and pdf
+    // are indexed (the slim find surface opens either in the viewer).
     let allUris: vscode.Uri[] = [];
     for (let i = 0; i < folders.length; i++) {
       if (disposed) return;
@@ -363,7 +334,7 @@ export function startSearchIndexer(
         (f) => f.uri.toString() === folderUriStr,
       );
       if (!folder) continue;
-      const glob = i === 0 ? '**/*.pptx' : '**/*.{pptx,pdf}';
+      const glob = '**/*.{pptx,pdf}';
       try {
         const found = await vscode.workspace.findFiles(
           new vscode.RelativePattern(folder, glob),
@@ -646,16 +617,16 @@ export function startSearchIndexer(
     }
   }
 
-  // ───── activation: subscribe to topology + start first pass ─────────────
+  // ───── activation: seed scope + start first pass ────────────────────────
   //
-  // `manager.onDidChange` fires the listener once immediately with the
-  // current topology, so `updateScope` runs synchronously before we register
-  // the watcher. The first full pass kicks off as a result of that initial
-  // updateScope call (scope.folderUris becomes non-empty → runFullPass).
+  // recomputeScope() runs synchronously here to capture the initial scope
+  // (folder[0]) before we register the watcher; it kicks the first full pass
+  // when the scope becomes non-empty. It re-runs on workspace-folder changes.
 
-  const managerSub = opts.manager.onDidChange((topology) => {
+  recomputeScope();
+  const foldersSub = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     if (disposed) return;
-    updateScope(topology);
+    recomputeScope();
   });
 
   // Placeholder set: files whose content sha is in this set are indexed
@@ -705,11 +676,6 @@ export function startSearchIndexer(
     // (ignoreDirs is refreshed each full pass and whenever a marker is added
     // or removed — see the .search-ignore watcher below.)
     if (isUnderIgnoredDir(uriStr)) return false;
-    // First-folder rule: drop PDF events under the canonical folder.
-    // Mirrors the per-folder glob choice in doFullPass.
-    if (isPdfBasename(basenameOf(uriStr)) && isUnderFirstScopeFolder(scope, uriStr)) {
-      return false;
-    }
     return true;
   };
   const onCreate = watcher.onDidCreate((uri) => {
@@ -810,7 +776,7 @@ export function startSearchIndexer(
     dispose() {
       if (disposed) return;
       disposed = true;
-      managerSub.dispose();
+      foldersSub.dispose();
       placeholderSub.dispose();
       onCreate.dispose();
       onChange.dispose();
